@@ -231,15 +231,17 @@ if [[ " $PHASES " == *" duplex "* ]]; then
     echo "== duplex: TX+RX on the transmitter chip, capture stamp via the control escape =="
     start_witness duplex
     off=$(mark duplex)
-    # duplex spawns its TX thread before the chip is up and sends whatever
-    # stdin offers; a record pushed during bring-up wedges the TXDMA. The
-    # feeder idles through bring-up, as tests/arq_e2e_delivery.sh's does.
-    DUPLEX_LEAD_S="${DUPLEX_LEAD_S:-12}"
+    # duplex brings the chip up before its TX thread exists and says so with
+    # a stream.ready event; records written earlier wait in the pipe. The
+    # feeder starts at once (DUPLEX_LEAD_S=0, the default) — that this is
+    # safe is part of what the phase proves; a positive lead only delays it.
+    DUPLEX_LEAD_S="${DUPLEX_LEAD_S:-0}"
     ( sleep "$DUPLEX_LEAD_S"; "${UVRUN[@]}" tools/precoder/stream_tx.py --input "$OUT/src.bin" --repeat 2000 \
         --pace-us "$PACE_US" --capture-ts 2>"$OUT/prod_duplex.log" ) |
     sudo env DEVOURER_VID="$TX_VID" DEVOURER_PID="$TX_PID" DEVOURER_CHANNEL="$CH" \
-        DEVOURER_STREAM_TIMING="$MARKER_EVERY" DEVOURER_LOG_LEVEL=info DEVOURER_TX_WITH_RX=thread \
-        timeout $((SECS + DUPLEX_LEAD_S)) ./build/duplex --interval-ms 0 >"$OUT/tx_duplex.out" 2>"$OUT/tx_duplex.log"
+        DEVOURER_STREAM_TIMING="$MARKER_EVERY" DEVOURER_LOG_LEVEL=info \
+        timeout $((SECS + DUPLEX_LEAD_S + 10)) ./build/duplex --interval-ms 0 >"$OUT/tx_duplex.out" 2>"$OUT/tx_duplex.log"
+    grep -q -F '"ev":"stream.ready"' "$OUT/tx_duplex.out" || fail "duplex: no stream.ready event"
     sudo pkill -INT -x duplex 2>/dev/null || true; sleep 1
     slice duplex "$off" duplex
     stop_witness

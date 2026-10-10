@@ -136,12 +136,13 @@ The adversarial readings, in the same breath:
   number (that run's submit→air median was 206–235 µs, with a 10 ms p99 from
   frames queued behind the stalls). The harness runs that part at a 15 ms
   pace (`PACE_US`), where it reads like the 8812CU.
-- **A record pushed during bring-up wedges the duplex TXDMA.** The duplex
-  demo spawns its TX thread before the chip is up; a feeder that writes at
-  once gets every send timed out for the whole run, marker or no marker. The
-  harness's feeder idles 12 s as the ARQ harness's does, and the timing fit
-  arms itself on the first record rather than at thread start, so no
-  register read or beacon arm lands inside a bring-up on any demo.
+- **A record pushed into a chip still coming up wedges the TXDMA.** A duplex
+  whose TX thread ran ahead of its bring-up got every send timed out for the
+  whole run when fed at once, marker or no marker. duplex now brings the chip
+  up synchronously before its TX thread exists and emits `stream.ready`; the
+  harness feeds it immediately and passes. The timing fit still arms on the
+  first record rather than at thread start, so no register read or beacon arm
+  lands inside a bring-up on any demo.
 - **The first seconds are the pipe, not the link.** The producer fills the
   stdin pipe while the chip is brought up, so the first ~1000 records arrive
   with stamps seconds old. The analyzer drops a 4 s warm-up for that reason.

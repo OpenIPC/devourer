@@ -1,11 +1,15 @@
 // duplex — single-chip full-duplex for the precoder stream link.
 //
-// Combines rxdemo's RX loop (Init → infinite_read → packet callback)
-// with streamtx's stdin-driven TX (read length-prefixed PSDU body →
-// send_packet) on ONE claimed interface. RX runs in the main thread; TX in a
-// worker thread reads stdin and calls send_packet concurrently. libusb is
-// thread-safe; the two bulk endpoints (_bulk_in_ep, _bulk_out_ep) don't share
-// transfer state.
+// Combines rxdemo's RX loop with streamtx's stdin-driven TX (read
+// length-prefixed PSDU body → send_packet) on ONE claimed interface, in the
+// order the IRadio contract gives for TX+RX on one handle: InitWrite (the
+// synchronous bring-up) first, then the TX thread and the RX loop
+// (StartRxLoop, main thread). Nothing touches the chip before the bring-up
+// has returned — a record pushed into a chip still coming up wedged the TXDMA
+// for the rest of the session (every send timed out). `stream.ready` on
+// stdout marks the instant the link accepts records, so a feeder waits on
+// that, not on a guessed lead time. libusb is thread-safe; the two bulk
+// endpoints (_bulk_in_ep, _bulk_out_ep) don't share transfer state.
 //
 // Used by tools/precoder/tun_p2p.py in --mode=duplex with a single PID per
 // peer. Replaces the streamtx + rxdemo pair (one adapter per
@@ -14,8 +18,9 @@
 //
 // On-wire wire format on stdin is identical to streamtx:
 //     <u32_le length><length bytes of descrambled PSDU body>
-// EOF on stdin closes the TX side cleanly; RX keeps running until the process
-// terminates.
+// EOF on stdin closes the TX side and asks the RX loop to stop (StopRxLoop),
+// so a finite scripted stream ends the process cleanly through the ordinary
+// exit path; a live peer keeps stdin open for as long as it wants RX.
 //
 // RX emission on stdout mirrors examples/rx/main.cpp's DEVOURER_STREAM_OUT path —
 // one `rx.frame` JSONL event for every frame matching the canonical SA.
@@ -333,8 +338,10 @@ static void tx_thread(TxArgs args) {
     const auto r = stream_stdin::read_item(stdin, psdu, ctl, args.max_psdu, &len);
     if (g_devourer_should_stop) break;   // signal: the RX loop is ending too
     if (r == stream_stdin::RecordResult::Eof || r == stream_stdin::RecordResult::Short) {
-      // Clean EOF or short read — TX side done. RX keeps running.
+      // Clean EOF or short read — TX side done; the RX loop is asked to
+      // return so the process ends through its ordinary exit path.
       devourer::Ev(*g_ev, "stream.eof").f("tx_count", tx_count);
+      args.rtl->StopRxLoop();
       break;
     }
     if (r == stream_stdin::RecordResult::Control) {
@@ -507,8 +514,13 @@ int main(int argc, char **argv) {
   session.adopt_lock(usb_lock);
 
   WiFiDriver wifi_driver{logger};
-  auto owned_device = wifi_driver.CreateRadio(handle, nullptr, usb_lock,
-                                                  devourer_config_from_env());
+  /* TX+RX on one handle: the RX path must be part of the TX bring-up on
+   * Jaguar3 (DeviceConfig::Rx::enable_with_tx, decided before InitWrite);
+   * forced here rather than asked of the environment, since this binary has
+   * no other mode. */
+  auto cfg = devourer_config_from_env();
+  cfg.rx.enable_with_tx = true;
+  auto owned_device = wifi_driver.CreateRadio(handle, nullptr, usb_lock, cfg);
   /* The session owns the device from here: it is what guarantees the device
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
@@ -527,22 +539,32 @@ int main(int argc, char **argv) {
 
   std::atomic<bool> should_stop{false};
   /* SIGINT/SIGTERM: every generation's RX loop returns on the shared flag, so
-   * Init() comes back, the TX thread's blocking read returns short (no
+   * StartRxLoop comes back, the TX thread's blocking read returns short (no
    * SA_RESTART) and sees the flag, and the ordinary exit path runs — the
    * device stopped, a Jaguar1 timing beacon disarmed. */
   install_devourer_signal_handlers();
 
-  // Spawn TX thread first; it'll block on stdin until our peer pushes a
-  // length-prefixed PSDU. Then drop into Init() (the RX loop) in the main
-  // thread.
+  /* Bring the chip up, synchronously, before anything may send: InitWrite is
+   * the TX bring-up with the RX path enabled (cfg above); StartRxLoop below
+   * then runs the RX worker on the already-up chip. Records that arrive on
+   * stdin meanwhile simply wait in the pipe — the TX thread does not exist
+   * yet. */
+  rtlDevice->InitWrite(SelectedChannel{.Channel = static_cast<uint8_t>(channel),
+                                       .ChannelOffset = 0,
+                                       .ChannelWidth = CHANNEL_WIDTH_20});
+  if (g_devourer_should_stop) { session.close(); return 0; }
+  /* The feeder's cue: from here a record on stdin is sent, not lost. */
+  devourer::Ev(*g_ev, "stream.ready").f("channel", channel);
+  logger->info("duplex up on ch {} — accepting records; RX loop starting",
+               channel);
+
   TxArgs txa{rtlDevice, interval_ms, max_psdu, &should_stop, logger, channel};
   std::thread tx{tx_thread, std::move(txa)};
 
   /* Receipt emitter (DEVOURER_RX_RECEIPT_MS): every tick, encode the current
    * window and inject it as an 802.11 data frame at a fixed robust 6M —
    * receipts are control-plane, not part of the adaptive-rate stream. The
-   * first ticks fire during bring-up and fail harmlessly (send rc=false);
-   * the cadence, not any one frame, is the contract. */
+   * cadence, not any one frame, is the contract. */
   std::thread receipt;
   if (g_receipt_ms > 0 && g_seq_sa_set && g_receipt_sa_ok) {
     receipt = std::thread([rtlDevice, &should_stop]() {
@@ -591,18 +613,10 @@ int main(int argc, char **argv) {
     });
   }
 
-  logger->info("duplex entering RX loop on ch {} — TX thread ready",
-               channel);
-  // RX loop. Same Init() path as rxdemo; SelectedChannel sets up the
-  // shared monitor-mode bring-up (StartWithMonitorMode + SetMonitorChannel).
-  rtlDevice->Init(packet_processor,
-                  SelectedChannel{.Channel = static_cast<uint8_t>(channel),
-                                  .ChannelOffset = 0,
-                                  .ChannelWidth = CHANNEL_WIDTH_20});
+  // The RX worker, blocking, on the chip InitWrite brought up. Returns on
+  // SIGINT/SIGTERM (every generation's loop honours the shared flag).
+  rtlDevice->StartRxLoop(packet_processor);
 
-  // Init() returns only on should_stop (set by signal handler in the future
-  // — none wired here, so Ctrl-C ends the process abruptly and the OS reaps
-  // the TX thread).
   should_stop = true;
   if (receipt.joinable()) receipt.join();
   if (tx.joinable()) tx.join();

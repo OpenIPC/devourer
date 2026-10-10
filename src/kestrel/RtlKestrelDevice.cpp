@@ -979,7 +979,9 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   /* The AX beacon engine (StartBeacon) airs a HW-timed beacon with the live TSF
    * inserted by the MAC at TX — on-air validated on the 8852BU. */
   c.hw_beacon_txtsf = true;
-  c.hw_injected_mgmt_txtsf = true; /* bench 8832CU: injected 0x50/0x80 stamped, 35 µs spread */
+  /* Measured on the 8852C die only (an 8832CU: injected 0x50/0x80 stamped,
+   * 35 µs spread); the 8852B is unmeasured and stays false. */
+  c.hw_injected_mgmt_txtsf = _variant == kestrel::ChipVariant::C8852C;
   /* WriteTsf: the bare port-0 TSF pair is writable over PCIe (bench, RTL8852CE:
    * a read-add-write moved TSF vs FREERUN by the requested step to within the
    * read latency). USB is unmeasured, so it stays refused there. */

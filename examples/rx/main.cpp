@@ -662,8 +662,24 @@ static const uint8_t kTxSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
 static tsffit::Recon g_rt_recon;
 static tsffit::LinFit g_rt_fit;
 static bool g_rt_presp_stamped = false;
+/* Which frames are the clock, as the transmitter's marker declares: its
+ * probe responses when it says they are stamped, a beacon only when it says
+ * one carries the clock. Before any marker both are taken. A beacon with the
+ * canonical SA is not proof of anything by itself — another devourer
+ * transmitter's hardware beacon can outlive the process that armed it. */
+static bool g_rt_marker_seen = false, g_rt_beacon_ok = true;
 static uint64_t g_rt_pairs = 0, g_rt_resets = 0;
 static double g_rt_resid_us = 0;
+/* The receiver's side of the fit is its hardware RX stamp; a part that does
+ * not fill tsfl (AdapterCaps::hw_rx_timestamp false — the MT7612U) has no
+ * local clock and must not fit, let alone report a latency. Set from the
+ * caps in main before the RX loop starts. */
+static bool g_rt_hw_tsfl = false;
+/* The previous pair, so a TSF jump is caught from the second pair on, not
+ * only once the fit is ready: with Δremote ≠ Δlocal by more than the
+ * discontinuity bound the transmitter's clock restarted between them. */
+static bool g_rt_have_last = false;
+static int64_t g_rt_last_remote = 0, g_rt_last_local = 0;
 /* A transmitter that restarts resets its TSF (InitWrite zeroes it): the next
  * egress pair lands seconds off the line. Anything past this is a new clock,
  * not jitter (a marker's own spread is tens of µs), so the fit starts over. */
@@ -1142,13 +1158,15 @@ static void packetProcessor(const Packet &packet) {
      * and its periodic marker as an event of its own. */
     int64_t rt_local = 0;
     if (sa_canon && !corrupted && packet.Data.size() >= 24) {
-      rt_local = g_rt_recon(packet.RxAtrib.tsfl);
+      if (g_rt_hw_tsfl) rt_local = g_rt_recon(packet.RxAtrib.tsfl);
       const uint8_t fc0 = packet.Data[0];
       devourer::stream_timing::TimingMarker mk;
       if (fc0 == 0x50 &&
           devourer::stream_timing::TimingMarker::decode(
               packet.Data.data() + 24, packet.Data.size() - 24, mk)) {
         g_rt_presp_stamped = mk.flags & devourer::stream_timing::kMkPrespStamped;
+        g_rt_beacon_ok = mk.flags & devourer::stream_timing::kMkBeaconRunning;
+        g_rt_marker_seen = true;
         devourer::Ev(*g_ev, "rx.timing")
             .f("frames", mk.frames)
             .f("tq_p50_us", mk.t_queue_p50_10 * 10)
@@ -1171,19 +1189,32 @@ static void packetProcessor(const Packet &packet) {
             .f("rx_resid_us", g_rt_resid_us)
             .f("rx_resets", (unsigned long long)g_rt_resets);
       }
-      if (fc0 == 0x80 || (fc0 == 0x50 && g_rt_presp_stamped)) {
+      const bool clock_frame =
+          fc0 == 0x80 ? (g_rt_beacon_ok || !g_rt_marker_seen)
+                      : (fc0 == 0x50 && g_rt_presp_stamped);
+      if (g_rt_hw_tsfl && clock_frame) {
         if (auto tx = packet.TxEgressTsf()) {
+          const int64_t remote = static_cast<int64_t>(*tx);
+          bool jump = false;
           if (g_rt_fit.ready()) {
-            g_rt_resid_us = static_cast<double>(*tx) -
+            g_rt_resid_us = static_cast<double>(remote) -
                             g_rt_fit.at(static_cast<double>(rt_local));
-            if (std::fabs(g_rt_resid_us) > kRtDiscontinuityUs) {
-              g_rt_fit = tsffit::LinFit{};
-              g_rt_pairs = 0;
-              ++g_rt_resets;
-            }
+            jump = std::fabs(g_rt_resid_us) > kRtDiscontinuityUs;
+          } else if (g_rt_have_last) {
+            const double d = static_cast<double>((remote - g_rt_last_remote) -
+                                                 (rt_local - g_rt_last_local));
+            jump = std::fabs(d) > kRtDiscontinuityUs;
           }
-          g_rt_fit.add(static_cast<double>(rt_local), static_cast<double>(*tx));
+          if (jump) {
+            g_rt_fit = tsffit::LinFit{};
+            g_rt_pairs = 0;
+            ++g_rt_resets;
+          }
+          g_rt_fit.add(static_cast<double>(rt_local), static_cast<double>(remote));
           ++g_rt_pairs;
+          g_rt_last_remote = remote;
+          g_rt_last_local = rt_local;
+          g_rt_have_last = true;
         }
       }
     }
@@ -1353,8 +1384,9 @@ static void packetProcessor(const Packet &packet) {
        * capture->send (cap=1: from the producer's stamp, else from the stdin
        * read), and — once this receiver has the transmitter's clock —
        * lat_us = submit->arrival one-way, c2a_us = capture->arrival. */
-      ev.hex("a3", packet.Data.data() + 16, 6);
-      {
+      ev.f("fc0", packet.Data[0]);
+      if (packet.Data.size() >= 24) {
+        ev.hex("a3", packet.Data.data() + 16, 6);
         devourer::stream_timing::FrameTiming ft;
         if (devourer::stream_timing::FrameTiming::decode(packet.Data.data() + 16, ft)) {
           ev.f("tel", 1)
@@ -1362,7 +1394,7 @@ static void packetProcessor(const Packet &packet) {
               .f("c2s_us", ft.c2s10 * 10)
               .f("cap", ft.has_capture ? 1 : 0);
           devourer::stream_timing::FrameLatency fl;
-          if (sa_canon && !corrupted && g_rt_fit.ready() &&
+          if (g_rt_hw_tsfl && sa_canon && !corrupted && g_rt_fit.ready() &&
               devourer::stream_timing::latency(
                   ft, static_cast<int64_t>(g_rt_fit.at(static_cast<double>(rt_local))), fl)) {
             ev.f("lat_us", (long long)fl.submit_to_air_us);
@@ -1615,6 +1647,9 @@ int main(int argc, char **argv) {
    * (and its in-flight TX) dies before libusb does. */
   session.adopt_device(std::move(owned_device));
   IRadio *const rtlDevice = session.device();
+  /* The stream-timing clock fit needs this receiver's hardware RX stamp; set
+   * once here, ahead of every RX-loop entry point below. */
+  g_rt_hw_tsfl = rtlDevice->GetAdapterCaps().hw_rx_timestamp;
   devourer::Ev(*g_ev, "init.timing")
       .f("stage", "demo.create_device")
       .f("ms", ms_since_start());

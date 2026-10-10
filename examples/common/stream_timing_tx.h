@@ -80,8 +80,8 @@ class StreamTimingTx {
     }
     _fit = std::make_unique<HostTsfFit>(_dev);
     _fit->start();
-    _log.info("stream timing: marker every {} frames, fit {}", _marker_every,
-              _fit->unsupported() ? "unsupported" : "running");
+    _log.info("stream timing: marker every {} frames; host<->TSF fit started "
+              "(one ReadTsf per 100 ms)", _marker_every);
   }
   void stop() {
     if (_beacon) {
@@ -119,8 +119,12 @@ class StreamTimingTx {
     }
     t.encode(addr3);
   }
-  // Right after send_packet returned.
-  void sent() {
+  // Right after send_packet returned (`ok` = its result). No marker is aired
+  // before the first data frame went out: the duplex demo's TX thread can run
+  // ahead of its chip's bring-up, and the marker must not be the frame that
+  // finds out.
+  void sent(bool ok = true) {
+    if (ok) _data_sent_ok = true;
     const uint64_t t1 = now_ns();
     const uint64_t tq = _t0 > _read_ns ? (_t0 - _read_ns) / 1000 : 0;
     const uint64_t tw = (t1 - _t0) / 1000;
@@ -132,10 +136,16 @@ class StreamTimingTx {
   // Before each data frame: air the marker when due. `radiotap` is the stream
   // radiotap header. Returns true when a marker was sent.
   bool maybe_marker(const std::vector<uint8_t> &radiotap) {
-    if (_marker_every == 0 || (_frames % static_cast<uint64_t>(_marker_every)) != 0 ||
+    if (_marker_every == 0 || !_data_sent_ok ||
+        (_frames % static_cast<uint64_t>(_marker_every)) != 0 ||
         _frames == _last_marker_frame)
       return false;
     _last_marker_frame = _frames;
+    if (_fit && _fit->unsupported() && !_warned_unsupported) {
+      _warned_unsupported = true;
+      _log.warn("stream timing: ReadTsf returns 0 on this part — frames carry "
+                "stage durations only, no TSF (has_tsf=0)");
+    }
     TimingMarker m;
     if (_presp_stamped) m.flags |= devourer::stream_timing::kMkPrespStamped;
     if (_beacon) m.flags |= devourer::stream_timing::kMkBeaconRunning;
@@ -170,6 +180,7 @@ class StreamTimingTx {
         .f("fit_n", m.fit_n)
         .f("fit_resid_us", _fit ? _fit->last_resid_us() : 0.0)
         .f("fit_resets", _fit ? _fit->resets() : 0)
+        .f("fit_unsupported", _fit && _fit->unsupported() ? 1 : 0)
         .f("presp_stamped", _presp_stamped ? 1 : 0)
         .f("beacon", _beacon ? 1 : 0)
         .f("tx_async", _tx_async ? 1 : 0);
@@ -201,7 +212,7 @@ class StreamTimingTx {
   uint8_t _sa[6];
   uint8_t _channel = 0;
   long _marker_every = 0;
-  bool _started = false;
+  bool _started = false, _data_sent_ok = false, _warned_unsupported = false;
   bool _tx_async = false, _presp_stamped = false, _beacon = false;
   std::unique_ptr<HostTsfFit> _fit;
   devourer::stream_timing::TimingWindow _window;

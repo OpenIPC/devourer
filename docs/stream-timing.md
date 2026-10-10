@@ -94,7 +94,7 @@ repeated, so a later difference has something to be judged against.
 |---|---|---|---|---|---|---|---|
 | Jaguar3 8812CU, ch6 | 5 | 98–146 | 3–16 | 148–172 | 30 | 0 | < 1 µs |
 | Kestrel 8832CU, ch6 | 2 | 90 | 0 | 126 | 30 | 0 | < 1 µs |
-| Jaguar1 8821AU, ch6 (beacon clock) | 3 | 358–434 | 34 | 436 | 30–40 | 2 | < 1 µs |
+| Jaguar1 8821AU, ch6 (beacon clock) | 5 | 358–1337 | 34 (first three) | 436–1373 | 30–40 | 2–19 | < 1 µs |
 | Jaguar3 8812EU, ch36, producer at 15 ms | 2 | 109–122 | 6 | 150 | 30 | 0 | < 1 µs |
 | Jaguar3 8812CU, `svctx` (no producer stamp) | 1 | 155 | — | — | — | 0 | < 1 µs |
 | Jaguar3 8812CU, `duplex` (TX+RX on one chip) | 1 | 124 | — | 150 | 30 | 0 | < 1 µs |
@@ -115,9 +115,18 @@ The checks every cell passes or fails on:
 The adversarial readings, in the same breath:
 
 - **The depth field is honest about the transport.** Jaguar1's asynchronous
-  bulk-OUT shows a backlog of 2 and a 400 µs one-way figure where the
-  synchronous families show 0 and ~100 µs. That is the transport's shape, not
-  a defect the telemetry found.
+  bulk-OUT shows a backlog of 2 to 19 URBs and a 400 µs to 1.3 ms one-way
+  figure, run to run, where the synchronous families show 0 and ~100 µs. That
+  is the transport's shape (the async path blocks only at 256 in flight), not
+  a defect the telemetry found — and the reason the field exists.
+- **A hardware beacon outlives the process that armed it.** On Jaguar1 the
+  timing clock rides `StartBeacon`, and a transmitter killed by SIGTERM left
+  its beacon airing at 100 TU with the canonical SA; the next transmitter's
+  witness then saw two clock sources and its fit reset on every pair. The TX
+  demos now end on SIGINT/SIGTERM through their ordinary exit path (beacon
+  disarmed, device stopped — verified: zero canonical-SA beacons on the air
+  after a timeout-ended run), and the receiver takes beacon pairs only when
+  the live marker says a beacon carries the clock.
 - **A producer that outruns the chip pins capture→send at its clip.** The
   8812EU on 5 GHz stalls its synchronous send for the full 20 ms bulk-OUT
   timeout now and then (the window's send-time maximum reads 20.99 ms, the
@@ -141,9 +150,13 @@ The adversarial readings, in the same breath:
 
 ## Reading it
 
-`rxdemo` with `DEVOURER_STREAM_OUT=1`: every `rx.frame` carries `a3` and,
-when it decodes, `tel`, `depth`, `c2s_us`, `cap`, and — once the receiver has
-the transmitter's clock — `lat_us` and `c2a_us`. Each marker is an `rx.timing`
+`rxdemo` with `DEVOURER_STREAM_OUT=1`: every `rx.frame` carries `fc0` (so a
+consumer can keep the marker and a Jaguar1 beacon out of its video
+accounting: only `0x40` frames carry the stream envelope) and `a3`, and when
+addr3 decodes, `tel`, `depth`, `c2s_us`, `cap`, and — once the receiver has
+the transmitter's clock — `lat_us` and `c2a_us`. A receiver without a
+hardware RX stamp (`hw_rx_timestamp` false, the MT7612U) decodes the field
+and the marker but never fits a clock or reports a latency. Each marker is an `rx.timing`
 event with the transmitter's window and this receiver's fit state; the
 transmitter logs the same window as `stream.timing`. Schema: `docs/logging.md`.
 `tests/stream_timing_analyze.py` turns one capture into a summary line and the

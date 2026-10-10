@@ -266,8 +266,10 @@ inline void append_beacon_mpdu(std::vector<uint8_t> &out, const uint8_t sa[6], u
 
 /* ---- TX-side window accumulator -------------------------------------- */
 
-/* What a TX demo feeds per frame and drains into a marker. Samples are kept
- * (bounded) for the p50; counts and maxima are exact for the whole window. */
+/* What a TX demo feeds per frame and drains into a marker. Counts and maxima
+ * are exact for the whole window; the p50 comes from a bounded uniform
+ * reservoir (Algorithm R over the window's samples), so a window longer than
+ * the reservoir is still represented end to end. */
 class TimingWindow {
  public:
   static constexpr size_t kMaxSamples = 8192;
@@ -277,9 +279,16 @@ class TimingWindow {
     ++_frames;
     if (captured) ++_captured;
     if (depth > _depth_max) _depth_max = depth;
-    push(_q, t_queue_us, _q_max);
-    push(_w, t_write_us, _w_max);
-    push(_c, c2s_us, _c_max);
+    /* One slot decision per frame for all three series: the reservoir index
+     * is uniform over [0, frames) (xorshift64*, seeded per window). */
+    size_t slot = kMaxSamples;  /* "append" while the reservoir fills */
+    if (_frames > kMaxSamples) {
+      _rng ^= _rng >> 12; _rng ^= _rng << 25; _rng ^= _rng >> 27;
+      slot = static_cast<size_t>((_rng * 0x2545F4914F6CDD1DULL) % _frames);
+    }
+    push(_q, t_queue_us, _q_max, slot);
+    push(_w, t_write_us, _w_max, slot);
+    push(_c, c2s_us, _c_max, slot);
   }
   uint32_t frames() const { return _frames; }
 
@@ -297,9 +306,10 @@ class TimingWindow {
   }
 
  private:
-  static void push(std::vector<uint64_t> &v, uint64_t x, uint64_t &mx) {
+  static void push(std::vector<uint64_t> &v, uint64_t x, uint64_t &mx, size_t slot) {
     if (x > mx) mx = x;
     if (v.size() < kMaxSamples) v.push_back(x);
+    else if (slot < kMaxSamples) v[slot] = x;
   }
   static uint64_t p50(std::vector<uint64_t> &v) {
     if (v.empty()) return 0;
@@ -309,6 +319,7 @@ class TimingWindow {
   }
   uint32_t _frames = 0, _captured = 0;
   unsigned _depth_max = 0;
+  uint64_t _rng = 0x9E3779B97F4A7C15ULL;
   std::vector<uint64_t> _q, _w, _c;
   uint64_t _q_max = 0, _w_max = 0, _c_max = 0;
 };

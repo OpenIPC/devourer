@@ -79,6 +79,7 @@
 #include "WiFiDriver.h"
 #include "env_config.h"
 #include "logger.h"
+#include "SignalStop.h"
 #include "stream_stdin.h"
 #include "stream_timing_tx.h"
 
@@ -113,6 +114,12 @@
 int main(int argc, char **argv) {
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger); /* DEVOURER_LOG_LEVEL / DEVOURER_EVENTS / ... */
+  /* SIGINT/SIGTERM end the send loop through the ordinary exit path, so the
+   * device is stopped (and a hardware beacon armed as the Jaguar1 timing
+   * clock is disarmed) instead of left airing by a killed process. The
+   * handler is installed without SA_RESTART, so the blocking stdin read
+   * returns short and the loop sees the flag. */
+  install_devourer_signal_handlers();
   /* Events ride stderr here (overriding the stdout default): stdout is left
    * clean for downstream callers that may chain this binary. */
   logger->events().configure(stderr);
@@ -377,6 +384,7 @@ int main(int argc, char **argv) {
     uint32_t len = 0;
     {
       const auto r = stream_stdin::read_item(stdin, psdu, ctl, max_psdu, &len);
+      if (g_devourer_should_stop) break;                // signal: clean stop
       if (r == stream_stdin::RecordResult::Eof) break;  // clean stdin close
       if (r == stream_stdin::RecordResult::Control) {
         /* The stdin control escape (stream_stdin.h). This demo takes the
@@ -491,7 +499,7 @@ int main(int argc, char **argv) {
     /* addr3 is the per-frame telemetry field (the body is untouched). */
     timing.stamp(tx_buf.data() + addr3_off, read_ns, capture_ns, has_capture);
     bool ok = rtlDevice->send_packet(tx_buf.data(), tx_buf.size());
-    timing.sent();
+    timing.sent(ok);
     ++tx_count;
     // TX progress marker (event stream rides stderr in this demo, keeping
     // stdout clean for downstream callers that may chain this binary).

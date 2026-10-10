@@ -130,6 +130,16 @@ int main() {
     CHECK(m.t_write_p50_10 == 100 && m.c2s_max_10 == 2000, "window write/c2s");
     w.drain_into(m);
     CHECK(m.frames == 0 && m.t_queue_max_10 == 0, "window reset after drain");
+    // A window longer than the reservoir: a monotonically rising series of
+    // 40000 frames has its true median at ~20000 us; a reservoir that stopped
+    // taking samples at 8192 would report ~4096 us.
+    TimingWindow big;
+    for (unsigned i = 1; i <= 40000; ++i) big.add(i, 0, 0, false, 0);
+    big.drain_into(m);
+    CHECK(m.frames == 40000, "long window frame count");
+    CHECK(m.t_queue_p50_10 > 1700 && m.t_queue_p50_10 < 2300,
+          "long window p50 is the whole window's, not the first 8192 frames'");
+    CHECK(m.t_queue_max_10 == 4000, "long window max exact");
   }
 
   if (fails == 0) std::printf("stream_telemetry selftest OK\n");

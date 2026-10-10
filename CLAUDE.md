@@ -451,17 +451,10 @@ temporal layer and injects each at its ladder's rate
 (RS outer code + corrupt-frame salvage) lives in `tools/precoder/`
 (`docs/fused-fec.md`).
 
-Per-frame TX-side timing rides every stream frame's addr3 (six bytes no
-receiver otherwise reads: backlog depth, capture→send, the transmitter's
-predicted TSF) plus a periodic marker (`DEVOURER_STREAM_TIMING=N`), so
-`rxdemo` reports a one-way submit→arrival and capture→arrival latency per
-frame. The receiver's clock fit takes **hardware egress pairs only**: an
-injected probe response is MAC-stamped on Jaguar2/3 and Kestrel but **not on
-Jaguar1** (`AdapterCaps::hw_injected_mgmt_txtsf`), where the hardware beacon
-carries the clock on a fixed channel and a hopping session gets durations
-only. The producer's capture stamp arrives through the stdin control escape
-(opcode 4) streamtx and duplex share. Wire format, clock model and the
-measured matrix, floor first: `docs/stream-timing.md`; harness
+Per-frame TX-side timing for the stream link (`src/StreamTelemetry.h`,
+`examples/common/stream_timing_tx.h`): what each frame carries, which parts
+MAC-stamp an injected frame (`AdapterCaps::hw_injected_mgmt_txtsf`) and the
+measured matrix are in `docs/stream-timing.md`; harness
 `tests/stream_timing_onair.sh`.
 
 ## Frequency hopping

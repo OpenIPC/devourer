@@ -434,8 +434,10 @@ struct AdapterCaps {
    * egress-stamped frame on any channel at any time without the hardware
    * beacon function. Measured with a constant in the field and an independent
    * witness reading it back (tests/probe_resp_egress_tsf_check.sh): true on
-   * Jaguar2 (8812BU), Jaguar3 (8812CU, 8812EU) and Kestrel (8832CU), both FC
-   * 0x50 and 0x80, arrival−egress spread 34–41 µs over 15 s. FALSE on Jaguar1:
+   * the Jaguar2 8822B die (8812BU), Jaguar3 (8812CU, 8812EU) and the Kestrel
+   * 8852C die (8832CU), both FC 0x50 and 0x80, arrival−egress spread 34–41 µs
+   * over 15 s; the 8821C and 8852B dies are unmeasured and stay false. FALSE
+   * on Jaguar1:
    * the 8821AU rewrites the field, but with a free-running counter that is
    * neither TSF port (both read live during the run) and repeats for ~7
    * frames at a time; its hardware TBTT beacon IS stamped (3.2 µs spread), so

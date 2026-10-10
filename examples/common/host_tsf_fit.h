@@ -108,15 +108,25 @@ class HostTsfFit {
         // latched the value; half the round trip is the irreducible error.
         const double x = static_cast<double>(t0 / 2 + t1 / 2) / 1000.0;
         std::lock_guard<std::mutex> lk(_mu);
+        bool jump = false;
         if (_fit.ready()) {
           const double r = static_cast<double>(tsf) - _fit.at(x);
           _last_resid.store(r);
-          if (r > kDiscontinuityUs || r < -kDiscontinuityUs) {
-            _fit = tsffit::LinFit{};
-            _resets.fetch_add(1);
-          }
+          jump = r > kDiscontinuityUs || r < -kDiscontinuityUs;
+        } else if (_have_last) {
+          // Before the line is ready, two consecutive samples whose TSF and
+          // host deltas disagree by more than the bound saw a TSF reset.
+          const double d = (static_cast<double>(tsf) - _last_tsf) - (x - _last_x);
+          jump = d > kDiscontinuityUs || d < -kDiscontinuityUs;
+        }
+        if (jump) {
+          _fit = tsffit::LinFit{};
+          _resets.fetch_add(1);
         }
         _fit.add(x, static_cast<double>(tsf));
+        _last_tsf = static_cast<double>(tsf);
+        _last_x = x;
+        _have_last = true;
       }
       for (int i = 0; i < _period_ms && !_stop.load(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -127,6 +137,8 @@ class HostTsfFit {
   const int _period_ms;
   mutable std::mutex _mu;
   tsffit::LinFit _fit;
+  bool _have_last = false;
+  double _last_tsf = 0, _last_x = 0;
   std::atomic<bool> _stop{false};
   std::atomic<bool> _unsupported{false};
   std::atomic<double> _last_resid{0.0};

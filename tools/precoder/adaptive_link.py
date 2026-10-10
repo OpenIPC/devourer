@@ -353,7 +353,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 from devourer_events import parse_event, desc_rate_to_mcs  # noqa: E402
 
 
-from stream import ctl_frame, psdu_frame, SET_PWR, SET_RATE, SET_CHAN  # noqa: E402
+from stdin_ctl import ctl_frame, psdu_frame, SET_PWR, SET_RATE, SET_CHAN  # noqa: E402
 
 
 def _parse_mcs_bias(spec: str) -> dict[int, float]:
@@ -386,6 +386,11 @@ def run_vrx(proc, link, calib, vtx_id, channel, feedback_period_ms=100,
         for line in proc.stdout:
             ev = parse_event(line, ev="rx.frame")
             if ev is None:
+                continue
+            # The timing marker (FC 0x50) and a Jaguar1 clock beacon (0x80)
+            # share the canonical SA; only the probe-request data frames
+            # (0x40) carry the stream envelope and its sequence counter.
+            if ev.get("fc0", 0x40) != 0x40:
                 continue
             body = bytes.fromhex(ev.get("body") or "")
             if rp.frame_type(body) == rp.T_DISC_ACK:

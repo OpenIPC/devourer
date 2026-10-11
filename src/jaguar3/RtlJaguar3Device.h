@@ -346,6 +346,10 @@ private:
   /* phydm dynamic mechanisms (FA/DIG/CCK-PD/EDCCA), ticked from the coex
    * thread every ~2 s like the vendor watchdog. */
   jaguar3::PhydmRuntimeJaguar3 _phydm;
+  /* DIG_MIN_8822C_WIDE for `width` on this die, pushed into _phydm right
+   * after every tune so the first 40 MHz frame is not held until the next
+   * 2 s tick. Caller holds _reg_mu (or is pre-coex bring-up). */
+  void apply_igi_floor_locked(ChannelWidth_t width);
   SelectedChannel _channel{};
   /* Mirrors _channel.ChannelWidth as a devourer bw code (0/1/2 = 20/40/80 MHz)
    * so the RX completion handler can read the currently-tuned width without

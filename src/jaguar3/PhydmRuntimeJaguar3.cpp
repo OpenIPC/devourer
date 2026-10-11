@@ -28,6 +28,12 @@ void PhydmRuntimeJaguar3::set_igi(uint8_t igi) {
   _device.phy_set_bb_reg(0x1d70, 0x00007f00, igi);
 }
 
+void PhydmRuntimeJaguar3::set_igi_floor(uint8_t floor) {
+  _igi_floor = floor;
+  if (floor != 0 && get_igi() < floor)
+    set_igi(floor);
+}
+
 /* phydm_fa_cnt_statistics_jgr3 + phydm_false_alarm_counter_reg_reset: read
  * the per-window false-alarm and CCA counters, then clear and re-arm them so
  * the next tick sees a fresh window. */
@@ -85,6 +91,10 @@ void PhydmRuntimeJaguar3::dig(const FaStats &fa, bool is_dfs) {
     th0 = 250; th1 = 1000; th2 = 2000;
     lo = DIG_MIN_DFS; hi = DIG_MIN_DFS;
   }
+  if (lo < _igi_floor)
+    lo = _igi_floor;
+  if (hi < _igi_floor)
+    hi = _igi_floor;
 
   if (fa.fa_all > th2)
     igi += 2;

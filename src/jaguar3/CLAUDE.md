@@ -23,6 +23,16 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   dividers (vs the `0x8ac` block the Jaguar1/2 chips share). 80 MHz works,
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.
 - halrf calibration: DACK/IQK/TXGAPK/thermal tracking.
+- **8822C 40 MHz inject needs two things the 8822E does not** (both gated
+  on the C die, `docs/experiments/8822c-ht40-tx-stall.md`): the inject
+  descriptor carries DISDATAFB=1 (with USE_RATE=1 the MAC's per-frame
+  fallback lookup hits the fw's per-MACID entry, which an injecting MACID
+  lacks — the first 40 MHz frame wedges and the TX FIFO fills), and DIG is
+  floored at `DIG_MIN_8822C_WIDE 0x26` at 40/80 MHz (`set_igi_floor`, pushed
+  after every tune): on a quiet channel below IGI 0x24 the receiver never
+  reads the secondary 20 MHz idle and the MAC holds every 40 MHz frame —
+  busy channels self-heal because received frames re-run the AGC. The floor
+  costs ~6 dB of idle-channel RX sensitivity on the CU at those widths.
 - **Firmware channel switch** (H2C 0x1D via `fastretune_fw`, both dies): the
   fw-switch H2C must ride `HalJaguar3::send_h2c_raw`'s HMEBOX box counter —
   the coex runtime thread shares it (both callers hold `_reg_mu`); a second
@@ -169,7 +179,10 @@ the JGR3 register map (CLM period is the low half of `0x1e40`, trigger
 This is the generation where `nhm_env` works as intended, because
 `PhydmRuntimeJaguar3.cpp` clamps DIG to `DIG_MIN_COVERAGE 0x1e` …
 `DIG_MAX_OF_MIN_COVERAGE 0x22` — four steps — so the gain reference barely
-moves and the histogram mass is free to march up under an interferer. Against a
+moves and the histogram mass is free to march up under an interferer (the
+numbers below are 20 MHz; on the 8822C at 40/80 MHz the clamp sits at
+`DIG_MIN_8822C_WIDE 0x26` instead, 4 steps higher, and no `nhm_env` figure
+has been taken there). Against a
 5 MHz non-802.11 carrier on a traffic-free channel: 0 frames decoded, `clm` 6,
 `nhm_env` 56, against a quiet 0/0/0; 802.11 traffic at MCS1 read 606 frames /
 15 / 15. The discriminator is the ratio — `nhm_env`/`clm` ≈ 1 under 802.11, ≈ 9

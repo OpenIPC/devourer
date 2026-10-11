@@ -8,6 +8,17 @@
 
 namespace jaguar3 {
 
+/* 8822C IGI floor at 40/80 MHz. A wide-channel TX needs the secondary 20 MHz
+ * to read idle, and below IGI 0x24 the 8822C receiver parks, on a QUIET
+ * channel, in a gain state where the secondary never does: the MAC holds
+ * every 40 MHz frame (measured on 144/52/100/120 — the first frame never
+ * airs and the TX FIFO fills; 0x24 clears it, 0x22 does not; busy channels
+ * self-heal because each received frame re-runs the AGC). One step of margin
+ * on top. Costs ~6 dB of idle-channel RX sensitivity against DIG_MIN_DFS at
+ * those widths only; 20 MHz and the 8822E are untouched. 80 MHz inherits the
+ * floor untested. */
+constexpr uint8_t DIG_MIN_8822C_WIDE = 0x26;
+
 /* Port of the phydm dynamic mechanisms the vendor kernel runs from its ~2 s
  * watchdog in a no-link (monitor) session — the RX-side adaptation loop:
  *
@@ -40,6 +51,10 @@ public:
    * re-applied when they change). */
   void on_channel_change() { _cck_lv_valid = false; }
 
+  /* Lower bound for DIG: applied at once (IGI raised to it if below) and
+   * honoured by every later tick. 0 = none. See DIG_MIN_8822C_WIDE. */
+  void set_igi_floor(uint8_t floor);
+
 private:
   /* --- false-alarm / CCA statistics (this tick's window) --- */
   struct FaStats {
@@ -62,6 +77,7 @@ private:
 
   /* DIG state */
   int _last_igi_logged = -1;
+  uint8_t _igi_floor = 0;
 
   /* CCK-PD state (phydm_cckpd_type4) */
   bool _cck_tbl_valid = false;

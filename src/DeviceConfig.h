@@ -87,6 +87,11 @@ enum class RxMode : uint8_t {
  * 8822C MCS3 x4 -> MCS2 -> 6M floor (CCK floor at 2.4 GHz; VHT steps
  * M7 -> M4 -> M1 -> M0 -> 6M). Jaguar1's fw does not step at all — every
  * retry at the descriptor rate regardless of this knob (8821AU-measured).
+ * The 8822C's 40/80 MHz frames have no ladder at either setting: their
+ * descriptor carries DISDATAFB=1 unconditionally, because with 0 the first
+ * 40 MHz injected frame wedges the TX FIFO
+ * (docs/experiments/8822c-ht40-tx-stall.md). Its 20 MHz frames keep the
+ * ladder above.
  * Off pins every retry at the descriptor DATARATE (DISDATAFB / DISABLE_FB =
  * 1; measured: 1,200/1,200 retried frames re-aired at the original rate) —
  * for constant-rate links where a step-down retry costs extra airtime. A
@@ -282,7 +287,7 @@ struct DeviceConfig {
     int ack_timeout_us = 128;
     /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
      * fallback ladder with its own floor (the current behaviour, descriptors
-     * byte-identical). "off" disables per-retry rate fallback (DISDATAFB /
+     * byte-identical; not on an 8822C 40/80 MHz frame — see the enum). "off" disables per-retry rate fallback (DISDATAFB /
      * DISABLE_FB = 1): retries re-air at the descriptor rate. See the
      * RetryFallback enum for why there is no floor form. */
     RetryFallback retry_fallback = RetryFallback::Default;

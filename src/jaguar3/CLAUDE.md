@@ -24,9 +24,10 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.
 - halrf calibration: DACK/IQK/TXGAPK/thermal tracking.
 - **8822C 40 MHz inject needs two things the 8822E does not**, both gated on
-  the C die: DISDATAFB=1 in the inject descriptor (`fill_data_tx_desc_8822c`)
-  and a DIG floor at 40/80 MHz (`DIG_MIN_8822C_WIDE`, armed only by the
-  device's own wide TX). Missing either one, the first 40 MHz frame never airs
+  the C die: DISDATAFB=1 on 40/80 MHz inject descriptors
+  (`fill_data_tx_desc_8822c`, so those frames have no fw retry ladder; 20 MHz
+  frames keep it) and a DIG floor at 40/80 MHz (`DIG_MIN_8822C_WIDE`, armed
+  only by the session's own wide TX). Missing either one, the first 40 MHz frame never airs
   and the TX FIFO fills — the floor half only on quiet channels, which is
   why a busy bench channel hides it. The floor's RX-sensitivity cost is
   estimated, not measured; 80 MHz and 2.4 GHz HT40 are open. Mechanism and

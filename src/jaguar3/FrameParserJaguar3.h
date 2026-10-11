@@ -176,8 +176,10 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
   /* DISDATAFB: with USE_RATE=1 the MAC's per-frame rate-fallback lookup still
    * consults the fw's per-MACID rate entry, which no injecting MACID has. The
    * 8822C wedges on that collision for a 40 MHz frame (the first one never
-   * airs and the TX FIFO fills), so its caller passes dis_data_fb=1 — what the
-   * vendor driver's own fixed-rate path writes; the 8822E keeps 0. */
+   * airs and the TX FIFO fills), so its caller passes dis_data_fb=1 for a
+   * 40/80 MHz frame — what the vendor driver's own fixed-rate path writes. A
+   * 20 MHz frame and every 8822E frame keep 0, and with it the fw retry ladder
+   * (DeviceConfig.h RetryFallback). */
   SET_TX_DESC_DISDATAFB_8822C(d, dis_data_fb ? 1 : 0);
   SET_TX_DESC_SW_DEFINE_8822C(d, 1);
   SET_TX_DESC_DATARATE_8822C(d, rate_hw);

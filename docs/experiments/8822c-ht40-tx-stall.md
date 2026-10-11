@@ -38,12 +38,18 @@ in 45 s on the same card — the chip is fine.
 
 ## Fault 1 — DISDATAFB
 
-devourer's Jaguar3 inject descriptor mirrored the Jaguar1 path with
-DISDATAFB=0. With USE_RATE=1 the MAC's per-frame rate-fallback lookup
-still consults the fw's per-MACID rate entry, which an injecting MACID
-lacks; on the 8822C that collision wedges a 40 MHz frame outright. With
-DISDATAFB=1 (what the vendor's fixed-rate xmit branch writes) the hard
-hang is gone — but only on some channels.
+devourer's Jaguar3 inject descriptor writes DISDATAFB=0 on purpose: it
+keeps the firmware's per-retry rate-fallback ladder
+(`DEVOURER_TX_RETRY_FALLBACK`, #362/#371). With USE_RATE=1 the MAC's
+per-frame rate-fallback lookup still consults the fw's per-MACID rate
+entry, which an injecting MACID lacks; on the 8822C that collision wedges
+a 40 MHz frame outright. With DISDATAFB=1 (what the vendor's fixed-rate
+xmit branch writes) the hard hang is gone — but only on some channels.
+
+The fix sets DISDATAFB=1 on the 8822C's 40/80 MHz frames only, so they
+have no retry ladder at either knob setting. 20 MHz frames keep
+DISDATAFB=0 and the ladder: 20 MHz with 0 is the configuration #362
+measured, and the HT20 rows below.
 
 ## Fault 2 — receiver gain on a quiet channel
 
@@ -64,8 +70,11 @@ register diff shows the receiver parked in a different gain state
   (0x10/0x14: hang, 0x18: 139 frames).
 
 Fix: `DIG_MIN_8822C_WIDE 0x26` (one step over the threshold) on the C die
-at 40/80 MHz, armed by the first wide frame the device transmits into a
-wide tune and re-applied after every tune while wide, honoured by DIG.
+at 40/80 MHz, honoured by DIG. It is armed for the session by the first
+wide frame the device transmits, and from then on follows the tuned
+width: applied while tuned to 40/80 MHz, dropped at a narrower width, with
+IGI clamped straight back into the normal window. `Init`, `InitWrite` and
+`Stop()` clear the arm.
 Cost: idle-channel RX sensitivity at those widths on that die — estimated
 from the 1 dB IGI step, **not measured**: 6 dB over the DFS floor 0x20
 (144, 52), 4-8 dB over the 0x1e..0x22 coverage window on a non-DFS channel
@@ -86,7 +95,8 @@ re-flown below).
 
 ## Re-test after the arming review fix
 
-Final code (arming needs a wide frame AND a wide tune; `Stop()` disarms).
+Code at the time (arming needed a wide frame AND a wide tune; `Stop()`
+disarmed).
 Both adapters on one host, 1 kB QoS-data, run-unique SA, txdemo default
 2 ms gap, 30 s per cell. Witness = the other local card. Before the run, an
 8 s witness scan of 36/52/100/120/144/149/157 at 40 MHz heard 0 frames.
@@ -111,6 +121,33 @@ What this does not show:
 - The send rate is gap-limited (~460 fps), so a per-frame lock cost would
   not show in `submitted`. The third row checks that the floor stays
   unarmed, not that the lock is no longer taken.
+
+## Re-test after the #484 review
+
+The code now sets DISDATAFB=1 on 40/80 MHz frames only, arms per session,
+and clamps IGI when the floor drops. The bench is the same, on silent 144:
+
+| cell | tune | frames | submitted | failed | witness | IGI |
+|---|---|---|---|---|---|---|
+| CU -> EU, 144(-) | 40 | MCS3/40 | 14117 | 0 | 14067 MCS3 bw:1 | 0x26 |
+| CU -> EU, 144(-) | 40 | **MCS3/20** (DISDATAFB=0) | 14163 | 0 | 14111 MCS3 bw:0 | 0x20 |
+| CU -> EU, 144 | 20 | MCS3/20 | 14285 | 0 | 14232 MCS3 bw:0 | 0x20 |
+| EU -> CU, 144(-) | 40 | MCS3/40 | 14456 | 0 | 14406 MCS3 bw:1 | 0x20 |
+
+The second row is the new combination: a 20 MHz frame with DISDATAFB=0 on
+a 40 MHz tune does not wedge. The fault keys on the frame's width, not the
+tune's.
+
+Retry ladder, `tests/retry_ladder_probe.sh` shape: unACKed unicast, MCS3,
+limit 8, CU -> EU on 144.
+- **20 MHz:** 1223/1224 frames flew MCS3 x4 > MCS2 > 6M x4, the ladder
+  #371 documents, restored.
+- **40 MHz:** 1208/1209 frames flew MCS3 x9, pinned by DISDATAFB=1, as
+  documented.
+
+Not exercised on air: the IGI clamp when the floor drops (no demo changes
+width mid-session), and the retune/first-wide-frame race, which is a
+lock-ordering argument, not a measurement.
 
 Open: 80 MHz inherits the floor untested; 2.4 GHz HT40 (ch 6) drained on
 the TX side but the EU received none of it — unexplained.

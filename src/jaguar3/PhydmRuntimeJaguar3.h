@@ -17,10 +17,10 @@ namespace jaguar3 {
  * on top. Costs idle-channel RX sensitivity at those widths only — estimated
  * from the 1 dB IGI step, NOT measured: 6 dB over DIG_MIN_DFS 0x20, 4-8 dB over
  * the 0x1e..0x22 coverage window on a non-DFS channel — and only once the
- * device has transmitted a wide frame into a wide tune
- * (RtlJaguar3Device::_wide_tx_armed): a 40 MHz receiver-only session or a
- * ground station sending 20 MHz control frames keeps the normal floor. 20 MHz
- * and the 8822E are untouched. 80 MHz inherits the floor untested. */
+ * session has transmitted a wide frame (RtlJaguar3Device::_wide_tx_seen): a
+ * 40 MHz receiver-only session or a ground station sending 20 MHz control
+ * frames keeps the normal floor. 20 MHz and the 8822E are untouched. 80 MHz
+ * inherits the floor untested. */
 constexpr uint8_t DIG_MIN_8822C_WIDE = 0x26;
 
 /* Port of the phydm dynamic mechanisms the vendor kernel runs from its ~2 s
@@ -55,9 +55,12 @@ public:
    * re-applied when they change). */
   void on_channel_change() { _cck_lv_valid = false; }
 
-  /* Lower bound for DIG: applied at once (IGI raised to it if below) and
-   * honoured by every later tick. 0 = none. See DIG_MIN_8822C_WIDE. */
-  void set_igi_floor(uint8_t floor);
+  /* Lower bound for DIG, honoured by every later tick. 0 = none. Applied at
+   * once both ways: setting one raises IGI to it, and dropping one clamps IGI
+   * back into `channel`'s normal DIG window instead of leaving the raised gain
+   * for up to a tick. Keeping it at 0 touches no register (the 8822E path). See
+   * DIG_MIN_8822C_WIDE. */
+  void set_igi_floor(uint8_t floor, uint8_t channel);
 
 private:
   /* --- false-alarm / CCA statistics (this tick's window) --- */

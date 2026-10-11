@@ -63,11 +63,14 @@ register diff shows the receiver parked in a different gain state
   (vendor measures it per table; devourer uses 0xd) does not substitute
   (0x10/0x14: hang, 0x18: 139 frames).
 
-Fix: `DIG_MIN_8822C_WIDE 0x26` (one step over the threshold) applied on
-the C die at 40/80 MHz after every tune and honoured by DIG. Cost: ~6 dB
-of idle-channel RX sensitivity at those widths on that die, nothing at
-20 MHz, nothing on the 8822E (its descriptor and DIG are byte-identical
-to before — not re-flown after this change).
+Fix: `DIG_MIN_8822C_WIDE 0x26` (one step over the threshold) on the C die
+at 40/80 MHz, armed by the first wide frame the device transmits and
+re-applied after every tune while wide, honoured by DIG. Cost: ~6 dB of
+idle-channel RX sensitivity at those widths on that die — only on a device
+that transmits wide frames; a CU ground station (40 MHz receive, 20 MHz
+control frames) never arms it. Nothing changes at 20 MHz or on the 8822E
+(its descriptor and DIG are byte-identical to before — not re-flown after
+this change).
 
 ## Result (no knobs)
 

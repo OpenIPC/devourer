@@ -1616,9 +1616,13 @@ void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
 
 void RtlJaguar3Device::apply_igi_floor_locked(ChannelWidth_t width) {
   const bool wide = width == CHANNEL_WIDTH_40 || width == CHANNEL_WIDTH_80;
-  _phydm.set_igi_floor((_variant == jaguar3::ChipVariant::C8822C && wide)
-                           ? jaguar3::DIG_MIN_8822C_WIDE
-                           : 0);
+  if (!wide)
+    _wide_tx_armed.store(false, std::memory_order_relaxed);
+  const bool armed = _wide_tx_armed.load(std::memory_order_relaxed);
+  _phydm.set_igi_floor(
+      (_variant == jaguar3::ChipVariant::C8822C && wide && armed)
+          ? jaguar3::DIG_MIN_8822C_WIDE
+          : 0);
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC
@@ -2745,6 +2749,19 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t pwr_type = _txpkt_dflt_type.load(std::memory_order_relaxed);
   if (radiotap_pkt_pwr_db != INT_MIN)
     pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
+  /* 8822C: the first >= 40 MHz frame arms the IGI floor (DIG_MIN_8822C_WIDE)
+   * before it is queued — on a quiet channel the MAC would otherwise hold it
+   * forever. One _reg_mu take per arming, never again on the hot path; the
+   * same precedent as the FastRetune above. */
+  if (_variant == jaguar3::ChipVariant::C8822C &&
+      (bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80) &&
+      !_wide_tx_armed.load(std::memory_order_relaxed)) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    if (!_wide_tx_armed.load(std::memory_order_relaxed)) {
+      _wide_tx_armed.store(true, std::memory_order_relaxed);
+      apply_igi_floor_locked(_channel.ChannelWidth);
+    }
+  }
   /* 8822C only: DISDATAFB=1 — see fill_data_tx_desc_8822c. The 8822E keeps
    * the byte-identical descriptor it flies 40 MHz with. */
   jaguar3::fill_data_tx_desc_8822c(

@@ -15,8 +15,10 @@ namespace jaguar3 {
  * airs and the TX FIFO fills; 0x24 clears it, 0x22 does not; busy channels
  * self-heal because each received frame re-runs the AGC). One step of margin
  * on top. Costs ~6 dB of idle-channel RX sensitivity against DIG_MIN_DFS at
- * those widths only; 20 MHz and the 8822E are untouched. 80 MHz inherits the
- * floor untested. */
+ * those widths only, and only once the device has transmitted a wide frame
+ * (RtlJaguar3Device::_wide_tx_armed): a 40 MHz receiver-only session or a
+ * ground station sending 20 MHz control frames keeps the normal floor. 20 MHz
+ * and the 8822E are untouched. 80 MHz inherits the floor untested. */
 constexpr uint8_t DIG_MIN_8822C_WIDE = 0x26;
 
 /* Port of the phydm dynamic mechanisms the vendor kernel runs from its ~2 s

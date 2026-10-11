@@ -3,10 +3,9 @@
 Why devourer's 8822C could not transmit a single 40 MHz frame on most
 channels while the same card does HT40 under mainline rtw88, and the two
 fixes that came out of it (`src/jaguar3/FrameParserJaguar3.h` DISDATAFB,
-`PhydmRuntimeJaguar3::set_igi_floor`). Bench: txdemo on the CU (host),
-rxdemo on an 8812EU ground-station card at the same channel/width,
-1 kB QoS-data frames, MCS3/40/LDPC, 50 s per run; "aired" = frames the
-EU received with CRC ok and `bw:1`.
+`PhydmRuntimeJaguar3::set_igi_floor`). Bench: txdemo on the CU, rxdemo on
+an 8812EU witness at the same channel/width, 1 kB QoS-data frames,
+MCS3/LDPC. The two witness setups are under Results.
 
 ## Symptom
 
@@ -49,7 +48,7 @@ xmit branch writes) the hard hang is gone — but only on some channels.
 The fix sets DISDATAFB=1 on the 8822C's 40/80 MHz frames only, so they
 have no retry ladder at either knob setting. 20 MHz frames keep
 DISDATAFB=0 and the ladder: 20 MHz with 0 is the configuration #362
-measured, and the HT20 rows below.
+measured (see Results for the ladder on the final code).
 
 ## Fault 2 — receiver gain on a quiet channel
 
@@ -80,74 +79,65 @@ from the 1 dB IGI step, **not measured**: 6 dB over the DFS floor 0x20
 (144, 52), 4-8 dB over the 0x1e..0x22 coverage window on a non-DFS channel
 (36, 149). Only on a device that transmits wide frames; a CU ground station
 (40 MHz receive, 20 MHz control frames) never arms it. Nothing changes at
-20 MHz or on the 8822E (its descriptor and DIG are byte-identical to before;
-re-flown below).
+20 MHz or on the 8822E (its descriptor and DIG are byte-identical to
+before; re-flown in Results).
 
-## Result (no knobs)
+## Results
 
-| channel | width | submitted | failed | aired (EU, bw) |
-|---|---|---|---|---|
-| 144(-) | 40 | 20552 | 0 | 20500 MCS3 bw:1 |
-| 52(+) | 40 | 20525 | 0 | 20425 MCS3 bw:1 |
-| 149(+) | 40 | 20590 | 0 | 20477 MCS3 bw:1 |
-| 36(+) | 40 | 20483 | 0 | 19723 MCS3 bw:1 |
-| 144(-) | 20 | 20679 | 0 | 20629 MCS3 bw:0 (IGI stays 0x20) |
+Two benches, both 1 kB QoS-data at MCS3/LDPC with no other knobs.
+"Decoded" means CRC-ok frames the witness heard at the expected rate and
+width.
+- **GS:** the CU on the host, witnessed by an 8812EU on a separate ground
+  station. 50 s per run, on the first version of the fix (DISDATAFB=1 on
+  every C-die frame). For 40 MHz frames on a 40 MHz tune, that version and
+  the final code behave the same.
+- **Local:** both adapters on one host, each witnessing the other
+  near-field, with a run-unique SA. txdemo's default 2 ms gap, 30 s per
+  cell, on the final code unless marked †. Beforehand, an 8 s witness scan
+  of 36/52/100/120/144/149/157 at 40 MHz heard 0 frames.
 
-## Re-test after the arming review fix
+| bench | channel | DUT -> witness | tune | frames | submitted | failed | decoded | IGI |
+|---|---|---|---|---|---|---|---|---|
+| GS | 144(-) | CU -> EU | 40 | MCS3/40 | 20552 | 0 | 20500, bw:1 | |
+| GS | 52(+) | CU -> EU | 40 | MCS3/40 | 20525 | 0 | 20425, bw:1 | |
+| GS | 149(+) | CU -> EU | 40 | MCS3/40 | 20590 | 0 | 20477, bw:1 | |
+| GS | 36(+) | CU -> EU | 40 | MCS3/40 | 20483 | 0 | 19723, bw:1 | |
+| local | 144(-) | CU -> EU | 40 | MCS3/40 | 14117 | 0 | 14067, bw:1 | 0x26 |
+| local | 144(-) | CU -> EU | 40 | MCS3/20 | 14163 | 0 | 14111, bw:0 | 0x20 |
+| local | 144 | CU -> EU | 20 | MCS3/20 | 14285 | 0 | 14232, bw:0 | 0x20 |
+| local † | 144 | CU -> EU | 20 | MCS3/40 | 14282 | 0 | 0 (expected) | 0x20 |
+| local | 144(-) | EU -> CU | 40 | MCS3/40 | 14456 | 0 | 14406, bw:1 | 0x20 |
 
-Code at the time (arming needed a wide frame AND a wide tune; `Stop()`
-disarmed).
-Both adapters on one host, 1 kB QoS-data, run-unique SA, txdemo default
-2 ms gap, 30 s per cell. Witness = the other local card. Before the run, an
-8 s witness scan of 36/52/100/120/144/149/157 at 40 MHz heard 0 frames.
+Before the fix, every 40 MHz row aired nothing.
 
-| cell | DUT -> witness | tune | frames | submitted | failed | witness | IGI |
-|---|---|---|---|---|---|---|---|
-| 144(-) | CU -> EU | 40 | MCS3/40 | 14161 | 0 | 14109 MCS3 bw:1 | 0x26 |
-| 149(+) | CU -> EU | 40 | MCS3/40 | 14146 | 0 | 14094 MCS3 bw:1 | 0x26 |
-| 144 | CU -> EU | **20** | MCS3/40 | 14282 | 0 | 0 (expected) | 0x20 |
-| 144 | CU -> EU | 20 | MCS3/20 | 14198 | 0 | 14142 MCS3 bw:0 | 0x20 |
-| 144(-) | **EU** -> CU | 40 | MCS3/40 | 14455 | 0 | 14321 MCS3 bw:1 | 0x20 |
+What the local rows show:
+- **40 MHz frames on a 40 MHz tune** arm the floor (0x26).
+- **20 MHz frames on a 40 MHz tune** carry DISDATAFB=0 and do not wedge,
+  so the fault keys on the frame's width, not the tune's. The floor stays
+  unarmed.
+- **40 MHz frames on a 20 MHz tune** leave the floor off. † is from one
+  revision earlier, which then required a wide tune to arm. The final code
+  arms the session but applies no floor at 20 MHz, so the result is the
+  same by construction; this case was not re-run.
+- **8822E transmitting HT40** stays at 0x20, and so does the CU witness,
+  which receives at 40 MHz and never transmits.
 
-The third row is the review fix: 40 MHz frames into a 20 MHz tune leave the
-floor unarmed. The fourth is the 20 MHz control. In the fifth, the 8822E
-transmitter stays at 0x20, and so does the CU witness, which receives at
-40 MHz and never transmits.
+Retry ladder, final code, in the `tests/retry_ladder_probe.sh` shape:
+unACKed unicast, MCS3, retry limit 8, CU -> EU on 144.
+- **20 MHz:** 1223/1224 frames flew MCS3 x4 > MCS2 > 6M x4, the ladder
+  #371 documents.
+- **40 MHz:** 1208/1209 frames flew MCS3 x9, pinned by DISDATAFB=1.
 
 What this does not show:
-- The witness is near-field, one desk away. These are pass/fail results,
-  not range numbers.
-- Every cell is a single run.
+- Every row is a single run. The local witness is near-field, so those
+  rows are pass/fail, not range numbers.
+- The 36(+) GS row's lower decode count (96.3 % vs ~99.5 % elsewhere) was
+  not repeated.
 - The send rate is gap-limited (~460 fps), so a per-frame lock cost would
-  not show in `submitted`. The third row checks that the floor stays
-  unarmed, not that the lock is no longer taken.
-
-## Re-test after the #484 review
-
-The code now sets DISDATAFB=1 on 40/80 MHz frames only, arms per session,
-and clamps IGI when the floor drops. The bench is the same, on silent 144:
-
-| cell | tune | frames | submitted | failed | witness | IGI |
-|---|---|---|---|---|---|---|
-| CU -> EU, 144(-) | 40 | MCS3/40 | 14117 | 0 | 14067 MCS3 bw:1 | 0x26 |
-| CU -> EU, 144(-) | 40 | **MCS3/20** (DISDATAFB=0) | 14163 | 0 | 14111 MCS3 bw:0 | 0x20 |
-| CU -> EU, 144 | 20 | MCS3/20 | 14285 | 0 | 14232 MCS3 bw:0 | 0x20 |
-| EU -> CU, 144(-) | 40 | MCS3/40 | 14456 | 0 | 14406 MCS3 bw:1 | 0x20 |
-
-The second row is the new combination: a 20 MHz frame with DISDATAFB=0 on
-a 40 MHz tune does not wedge. The fault keys on the frame's width, not the
-tune's.
-
-Retry ladder, `tests/retry_ladder_probe.sh` shape: unACKed unicast, MCS3,
-limit 8, CU -> EU on 144.
-- **20 MHz:** 1223/1224 frames flew MCS3 x4 > MCS2 > 6M x4, the ladder
-  #371 documents, restored.
-- **40 MHz:** 1208/1209 frames flew MCS3 x9, pinned by DISDATAFB=1, as
-  documented.
-
-Not exercised on air: the IGI clamp when the floor drops (no demo changes
-width mid-session), and the retune/first-wide-frame race, which is a
-lock-ordering argument, not a measurement.
+  not show in `submitted`.
+- Not exercised on air: the IGI clamp when the floor drops (no demo
+  changes width mid-session), and the retune/first-wide-frame race, which
+  rests on lock ordering.
 
 Open: 80 MHz inherits the floor untested; 2.4 GHz HT40 (ch 6) drained on
 the TX side but the EU received none of it — unexplained.

@@ -23,18 +23,14 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   dividers (vs the `0x8ac` block the Jaguar1/2 chips share). 80 MHz works,
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.
 - halrf calibration: DACK/IQK/TXGAPK/thermal tracking.
-- **8822C 40 MHz inject needs two things the 8822E does not** (both gated
-  on the C die, `docs/experiments/8822c-ht40-tx-stall.md`): the inject
-  descriptor carries DISDATAFB=1 (with USE_RATE=1 the MAC's per-frame
-  fallback lookup hits the fw's per-MACID entry, which an injecting MACID
-  lacks — the first 40 MHz frame wedges and the TX FIFO fills), and DIG is
-  floored at `DIG_MIN_8822C_WIDE 0x26` at 40/80 MHz (`set_igi_floor`, armed
-  by the device's first >= 40 MHz frame and re-applied after every tune while
-  wide): on a quiet channel below IGI 0x24 the receiver never reads the
-  secondary 20 MHz idle and the MAC holds every 40 MHz frame — busy channels
-  self-heal because received frames re-run the AGC. The floor costs ~6 dB of
-  idle-channel RX sensitivity on the CU at those widths, so a CU that only
-  receives at 40 MHz (a ground station; its RCFs are 20 MHz) never arms it.
+- **8822C 40 MHz inject needs two things the 8822E does not**, both gated on
+  the C die: DISDATAFB=1 in the inject descriptor (`fill_data_tx_desc_8822c`)
+  and a DIG floor at 40/80 MHz (`DIG_MIN_8822C_WIDE`, armed only by the
+  device's own wide TX). Missing either one, the first 40 MHz frame never airs
+  and the TX FIFO fills — the floor half only on quiet channels, which is
+  why a busy bench channel hides it. The floor's RX-sensitivity cost is
+  estimated, not measured; 80 MHz and 2.4 GHz HT40 are open. Mechanism and
+  the dead ends: `docs/experiments/8822c-ht40-tx-stall.md`.
 - **Firmware channel switch** (H2C 0x1D via `fastretune_fw`, both dies): the
   fw-switch H2C must ride `HalJaguar3::send_h2c_raw`'s HMEBOX box counter —
   the coex runtime thread shares it (both callers hold `_reg_mu`); a second

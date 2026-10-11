@@ -867,6 +867,9 @@ void RtlJaguar3Device::Stop() {
     if (_station.armed())
       (void)_station.clear(_device, _logger, "Jaguar3");
   }
+  /* The 8822C wide IGI floor is earned by this session's TX; a later Init on
+   * the same device must not inherit it. */
+  _wide_tx_armed.store(false, std::memory_order_relaxed);
   try {
     _hal.rtw_hal_deinit();
   } catch (...) {
@@ -2749,12 +2752,16 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t pwr_type = _txpkt_dflt_type.load(std::memory_order_relaxed);
   if (radiotap_pkt_pwr_db != INT_MIN)
     pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
-  /* 8822C: the first >= 40 MHz frame arms the IGI floor (DIG_MIN_8822C_WIDE)
-   * before it is queued — on a quiet channel the MAC would otherwise hold it
-   * forever. One _reg_mu take per arming, never again on the hot path; the
-   * same precedent as the FastRetune above. */
+  /* 8822C: the first >= 40 MHz frame into a >= 40 MHz tune arms the IGI floor
+   * (DIG_MIN_8822C_WIDE) before it is queued — on a quiet channel the MAC
+   * would otherwise hold it forever. One _reg_mu take per arming, never again
+   * on the hot path; the same precedent as the FastRetune above. The tune must
+   * be wide too: a narrow width disarms (apply_igi_floor_locked), so a 40 MHz
+   * frame into a 20 MHz tune would re-arm and take the lock on every frame. */
+  const ChannelWidth_t tune_bw = _channel.ChannelWidth;
   if (_variant == jaguar3::ChipVariant::C8822C &&
       (bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80) &&
+      (tune_bw == CHANNEL_WIDTH_40 || tune_bw == CHANNEL_WIDTH_80) &&
       !_wide_tx_armed.load(std::memory_order_relaxed)) {
     std::lock_guard<std::mutex> lk(_reg_mu);
     if (!_wide_tx_armed.load(std::memory_order_relaxed)) {

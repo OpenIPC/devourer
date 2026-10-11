@@ -70,9 +70,9 @@ Cost: idle-channel RX sensitivity at those widths on that die — estimated
 from the 1 dB IGI step, **not measured**: 6 dB over the DFS floor 0x20
 (144, 52), 4-8 dB over the 0x1e..0x22 coverage window on a non-DFS channel
 (36, 149). Only on a device that transmits wide frames; a CU ground station
-(40 MHz receive, 20 MHz control frames) never arms it. Nothing changes at 20 MHz or on the 8822E
-(its descriptor and DIG are byte-identical to before — not re-flown after
-this change).
+(40 MHz receive, 20 MHz control frames) never arms it. Nothing changes at
+20 MHz or on the 8822E (its descriptor and DIG are byte-identical to before;
+re-flown below).
 
 ## Result (no knobs)
 
@@ -83,6 +83,34 @@ this change).
 | 149(+) | 40 | 20590 | 0 | 20477 MCS3 bw:1 |
 | 36(+) | 40 | 20483 | 0 | 19723 MCS3 bw:1 |
 | 144(-) | 20 | 20679 | 0 | 20629 MCS3 bw:0 (IGI stays 0x20) |
+
+## Re-test after the arming review fix
+
+Final code (arming needs a wide frame AND a wide tune; `Stop()` disarms).
+Both adapters on one host, 1 kB QoS-data, run-unique SA, txdemo default
+2 ms gap, 30 s per cell. Witness = the other local card. Before the run, an
+8 s witness scan of 36/52/100/120/144/149/157 at 40 MHz heard 0 frames.
+
+| cell | DUT -> witness | tune | frames | submitted | failed | witness | IGI |
+|---|---|---|---|---|---|---|---|
+| 144(-) | CU -> EU | 40 | MCS3/40 | 14161 | 0 | 14109 MCS3 bw:1 | 0x26 |
+| 149(+) | CU -> EU | 40 | MCS3/40 | 14146 | 0 | 14094 MCS3 bw:1 | 0x26 |
+| 144 | CU -> EU | **20** | MCS3/40 | 14282 | 0 | 0 (expected) | 0x20 |
+| 144 | CU -> EU | 20 | MCS3/20 | 14198 | 0 | 14142 MCS3 bw:0 | 0x20 |
+| 144(-) | **EU** -> CU | 40 | MCS3/40 | 14455 | 0 | 14321 MCS3 bw:1 | 0x20 |
+
+The third row is the review fix: 40 MHz frames into a 20 MHz tune leave the
+floor unarmed. The fourth is the 20 MHz control. In the fifth, the 8822E
+transmitter stays at 0x20, and so does the CU witness, which receives at
+40 MHz and never transmits.
+
+What this does not show:
+- The witness is near-field, one desk away. These are pass/fail results,
+  not range numbers.
+- Every cell is a single run.
+- The send rate is gap-limited (~460 fps), so a per-frame lock cost would
+  not show in `submitted`. The third row checks that the floor stays
+  unarmed, not that the lock is no longer taken.
 
 Open: 80 MHz inherits the floor untested; 2.4 GHz HT40 (ch 6) drained on
 the TX side but the EU received none of it — unexplained.

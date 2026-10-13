@@ -4,6 +4,8 @@
 #include <thread>
 #include <climits> /* INT_MIN = "no radiotap DBM_TX_POWER" sentinel */
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -236,6 +238,25 @@ void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
     _logger->error("Kestrel: monitor bring-up failed");
     return;
   }
+  arm_configured_ack_responder(); /* DEVOURER_ACK_RESPONDER */
+  /* Measurement-only live disarm, started after the arm so even a zero delay
+   * cannot clear before it. The stop token bounds shutdown on a long delay. */
+  if (_ack_disarm_after_ms) {
+    const uint32_t delay_ms = *_ack_disarm_after_ms;
+    _ack_disarm_after_ms.reset();
+    _ack_disarm_thread = std::jthread([this, delay_ms](std::stop_token stop) {
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(delay_ms);
+      while (!stop.stop_requested() &&
+             std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      if (stop.stop_requested())
+        return;
+      _logger->info("DEVOURER_ACK_DISARM_AFTER_MS: disarming Kestrel ACK "
+                    "responder {} ms after completed bring-up", delay_ms);
+      ClearAckResponder();
+    });
+  }
   StartRxLoop(std::move(packetProcessor));
 }
 
@@ -341,6 +362,7 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
    * inside every send — no drain thread. */
   if (_device.is_usb())
     start_wp_drain();
+  arm_configured_ack_responder(); /* DEVOURER_ACK_RESPONDER */
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
@@ -504,6 +526,110 @@ bool RtlKestrelDevice::GetCcaGates(bool &primary_disabled,
   primary_disabled = (v & r::B_AX_CCA_EN) == 0;
   edcca_disabled = (v & r::B_AX_EDCCA_EN) == 0;
   return true;
+}
+
+namespace {
+/* The BSSID half of the station the ACK responder registers. Nothing matches
+ * on it (A1 alone selects the response), it only has to be a unicast address
+ * distinct from the responder's own. */
+constexpr uint8_t kAckResponderBssid[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+
+std::string mac_text(const uint8_t *m) {
+  char b[18];
+  std::snprintf(b, sizeof b, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2],
+                m[3], m[4], m[5]);
+  return b;
+}
+} // namespace
+
+bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
+  namespace r = kestrel::reg;
+  const uint8_t *m = mac.bytes.data();
+  if (m[0] & 0x01u) {
+    _logger->error("Kestrel: ACK responder needs a UNICAST MAC (I/G set in "
+                   "{:02x}) - not armed", m[0]);
+    return false;
+  }
+  if (!_brought_up) {
+    _logger->error("Kestrel: ACK responder refused until bring-up "
+                   "(Init/InitWrite) has finished");
+    return false;
+  }
+  uint8_t bssid[6];
+  std::memcpy(bssid, kAckResponderBssid, sizeof bssid);
+  if (std::memcmp(bssid, m, sizeof bssid) == 0)
+    bssid[5] ^= 0x02;
+  /* Clear the response-abort CCA gates: armed, the RMAC drops the SIFS ACK
+   * whenever a check reads the medium busy (measured: a co-channel neighbour
+   * AP, docs/kestrel-ack-responder.md). Saved once so a re-arm keeps the original. */
+  const uint32_t resp0 = _device.rtw_read32(r::R_AX_TRXPTCL_RESP_0);
+  if (!_ack_responder)
+    _ack_resp0_saved = resp0;
+  const bool sent = _hal.register_infra_sta(m, bssid);
+  _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, resp0 & ~r::B_AX_RSP_CHK_ALL);
+  /* The H2Cs going out says nothing about the firmware committing them: read
+   * the physical CAM entry the RMAC matches against. The firmware applies the
+   * queue asynchronously, so poll for a bounded time rather than read once. */
+  const auto t0 = std::chrono::steady_clock::now();
+  bool committed = false;
+  int polls = 0;
+  while (sent && !(committed = _hal.addr_cam_holds(/*idx=*/0, m)) &&
+         std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100)) {
+    ++polls;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const auto waited_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+  _logger->debug("Kestrel: ACK responder CAM read-back {} after {} us ({} "
+                 "re-reads)", committed ? "matched" : "did not match",
+                 waited_us, polls);
+  if (!sent || !committed) {
+    _logger->error("Kestrel: ACK responder for {} did not arm: the firmware "
+                   "{} the ADDR_CAM entry (H2C {})",
+                   mac_text(m),
+                   sent ? "accepted but did not commit" : "refused",
+                   sent ? "sent" : "failed");
+    _ack_responder = mac;
+    ClearAckResponder();
+    return false;
+  }
+  _ack_responder = mac;
+  _logger->info("Kestrel: hardware ACK responder armed for {} (ADDR_CAM "
+                "entry 0 committed, read back after {} us)", mac_text(m),
+                waited_us);
+  return true;
+}
+
+void RtlKestrelDevice::ClearAckResponder() {
+  namespace r = kestrel::reg;
+  if (!_ack_responder)
+    return;
+  const devourer::MacAddr mac = *_ack_responder;
+  _ack_responder.reset();
+  /* Back to what InitWrite registers for macid 0: the NO_LINK self entry,
+   * which the firmware does not commit -- so the RMAC stops answering. */
+  _hal.register_sta_role(0, 0, 0);
+  _hal.add_self_sta(kInjectSA, /*macid=*/0);
+  _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, _ack_resp0_saved);
+  /* The rewrite is as asynchronous as the arm: give it the same bound. */
+  const auto t0 = std::chrono::steady_clock::now();
+  bool held = true;
+  while ((held = _hal.addr_cam_holds(/*idx=*/0, mac.bytes.data())) &&
+         std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100))
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  if (held)
+    _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
+                  "0 still holds {}, the MAC may keep answering for it",
+                  mac_text(mac.bytes.data()));
+  else
+    _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry 0 "
+                  "no longer holds {})", mac_text(mac.bytes.data()));
+}
+
+void RtlKestrelDevice::arm_configured_ack_responder() {
+  if (_cfg.rx.ack_responder && !SetAckResponder(*_cfg.rx.ack_responder))
+    throw std::runtime_error(
+        "Kestrel: configured ACK responder could not be armed");
 }
 
 RxEnergy RtlKestrelDevice::GetRxEnergy(bool with_nhm) {
@@ -937,14 +1063,17 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
    * computed and discarded. No phydm FA/CCA/IGI monitor either. */
   c.busy_airtime_ok = false;
   c.rx_energy_ok = false;
-  /* Hardware ARQ: SetAckResponder is not implemented on the AX generation
-   * (matrix-measured 0% closure) — that flag stays false. The retry knob IS
+  /* Hardware ARQ: SetAckResponder arms on the 8852B -- a committed INFRA
+   * station entry (HalKestrel::register_infra_sta), verified by CAM read-back.
+   * The 8852C firmware does not commit that entry, so its arm refuses and the
+   * flag stays false there. The retry knob IS
    * wired (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the
    * N-retries contract in send_packet; witness-measured on the 8832CU:
    * limits {0,2} -> modal {1,3} on-air copies exactly, limit 8 -> an 8/9
    * near-tie consistent with ~90% witness capture of a 9-copy truth —
    * obedient, no wedge). */
   c.tx_retry_limit_ok = true;
+  c.ack_responder_ok = _variant == kestrel::ChipVariant::C8852B;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */

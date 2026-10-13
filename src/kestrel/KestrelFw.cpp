@@ -419,6 +419,29 @@ bool KestrelFw::fw_role_maintain(uint8_t macid, uint8_t self_role,
   return ok;
 }
 
+bool KestrelFw::fw_join_info(uint8_t macid, uint8_t net_type, uint8_t self_role,
+                             uint8_t wifi_role, uint8_t port, uint8_t band,
+                             bool connect) {
+  /* One dword; OP is "disconnect", so connect sends OP=0. The HE/UL-OFDMA
+   * fields (WMM/TGR/ISHESTA/DLBW/TF_MAC_PAD/DL_T_PE) stay 0. */
+  uint8_t content[4] = {0};
+  const uint32_t op = connect ? 0u : 1u;
+  const uint32_t w0 = (static_cast<uint32_t>(macid) & 0xff) | (op << 8) |
+                      ((static_cast<uint32_t>(band) & 0x1) << 9) |
+                      ((static_cast<uint32_t>(port) & 0x7) << 21) |
+                      ((static_cast<uint32_t>(net_type) & 0x3) << 24) |
+                      ((static_cast<uint32_t>(wifi_role) & 0xf) << 26) |
+                      ((static_cast<uint32_t>(self_role) & 0x3) << 30);
+  put_le32(content + 0, w0);
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_MEDIA_RPT,
+                         r::FWCMD_H2C_FUNC_JOININFO, content, sizeof(content));
+  _logger->info("Kestrel: join_info (macid={} op={} net_type={} self={} wifi={} "
+                "port={} band={}) -> {}",
+                macid, op, net_type, self_role, wifi_role, port, band,
+                ok ? "sent" : "FAILED");
+  return ok;
+}
+
 bool KestrelFw::fw_upd_addr_cam(uint8_t macid, const uint8_t self_mac[6],
                                 uint8_t net_type, uint8_t addr_cam_idx,
                                 uint8_t bssid_cam_idx) {
@@ -475,6 +498,51 @@ bool KestrelFw::fw_upd_addr_cam(uint8_t macid, const uint8_t self_mac[6],
                 macid, net_type, addr_cam_idx, bssid_cam_idx, self_mac[0],
                 self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5],
                 ok ? "sent" : "FAILED");
+  return ok;
+}
+
+bool KestrelFw::fw_upd_addr_cam_sta(uint8_t macid, const uint8_t sma[6],
+                                    const uint8_t tma[6], uint8_t net_type,
+                                    uint8_t addr_cam_idx, uint8_t bssid_cam_idx) {
+  /* Field layout as fw_upd_addr_cam (rtw89 cam.h), with the station values the
+   * vendor driver uses: SHORT length, separate SMA/TMA hashes, the BSSID CAM
+   * index in dword3, macid plus the vendor's bit 14 in dword8, and an embedded
+   * valid BSSID CAM entry carrying tma. */
+  uint8_t sma_hash = 0, tma_hash = 0;
+  for (int i = 0; i < 6; i++) {
+    sma_hash ^= sma[i];
+    tma_hash ^= tma[i];
+  }
+  uint8_t c[60] = {0};
+  auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
+    return (v & msk) << sh;
+  };
+  put_le32(c + 4, sw(addr_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
+                      sw(r::ADDR_CAM_ENT_SHORT_SIZE, 0xff, 16));
+  put_le32(c + 8, 0x1u | sw(net_type, 0x3, 1) | sw(r::MAC_AX_NO_MSK, 0x3, 14) |
+                      sw(sma_hash, 0xff, 16) | sw(tma_hash, 0xff, 24));
+  put_le32(c + 12, sw(bssid_cam_idx, 0x3f, 0));
+  put_le32(c + 16, sw(sma[0], 0xff, 0) | sw(sma[1], 0xff, 8) |
+                       sw(sma[2], 0xff, 16) | sw(sma[3], 0xff, 24));
+  put_le32(c + 20, sw(sma[4], 0xff, 0) | sw(sma[5], 0xff, 8) |
+                       sw(tma[0], 0xff, 16) | sw(tma[1], 0xff, 24));
+  put_le32(c + 24, sw(tma[2], 0xff, 0) | sw(tma[3], 0xff, 8) |
+                       sw(tma[4], 0xff, 16) | sw(tma[5], 0xff, 24));
+  put_le32(c + 32, sw(macid, 0xff, 0) | (1u << 14));
+  put_le32(c + 48, sw(bssid_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
+                       sw(r::BSSID_CAM_ENT_SIZE, 0xff, 16));
+  put_le32(c + 52, 0x1u | sw(r::MAC_AX_NO_MSK, 0x3f, 2) | sw(0, 0x3f, 8) |
+                       sw(tma[0], 0xff, 16) | sw(tma[1], 0xff, 24));
+  put_le32(c + 56, sw(tma[2], 0xff, 0) | sw(tma[3], 0xff, 8) |
+                       sw(tma[4], 0xff, 16) | sw(tma[5], 0xff, 24));
+  bool ok = send_h2c_cmd(r::FWCMD_H2C_CAT_MAC, r::FWCMD_H2C_CL_ADDR_CAM_UPDATE,
+                         r::FWCMD_H2C_FUNC_ADDRCAM_INFO, c, sizeof(c));
+  _logger->info("Kestrel: upd_addr_cam_sta (macid={} net_type={} a_idx={} "
+                "b_idx={} sma={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} "
+                "tma={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) -> {}",
+                macid, net_type, addr_cam_idx, bssid_cam_idx, sma[0], sma[1],
+                sma[2], sma[3], sma[4], sma[5], tma[0], tma[1], tma[2], tma[3],
+                tma[4], tma[5], ok ? "sent" : "FAILED");
   return ok;
 }
 

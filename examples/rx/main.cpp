@@ -46,6 +46,9 @@
 #if defined(DEVOURER_HAVE_8733B)
 #include "rtl8733b/Rtl8733bDevice.h"
 #endif
+#if defined(DEVOURER_HAVE_KESTREL)
+#include "kestrel/RtlKestrelDevice.h"
+#endif
 #include "RtlAdapter.h"
 #include "SignalStop.h"
 #include "UsbOpen.h"
@@ -1705,11 +1708,17 @@ int main(int argc, char **argv) {
         scheduled = true;
       }
 #endif
+#if defined(DEVOURER_HAVE_KESTREL)
+      if (auto *kestrel = dynamic_cast<RtlKestrelDevice *>(rtlDevice)) {
+        kestrel->ScheduleAckResponderDisarmForTest(static_cast<uint32_t>(ms));
+        scheduled = true;
+      }
+#endif
       if (!scheduled) {
         logger->error(
-            "DEVOURER_ACK_DISARM_AFTER_MS is supported only by RTL8733B "
-            "and the Jaguar1/CHIP_8812 path (measured on RTL8812AU); "
-            "refusing {}",
+            "DEVOURER_ACK_DISARM_AFTER_MS is supported only by RTL8733B, "
+            "the Jaguar1/CHIP_8812 path (measured on RTL8812AU) and Kestrel "
+            "(measured on RTL8852BU); refusing {}",
             devourer::generation_name(
                 rtlDevice->GetAdapterCaps().generation));
         return 1;

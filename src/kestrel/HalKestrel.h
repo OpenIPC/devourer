@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 #include "ChipVariant.h"
 #include "KestrelFw.h"
@@ -263,6 +264,55 @@ public:
                                /*bmc=*/false) &&
          ok;
     return ok;
+  }
+
+  /* Register `own` as an associated INFRA station of `bssid` -- what makes the
+   * firmware COMMIT the physical ADDR_CAM entry, which add_self_sta's NO_LINK
+   * entry never gets (accepted over H2C, reads back valid=0). Two commands, in
+   * the order the vendor Windows driver sends them on a real association
+   * (captured over USBPcap): join_info(INFRA, connect), THEN the station
+   * addr_cam (SMA=own, TMA=bssid, SHORT entry, BSSID CAM at index 1). The
+   * join is the step that matters: without it the entry never commits. The
+   * vendor's surrounding commands (role CLIENT, macid unpause, CMAC and DMAC
+   * tables) were each dropped on the 8852B with no change in the commit or the
+   * ACK rate, so they are not sent. The commit is asynchronous; callers verify
+   * with addr_cam_holds(). The 8852C firmware accepts both commands and does
+   * not commit. */
+  bool register_infra_sta(const uint8_t own[6], const uint8_t bssid[6],
+                          uint8_t macid = 0, uint8_t band = 0, uint8_t port = 0) {
+    bool ok = _fw.fw_join_info(macid, reg::MAC_AX_NET_TYPE_INFRA,
+                               reg::MAC_AX_SELF_ROLE_CLIENT,
+                               reg::MAC_AX_WIFI_ROLE_STATION, port, band,
+                               /*connect=*/true);
+    ok = _fw.fw_upd_addr_cam_sta(macid, own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
+                                 /*addr_cam_idx=*/0, /*bssid_cam_idx=*/1) &&
+         ok;
+    return ok;
+  }
+
+  /* One dword of the MAC's internal table SRAM (rtw89 mac_mem_read): the
+   * internal address goes to R_AX_FILTER_MODEL_ADDR, the data comes back
+   * through the R_AX_INDIR_ACCESS_ENTRY window (0x40000, a 32-bit-address
+   * access). */
+  uint32_t read_mac_mem32(uint32_t internal_addr) {
+    _device.rtw_write32(reg::R_AX_FILTER_MODEL_ADDR, internal_addr);
+    return _device.rtw_read32_wide(reg::R_AX_INDIR_ACCESS_ENTRY);
+  }
+
+  /* Whether the PHYSICAL address-CAM entry `idx` is valid and carries `sma` --
+   * what the RMAC actually matches A1 against, as opposed to what an H2C asked
+   * the firmware to write. Layout (rtw89 cam.h): word0 bit0 = VALID, then
+   * SMA[0..3] in word2 and SMA[4..5] in the low half of word3. */
+  bool addr_cam_holds(uint8_t idx, const uint8_t sma[6]) {
+    const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
+    if (!(read_mac_mem32(base) & 0x1u))
+      return false;
+    const uint32_t w2 = read_mac_mem32(base + 8);
+    const uint32_t w3 = read_mac_mem32(base + 12);
+    const uint8_t got[6] = {static_cast<uint8_t>(w2), static_cast<uint8_t>(w2 >> 8),
+                            static_cast<uint8_t>(w2 >> 16), static_cast<uint8_t>(w2 >> 24),
+                            static_cast<uint8_t>(w3), static_cast<uint8_t>(w3 >> 8)};
+    return std::memcmp(got, sma, 6) == 0;
   }
 
   /* Register an associated peer STA (an AP-mode client we schedule UL for):

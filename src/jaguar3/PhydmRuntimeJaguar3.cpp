@@ -12,6 +12,10 @@ namespace {
 constexpr uint8_t DIG_MIN_COVERAGE = 0x1e;
 constexpr uint8_t DIG_MAX_OF_MIN_COVERAGE = 0x22;
 constexpr uint8_t DIG_MIN_DFS = 0x20;
+/* DFS-band decision as the vendor driver's rtw_is_dfs_ch: 5 GHz ch 52-144. */
+bool is_dfs_channel(uint8_t channel) {
+  return channel >= 52 && channel <= 144;
+}
 /* phydm_adaptivity.h normal-mode EDCCA constants. */
 constexpr int TH_L2H_DIFF_IGI = 8;
 constexpr int EDCCA_TH_L2H_LB = 48;
@@ -26,6 +30,21 @@ uint8_t PhydmRuntimeJaguar3::get_igi() {
 void PhydmRuntimeJaguar3::set_igi(uint8_t igi) {
   _device.phy_set_bb_reg(0x1d70, 0x0000007f, igi);
   _device.phy_set_bb_reg(0x1d70, 0x00007f00, igi);
+}
+
+void PhydmRuntimeJaguar3::set_igi_floor(uint8_t floor, uint8_t channel) {
+  const uint8_t prev = _igi_floor;
+  _igi_floor = floor;
+  if (floor != 0) {
+    if (get_igi() < floor)
+      set_igi(floor);
+  } else if (prev != 0) {
+    /* The top of the window dig() would clamp to on its next tick. */
+    const uint8_t hi =
+        is_dfs_channel(channel) ? DIG_MIN_DFS : DIG_MAX_OF_MIN_COVERAGE;
+    if (get_igi() > hi)
+      set_igi(hi);
+  }
 }
 
 /* phydm_fa_cnt_statistics_jgr3 + phydm_false_alarm_counter_reg_reset: read
@@ -85,6 +104,10 @@ void PhydmRuntimeJaguar3::dig(const FaStats &fa, bool is_dfs) {
     th0 = 250; th1 = 1000; th2 = 2000;
     lo = DIG_MIN_DFS; hi = DIG_MIN_DFS;
   }
+  if (lo < _igi_floor)
+    lo = _igi_floor;
+  if (hi < _igi_floor)
+    hi = _igi_floor;
 
   if (fa.fa_all > th2)
     igi += 2;
@@ -205,9 +228,7 @@ void PhydmRuntimeJaguar3::edcca(uint8_t igi) {
 
 void PhydmRuntimeJaguar3::tick(uint8_t channel, bool edcca_track) {
   const FaStats fa = fa_statistics_and_reset();
-  /* DFS-band decision as the vendor driver's rtw_is_dfs_ch: 5 GHz ch 52-144. */
-  const bool is_dfs = channel > 14 && channel >= 52 && channel <= 144;
-  dig(fa, is_dfs);
+  dig(fa, is_dfs_channel(channel));
   if (fa.cck_enabled)
     cck_pd(fa);
   if (edcca_track)

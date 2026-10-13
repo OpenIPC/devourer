@@ -146,7 +146,8 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
                                     bool bmc = false, bool ndpa = false,
                                     uint8_t data_sc = 0,
                                     uint8_t pwr_ofset_type = 0,
-                                    uint8_t pkt_offset = 0) {
+                                    uint8_t pkt_offset = 0,
+                                    bool dis_data_fb = false) {
   SET_TX_DESC_TXPKTSIZE_8822C(d, pkt_size);
   SET_TX_DESC_OFFSET_8822C(d, static_cast<uint32_t>(TXDESC_SIZE_8822C));
   SET_TX_DESC_LS_8822C(d, 1);
@@ -172,7 +173,14 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
    * the legacy 54..6M chain (tests/retry_ladder_probe.sh). */
   SET_TX_DESC_RATE_ID_8822C(d, rate_id);
   SET_TX_DESC_USE_RATE_8822C(d, 1);
-  SET_TX_DESC_DISDATAFB_8822C(d, 0);
+  /* DISDATAFB: with USE_RATE=1 the MAC's per-frame rate-fallback lookup still
+   * consults the fw's per-MACID rate entry, which no injecting MACID has. The
+   * 8822C wedges on that collision for a 40 MHz frame (the first one never
+   * airs and the TX FIFO fills), so its caller passes dis_data_fb=1 for a
+   * 40/80 MHz frame — what the vendor driver's own fixed-rate path writes. A
+   * 20 MHz frame and every 8822E frame keep 0, and with it the fw retry ladder
+   * (DeviceConfig.h RetryFallback). */
+  SET_TX_DESC_DISDATAFB_8822C(d, dis_data_fb ? 1 : 0);
   SET_TX_DESC_SW_DEFINE_8822C(d, 1);
   SET_TX_DESC_DATARATE_8822C(d, rate_hw);
   SET_TX_DESC_DATA_BW_8822C(d, bw);

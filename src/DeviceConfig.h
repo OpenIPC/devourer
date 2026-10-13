@@ -87,6 +87,11 @@ enum class RxMode : uint8_t {
  * 8822C MCS3 x4 -> MCS2 -> 6M floor (CCK floor at 2.4 GHz; VHT steps
  * M7 -> M4 -> M1 -> M0 -> 6M). Jaguar1's fw does not step at all — every
  * retry at the descriptor rate regardless of this knob (8821AU-measured).
+ * The 8822C's 40/80 MHz frames have no ladder at either setting: their
+ * descriptor carries DISDATAFB=1 unconditionally, because with 0 the first
+ * 40 MHz injected frame wedges the TX FIFO
+ * (docs/experiments/8822c-ht40-tx-stall.md). Its 20 MHz frames keep the
+ * ladder above.
  * Off pins every retry at the descriptor DATARATE (DISDATAFB / DISABLE_FB =
  * 1; measured: 1,200/1,200 retried frames re-aired at the original rate) —
  * for constant-rate links where a step-down retry costs extra airtime. A
@@ -282,9 +287,10 @@ struct DeviceConfig {
     int ack_timeout_us = 128;
     /* env: DEVOURER_TX_RETRY_FALLBACK — "off" | unset. Unset = the firmware
      * fallback ladder with its own floor (the current behaviour, descriptors
-     * byte-identical). "off" disables per-retry rate fallback (DISDATAFB /
-     * DISABLE_FB = 1): retries re-air at the descriptor rate. See the
-     * RetryFallback enum for why there is no floor form. */
+     * byte-identical; not on an 8822C 40/80 MHz frame — see the enum).
+     * "off" disables per-retry rate fallback (DISDATAFB / DISABLE_FB = 1):
+     * retries re-air at the descriptor rate. See the RetryFallback enum for
+     * why there is no floor form. */
     RetryFallback retry_fallback = RetryFallback::Default;
     /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
      * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
@@ -410,6 +416,31 @@ struct DeviceConfig {
      * Default-on on the streamtx FPV downlink (the link owns the
      * channel). */
     bool disable_cca = false;
+    /* env: DEVOURER_WIDE_TX_IGI_FLOOR — Jaguar3 (8822C and 8822E) DIG lower
+     * bound at 40/80 MHz, raw IGI (0x1d70[14:8], 0..0x7f; 0 = off). Without
+     * it, on a QUIET channel the receiver parks in a gain state where the
+     * secondary 20 MHz never reads idle, so the MAC holds the first 40 MHz
+     * frame forever and the TX FIFO fills; any received traffic re-runs the
+     * AGC, which is why a busy channel hides it. Quiet is the trigger, not
+     * DFS: silent non-DFS 157(+) hangs the same way at IGI 0x1e, so the
+     * floor applies on every channel. Armed by the session's first
+     * >= 40 MHz transmitted frame, then applied while tuned to 40/80 MHz and
+     * dropped at a narrower width; a receive-only session, or one that sends
+     * only 20 MHz frames into a 40 MHz tune, keeps its normal DIG window.
+     *
+     * The edge is PER UNIT, measured on silent 144(-) at MCS3/40: one 8812CU
+     * clears at 0x24 (0x22 hangs); a second 8812CU still hangs at 0x26 and
+     * airs ~1.5 k frames then wedges at 0x2c, clean at 0x35; one 8812EU
+     * never stalls at its normal 0x20; a second 8812EU hangs at 0x20, clean
+     * at 0x2c and 0x35. The default is the lowest value measured to clear
+     * every unit so far, not a margin over a characterized edge — a further
+     * unit may need more. Cost: idle-channel RX sensitivity at 40/80 MHz on
+     * a wide-transmitting device, estimated from the ~1 dB IGI step and NOT
+     * measured: 0x35 is 21 steps over the DFS floor 0x20 and 19-23 over the
+     * 0x1e..0x22 non-DFS window. Lower it to a unit's own measured edge to
+     * buy that back. 80 MHz carries the same floor, only partially
+     * validated. docs/experiments/8822c-ht40-tx-stall.md. */
+    uint8_t wide_tx_igi_floor = 0x35;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step
      * (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER).

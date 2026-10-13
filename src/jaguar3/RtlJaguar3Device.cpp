@@ -84,7 +84,7 @@ struct WriteBatchScope {
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
-   * previous session's 8822C wide IGI floor (_wide_tx_seen). */
+   * previous session's wide-TX IGI floor (_wide_tx_seen). */
   _wide_tx_seen.store(false, std::memory_order_relaxed);
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
@@ -133,6 +133,8 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                         channel.ChannelWidth);
   _hal.enable_rx_path(); /* RF into RX mode (IGI toggle) — must follow channel set */
+  /* _wide_tx_seen was just cleared, so this never arms a floor: it only drops
+   * one a previous session left in _phydm. */
   apply_igi_floor_locked(channel.Channel, channel.ChannelWidth);
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins */
   _hal.config_channel_8822e(channel.Channel); /* 8822e band TX scaling/backoff + shaping */
@@ -870,7 +872,7 @@ void RtlJaguar3Device::Stop() {
     if (_station.armed())
       (void)_station.clear(_device, _logger, "Jaguar3");
   }
-  /* The 8822C wide IGI floor is earned by this session's TX; a later Init on
+  /* The wide-TX IGI floor is earned by this session's TX; a later Init on
    * the same device must not inherit it (Init/InitWrite clear it too, for a
    * re-bring-up without a Stop). */
   _wide_tx_seen.store(false, std::memory_order_relaxed);
@@ -883,7 +885,7 @@ void RtlJaguar3Device::Stop() {
 
 void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
-   * previous session's 8822C wide IGI floor (_wide_tx_seen). */
+   * previous session's wide-TX IGI floor (_wide_tx_seen). */
   _wide_tx_seen.store(false, std::memory_order_relaxed);
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
@@ -965,6 +967,7 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                                         channel.ChannelWidth);
   if (want_rx)
     _hal.enable_rx_path(); /* RF into RX mode — same slot as the Init path */
+  /* Clear-only, as in Init: _wide_tx_seen was just reset. */
   apply_igi_floor_locked(channel.Channel, channel.ChannelWidth);
   _hal.dpk_force_bypass_8822e(); /* 8822e rfe 21/22: kernel bypasses DPK (after IQK) */
   _hal.config_rfe(channel.Channel); /* 8822e RFE/PAPE antenna-switch pins (PA enable) */
@@ -1581,6 +1584,11 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
     if (band_change && _brought_up &&
         (_tx_pwr_offset_steps != 0 || _tx_pwr_override >= 0))
       apply_tx_power_current(/*full=*/true);
+    /* No apply_igi_floor_locked here, deliberately: the lean hop keeps the
+     * width and leaves IGI (0x1d70) where it found it, and the floor's value
+     * does not depend on the channel's DFS-ness — whatever floor the previous
+     * tune applied is still the right one. (dig() clamps to the floor on
+     * every tick regardless.) */
     return;
   }
   /* Fast path declined (band change / never tuned) — full channel set at the
@@ -1629,10 +1637,7 @@ void RtlJaguar3Device::apply_igi_floor_locked(uint8_t channel,
                                               bool wide_tx_seen) {
   const bool wide = width == CHANNEL_WIDTH_40 || width == CHANNEL_WIDTH_80;
   _phydm.set_igi_floor(
-      (_variant == jaguar3::ChipVariant::C8822C && wide && wide_tx_seen)
-          ? jaguar3::DIG_MIN_8822C_WIDE
-          : 0,
-      channel);
+      (wide && wide_tx_seen) ? _cfg.tuning.wide_tx_igi_floor : 0, channel);
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC
@@ -2759,8 +2764,9 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   uint8_t pwr_type = _txpkt_dflt_type.load(std::memory_order_relaxed);
   if (radiotap_pkt_pwr_db != INT_MIN)
     pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
-  /* 8822C, the session's first >= 40 MHz frame: record it (_wide_tx_seen) and
-   * apply the IGI floor (DIG_MIN_8822C_WIDE) for the CURRENT tune before the
+  /* Either die, the session's first >= 40 MHz frame: record it
+   * (_wide_tx_seen) and apply the IGI floor (DeviceConfig::Tuning::
+   * wide_tx_igi_floor; 0 = off, no arm) for the CURRENT tune before the
    * frame is queued — on a quiet channel the MAC would otherwise hold it
    * forever. Whether the floor is on follows the tuned width, which is read
    * under _reg_mu here and by every retune (apply_igi_floor_locked), so a
@@ -2771,7 +2777,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   const bool wide_frame =
       bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80;
   const bool c_die = _variant == jaguar3::ChipVariant::C8822C;
-  if (c_die && wide_frame &&
+  if (wide_frame && _cfg.tuning.wide_tx_igi_floor != 0 &&
       !_wide_tx_seen.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lk(_reg_mu);
     if (!_wide_tx_seen.load(std::memory_order_relaxed)) {

@@ -8,21 +8,6 @@
 
 namespace jaguar3 {
 
-/* 8822C IGI floor at 40/80 MHz. A wide-channel TX needs the secondary 20 MHz
- * to read idle, and below IGI 0x24 the 8822C receiver parks, on a QUIET
- * channel, in a gain state where the secondary never does: the MAC holds
- * every 40 MHz frame (measured on 144/52/100/120 — the first frame never
- * airs and the TX FIFO fills; 0x24 clears it, 0x22 does not; busy channels
- * self-heal because each received frame re-runs the AGC). One step of margin
- * on top. Costs idle-channel RX sensitivity at those widths only — estimated
- * from the 1 dB IGI step, NOT measured: 6 dB over DIG_MIN_DFS 0x20, 4-8 dB over
- * the 0x1e..0x22 coverage window on a non-DFS channel — and only once the
- * session has transmitted a wide frame (RtlJaguar3Device::_wide_tx_seen): a
- * 40 MHz receiver-only session or a ground station sending 20 MHz control
- * frames keeps the normal floor. 20 MHz and the 8822E are untouched. 80 MHz
- * inherits the floor untested. */
-constexpr uint8_t DIG_MIN_8822C_WIDE = 0x26;
-
 /* Port of the phydm dynamic mechanisms the vendor kernel runs from its ~2 s
  * watchdog in a no-link (monitor) session — the RX-side adaptation loop:
  *
@@ -58,8 +43,9 @@ public:
   /* Lower bound for DIG, honoured by every later tick. 0 = none. Applied at
    * once both ways: setting one raises IGI to it, and dropping one clamps IGI
    * back into `channel`'s normal DIG window instead of leaving the raised gain
-   * for up to a tick. Keeping it at 0 touches no register (the 8822E path). See
-   * DIG_MIN_8822C_WIDE. */
+   * for up to a tick. Keeping it at 0 touches no register. The wide-TX floor
+   * this carries, and why it exists: DeviceConfig::Tuning::
+   * wide_tx_igi_floor. */
   void set_igi_floor(uint8_t floor, uint8_t channel);
 
 private:

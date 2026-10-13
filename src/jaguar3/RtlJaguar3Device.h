@@ -346,15 +346,15 @@ private:
   /* phydm dynamic mechanisms (FA/DIG/CCK-PD/EDCCA), ticked from the coex
    * thread every ~2 s like the vendor watchdog. */
   jaguar3::PhydmRuntimeJaguar3 _phydm;
-  /* DIG_MIN_8822C_WIDE policy. _wide_tx_seen records that this session has
-   * transmitted a >= 40 MHz frame (build_tx_block, set once); it is cleared
-   * by Init, InitWrite and Stop, and nothing else. While it is set the floor
-   * follows the TUNED width: on at 40/80 MHz, off (IGI clamped back into the
-   * normal window) at any narrower width. A session that only receives at
-   * 40 MHz, or only transmits 20 MHz frames into a 40 MHz channel as a ground
-   * station does, never sets it and keeps its full RX sensitivity. 8822C
-   * only; on the 8822E the floor stays 0. Caller holds _reg_mu (or is
-   * pre-coex bring-up). */
+  /* Wide-TX IGI floor policy (DeviceConfig::Tuning::wide_tx_igi_floor, both
+   * dies). _wide_tx_seen records that this session has transmitted a
+   * >= 40 MHz frame (build_tx_block, set once); it is cleared by Init,
+   * InitWrite and Stop, and nothing else. While it is set the floor follows
+   * the TUNED width: on at 40/80 MHz, off (IGI clamped back into the normal
+   * window) at any narrower width. A session that only receives at 40 MHz,
+   * or only transmits 20 MHz frames into a 40 MHz channel as a ground
+   * station does, never sets it and keeps its full RX sensitivity. Caller
+   * holds _reg_mu (or is pre-coex bring-up). */
   void apply_igi_floor_locked(uint8_t channel, ChannelWidth_t width,
                               bool wide_tx_seen);
   void apply_igi_floor_locked(uint8_t channel, ChannelWidth_t width) {

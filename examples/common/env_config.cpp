@@ -235,6 +235,9 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (const char *e = env_str("DEVOURER_THERMAL_TRACK"))
     cfg.tuning.thermal_track = std::strcmp(e, "0") != 0;
   cfg.tuning.disable_cca = env_flag("DEVOURER_DIS_CCA");
+  /* Jaguar3 40/80 MHz TX IGI floor; 0 = off, 7-bit IGI field. */
+  if (env_long("DEVOURER_WIDE_TX_IGI_FLOOR", &v) && v >= 0 && v <= 0x7f)
+    cfg.tuning.wide_tx_igi_floor = static_cast<uint8_t>(v);
   if (env_long("DEVOURER_FASTRETUNE_FW", &v) && v >= 0)
     cfg.tuning.fastretune_fw = static_cast<int>(v);
   if (env_long("DEVOURER_KFR_OFLD", &v) && v >= 0)

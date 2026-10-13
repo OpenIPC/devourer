@@ -14,7 +14,7 @@ constexpr uint8_t DIG_MAX_OF_MIN_COVERAGE = 0x22;
 constexpr uint8_t DIG_MIN_DFS = 0x20;
 /* DFS-band decision as the vendor driver's rtw_is_dfs_ch: 5 GHz ch 52-144. */
 bool is_dfs_channel(uint8_t channel) {
-  return channel > 14 && channel >= 52 && channel <= 144;
+  return channel >= 52 && channel <= 144;
 }
 /* phydm_adaptivity.h normal-mode EDCCA constants. */
 constexpr int TH_L2H_DIFF_IGI = 8;

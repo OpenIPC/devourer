@@ -8,6 +8,7 @@
 
 #include "KestrelFw.h"
 #include "MacRegAx.h"
+#include "PreciseDelay.h"
 #include "kestrel_halbb_glue.h" /* vendored halbb-G6 BB bring-up (C) */
 #include "kestrel_halrf_glue.h" /* vendored halrf-G6 RF cals (C) */
 
@@ -16,9 +17,7 @@ namespace kestrel {
 namespace {
 namespace r = kestrel::reg;
 
-void delay_us(uint32_t us) {
-  std::this_thread::sleep_for(std::chrono::microseconds(us));
-}
+void delay_us(uint32_t us) { devourer::precise_delay_us(us); }
 
 } /* namespace */
 

@@ -1,12 +1,11 @@
 #include "KestrelFw.h"
 
-#include <chrono>
 #include <cstring>
-#include <thread>
 #include <utility>
 
 #include "KestrelLe.h"
 #include "MacRegAx.h"
+#include "PreciseDelay.h"
 #include "SignalStop.h" /* g_devourer_should_stop — set by demo signal handlers */
 #if defined(DEVOURER_HAVE_KESTREL_8852B)
 #include "hal8852b_fw.h"
@@ -20,9 +19,7 @@ namespace kestrel {
 namespace {
 namespace r = kestrel::reg;
 
-void delay_us(uint32_t us) {
-  std::this_thread::sleep_for(std::chrono::microseconds(us));
-}
+void delay_us(uint32_t us) { devourer::precise_delay_us(us); }
 
 /* le32 / put_le32 now live in KestrelLe.h (shared with KestrelFwSched.cpp);
  * pull them into this anonymous namespace so existing unqualified uses below

@@ -26,20 +26,26 @@ was measured to get there.
   On ch149, shared with a neighbour AP, one of three runs without the clear
   dropped to 82.4% single-shot; three with it stayed at >= 99.6%. On a quiet
   ch161 it made no difference.
-- **Own macid.** The station sits at macid 1 / ADDR_CAM entry 1, apart from
-  the injection context at macid 0 / entry 0: the firmware commits entry 1 in
-  the same ~2.2 ms, and entry 0 reads back byte-identical before the arm,
-  after it and after the clear. Sharing entry 0 (the previous layout) had no
-  measurable cost either: a witness counted the same >= 2900 of 3000 injected
-  frames armed and unarmed, on both layouts. The separation is for the
-  injection context's integrity, not a delivery fix.
-- **Unexplained cell.** In about 55 armed cells across development, one read
-  entry 1 back committed (after 10 ms rather than ~2.2 ms) and answered no
-  ACKs; other slow commits were fine and it has not reproduced.
-- **Clear needs the host.** After `join_info(disconnect)` and a NO_LINK
-  addr_cam, entry 1 stays VALID with the responder's address; a role REMOVE,
-  or role CREATE plus NO_LINK, leaves it valid too. Clearing VALID from the
-  host takes, and re-read for 2 s it stays clear. rxdemo's
+- **Own macid.** The station sits at macid 127 / ADDR_CAM entry 127 (the last
+  entry of the 0x7f search range), apart from the injection context at macid 0
+  / entry 0 and from the low slots peer registrations take (`RegisterPeerSta`
+  callers use 1, 2, ...; it and `RegisterBeamformee` now refuse 127). The
+  firmware commits entry 127 in the same ~2.2 ms as entry 1 or 0. With the
+  station at entry 1 during development, entry 0 read back byte-identical
+  before the arm, after it and after the clear. Sharing entry 0 (the previous
+  layout) had no measurable cost: a witness counted the same >= 2900 of 3000
+  injected frames armed and unarmed, on both layouts. The separation is for
+  the injection context's integrity, not a delivery fix.
+- **Unexplained cell.** In about 55 armed cells across development (station at
+  entry 1), one read the entry back committed (after 10 ms rather than ~2.2
+  ms) and answered no ACKs; other slow commits were fine and it has not
+  reproduced.
+- **Clear needs the host.** Measured at entry 1: after `join_info(disconnect)`
+  and a NO_LINK addr_cam, the entry stays VALID with the responder's address;
+  a role REMOVE, or role CREATE plus NO_LINK, leaves it valid too. Clearing
+  VALID from the host takes, and re-read for 2 s it stays clear. Because those
+  H2Cs land asynchronously, the clear repeats until the entry has read back
+  empty for 25 ms, and only that counts as disarmed. rxdemo's
   `DEVOURER_ACK_DISARM_AFTER_MS` exercises it live.
 - **8852C:** its firmware accepts both commands and leaves the entry invalid,
   so the arm refuses. The vendor's 8852C association sends far more before the

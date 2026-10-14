@@ -538,10 +538,14 @@ namespace {
 constexpr uint8_t kAckResponderBssid[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
 /* The responder's own station: a macid and ADDR_CAM entry apart from the
  * injection context InitWrite programs at macid 0 / entry 0 (which the WD of
- * every injected frame keeps pointing at), and a BSSID CAM entry apart from
- * that context's index 0. */
-constexpr uint8_t kAckMacid = 1;
-constexpr uint8_t kAckAddrCamIdx = 1;
+ * every injected frame keeps pointing at), and from the low slots peer
+ * registrations take by convention (RegisterPeerSta callers use 1, 2, ...):
+ * the last entry of the 0x7f ADDR_CAM search range, reserved against
+ * RegisterPeerSta / RegisterBeamformee. BSSID CAM 1, apart from the injection
+ * context's index 0 (peers use 0 too, and only the addr entry selects the
+ * response). */
+constexpr uint8_t kAckMacid = 127;
+constexpr uint8_t kAckAddrCamIdx = 127;
 constexpr uint8_t kAckBssidCamIdx = 1;
 
 std::string mac_text(const uint8_t *m) {
@@ -653,7 +657,11 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
   const auto t0 = clock::now();
   auto clean_since = t0;
   const devourer::MacAddr *left = nullptr;
+  /* The address the entry last held; kept on record if the clear is not
+   * confirmed, so the next ClearAckResponder retries it. */
+  const devourer::MacAddr *last_held = &held.front();
   bool first = true;
+  bool stable = false;
   for (;;) {
     if (first || left) {
       _hal.clear_addr_cam_entry(kAckAddrCamIdx);
@@ -661,18 +669,25 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
       first = false;
     }
     left = still_held();
-    if (!left && clock::now() - clean_since >= std::chrono::milliseconds(25))
+    if (left)
+      last_held = left;
+    else if (clock::now() - clean_since >= std::chrono::milliseconds(25)) {
+      stable = true;
       break;
+    }
     if (clock::now() - t0 >= std::chrono::milliseconds(150))
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  if (left) {
+  /* Success only once the entry has stayed empty for the whole interval: an
+   * empty read right after a late rewrite was cleared is not a confirmation. */
+  if (!stable) {
     _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
-                  "{} still holds {}, the MAC may keep answering for it "
+                  "{} {} {}, the MAC may keep answering for it "
                   "(ClearAckResponder retries)", kAckAddrCamIdx,
-                  mac_text(left->bytes.data()));
-    return *left;
+                  left ? "still holds" : "did not stay clear of",
+                  mac_text(last_held->bytes.data()));
+    return *last_held;
   }
   _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry {} "
                 "no longer holds {})", kAckAddrCamIdx,
@@ -1071,12 +1086,24 @@ bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
   return _hal.configure_ul_ofdma(cfg);
 }
 
+bool RtlKestrelDevice::peer_slot_reserved(const char *who, uint8_t macid,
+                                          uint8_t addr_cam_idx) const {
+  if (macid != kAckMacid && addr_cam_idx != kAckAddrCamIdx)
+    return false;
+  _logger->error("Kestrel: {} refused: macid {} / ADDR_CAM entry {} overlaps "
+                 "the ACK responder's reserved macid {} / entry {}",
+                 who, macid, addr_cam_idx, kAckMacid, kAckAddrCamIdx);
+  return true;
+}
+
 bool RtlKestrelDevice::RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
                                        uint8_t addr_cam_idx) {
   if (!_tx_up) {
     _logger->error("Kestrel: RegisterPeerSta before InitWrite");
     return false;
   }
+  if (peer_slot_reserved("RegisterPeerSta", macid, addr_cam_idx))
+    return false;
   return _hal.register_peer_sta(peer_mac, macid, addr_cam_idx);
 }
 
@@ -1087,6 +1114,8 @@ bool RtlKestrelDevice::RegisterBeamformee(const uint8_t peer_mac[6],
     _logger->error("Kestrel: RegisterBeamformee before InitWrite");
     return false;
   }
+  if (peer_slot_reserved("RegisterBeamformee", macid, addr_cam_idx))
+    return false;
   /* The peer must exist as a fw role/ADDR_CAM entry first (same as a scheduled-
    * UL peer); then layer the CSI/bf params + hw sounding maps on top. */
   bool ok = _hal.register_peer_sta(peer_mac, macid, addr_cam_idx);

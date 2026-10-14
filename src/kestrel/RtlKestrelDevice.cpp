@@ -536,6 +536,17 @@ namespace {
  * on it (A1 alone selects the response), it only has to be a unicast address
  * distinct from the responder's own. */
 constexpr uint8_t kAckResponderBssid[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+/* The responder's own station: a macid and ADDR_CAM entry apart from the
+ * injection context InitWrite programs at macid 0 / entry 0 (which the WD of
+ * every injected frame keeps pointing at), and from the low slots peer
+ * registrations take by convention (RegisterPeerSta callers use 1, 2, ...):
+ * the last entry of the 0x7f ADDR_CAM search range, reserved against
+ * RegisterPeerSta / RegisterBeamformee. BSSID CAM 1, apart from the injection
+ * context's index 0 (peers use 0 too, and only the addr entry selects the
+ * response). */
+constexpr uint8_t kAckMacid = 127;
+constexpr uint8_t kAckAddrCamIdx = 127;
+constexpr uint8_t kAckBssidCamIdx = 1;
 
 std::string mac_text(const uint8_t *m) {
   char b[18];
@@ -569,7 +580,8 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
   const uint32_t resp0 = _device.rtw_read32(r::R_AX_TRXPTCL_RESP_0);
   if (!_ack_responder)
     _ack_resp0_saved = resp0;
-  const bool sent = _hal.register_infra_sta(m, bssid);
+  const bool sent = _hal.register_infra_sta(m, bssid, kAckMacid, kAckAddrCamIdx,
+                                            kAckBssidCamIdx);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, resp0 & ~r::B_AX_RSP_CHK_ALL);
   /* The H2Cs going out says nothing about the firmware committing them: read
    * the physical CAM entry the RMAC matches against. The firmware applies the
@@ -577,7 +589,7 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
   const auto t0 = std::chrono::steady_clock::now();
   bool committed = false;
   int polls = 0;
-  while (sent && !(committed = _hal.addr_cam_holds(/*idx=*/0, m)) &&
+  while (sent && !(committed = _hal.addr_cam_holds(kAckAddrCamIdx, m)) &&
          std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100)) {
     ++polls;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -604,9 +616,9 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
     return false;
   }
   _ack_responder = mac;
-  _logger->info("Kestrel: hardware ACK responder armed for {} (ADDR_CAM "
-                "entry 0 committed, read back after {} us)", mac_text(m),
-                waited_us);
+  _logger->info("Kestrel: hardware ACK responder armed for {} (macid {}, "
+                "ADDR_CAM entry {} committed, read back after {} us)",
+                mac_text(m), kAckMacid, kAckAddrCamIdx, waited_us);
   return true;
 }
 
@@ -623,31 +635,64 @@ void RtlKestrelDevice::ClearAckResponder() {
 std::optional<devourer::MacAddr>
 RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
   namespace r = kestrel::reg;
-  /* Back to what InitWrite registers for macid 0: the NO_LINK self entry,
-   * which the firmware does not commit -- so the RMAC stops answering. */
-  _hal.register_sta_role(0, 0, 0);
-  _hal.add_self_sta(kInjectSA, /*macid=*/0);
+  /* Disconnect the responder's station in the firmware; the injection
+   * context at macid 0 is never touched. */
+  _hal.unregister_infra_sta(held.front().bytes.data(), kAckMacid,
+                            kAckAddrCamIdx, kAckBssidCamIdx);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, _ack_resp0_saved);
-  /* The rewrite is as asynchronous as the arm: give it the same bound. */
+  /* The 8852B firmware keeps a disconnected station's entry VALID (measured:
+   * neither join_info(disconnect) + a NO_LINK addr_cam, nor a role REMOVE,
+   * nor role CREATE + NO_LINK clears it), so the host clears VALID itself, as
+   * the vendor's no-firmware mac_upd_addr_cam path writes the CAM. The H2Cs
+   * above land asynchronously (2-20 ms measured for the arm) and rewrite the
+   * entry, so the clear repeats until the entry has read back empty for 50 ms
+   * straight, well past that tail. The 150 ms bound only ends the wait while
+   * the entry is still held; an entry that reads empty is always given its
+   * full 50 ms, so the worst case is about 200 ms. */
   const auto still_held = [&]() -> const devourer::MacAddr * {
     for (const auto &a : held)
-      if (_hal.addr_cam_holds(/*idx=*/0, a.bytes.data()))
+      if (_hal.addr_cam_holds(kAckAddrCamIdx, a.bytes.data()))
         return &a;
     return nullptr;
   };
-  const auto t0 = std::chrono::steady_clock::now();
-  const devourer::MacAddr *left;
-  while ((left = still_held()) &&
-         std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100))
+  using clock = std::chrono::steady_clock;
+  const auto t0 = clock::now();
+  auto clean_since = t0;
+  const devourer::MacAddr *left = nullptr;
+  /* The address the entry last held; kept on record if the clear is not
+   * confirmed, so the next ClearAckResponder retries it. */
+  const devourer::MacAddr *last_held = &held.front();
+  bool first = true;
+  bool stable = false;
+  for (;;) {
+    if (first || left) {
+      _hal.clear_addr_cam_entry(kAckAddrCamIdx);
+      clean_since = clock::now();
+      first = false;
+    }
+    left = still_held();
+    if (left) {
+      last_held = left;
+      if (clock::now() - t0 >= std::chrono::milliseconds(150))
+        break;
+    } else if (clock::now() - clean_since >= std::chrono::milliseconds(50)) {
+      stable = true;
+      break;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  if (left) {
-    _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
-                  "0 still holds {}, the MAC may keep answering for it "
-                  "(ClearAckResponder retries)", mac_text(left->bytes.data()));
-    return *left;
   }
-  _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry 0 "
-                "no longer holds {})", mac_text(held.front().bytes.data()));
+  /* Success only once the entry has stayed empty for the whole interval: an
+   * empty read right after a late rewrite was cleared is not a confirmation. */
+  if (!stable) {
+    _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
+                  "{} still holds {}, the MAC may keep answering for it "
+                  "(ClearAckResponder retries)", kAckAddrCamIdx,
+                  mac_text(last_held->bytes.data()));
+    return *last_held;
+  }
+  _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry {} "
+                "no longer holds {})", kAckAddrCamIdx,
+                mac_text(held.front().bytes.data()));
   return std::nullopt;
 }
 
@@ -1042,12 +1087,24 @@ bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
   return _hal.configure_ul_ofdma(cfg);
 }
 
+bool RtlKestrelDevice::peer_slot_reserved(const char *who, uint8_t macid,
+                                          uint8_t addr_cam_idx) const {
+  if (macid != kAckMacid && addr_cam_idx != kAckAddrCamIdx)
+    return false;
+  _logger->error("Kestrel: {} refused: macid {} / ADDR_CAM entry {} overlaps "
+                 "the ACK responder's reserved macid {} / entry {}",
+                 who, macid, addr_cam_idx, kAckMacid, kAckAddrCamIdx);
+  return true;
+}
+
 bool RtlKestrelDevice::RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
                                        uint8_t addr_cam_idx) {
   if (!_tx_up) {
     _logger->error("Kestrel: RegisterPeerSta before InitWrite");
     return false;
   }
+  if (peer_slot_reserved("RegisterPeerSta", macid, addr_cam_idx))
+    return false;
   return _hal.register_peer_sta(peer_mac, macid, addr_cam_idx);
 }
 
@@ -1058,6 +1115,8 @@ bool RtlKestrelDevice::RegisterBeamformee(const uint8_t peer_mac[6],
     _logger->error("Kestrel: RegisterBeamformee before InitWrite");
     return false;
   }
+  if (peer_slot_reserved("RegisterBeamformee", macid, addr_cam_idx))
+    return false;
   /* The peer must exist as a fw role/ADDR_CAM entry first (same as a scheduled-
    * UL peer); then layer the CSI/bf params + hw sounding maps on top. */
   bool ok = _hal.register_peer_sta(peer_mac, macid, addr_cam_idx);

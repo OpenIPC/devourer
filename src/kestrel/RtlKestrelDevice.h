@@ -4,7 +4,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 
 #include "TxMode.h"
@@ -93,7 +95,15 @@ public:
    * verified by reading the physical CAM entry back -- false when the entry
    * did not commit, which is the 8852C today. Post-bring-up only. Clear puts
    * macid 0 back to the bring-up NO_LINK entry and verifies the CAM no
-   * longer holds `mac`. */
+   * longer holds `mac`; an address still held after a failed clear (or a
+   * failed retarget, which checks the old address too) stays recorded, so a
+   * later ClearAckResponder retries it. Arm and clear are serialized.
+   *
+   * The responder shares macid 0 / ADDR_CAM entry 0 with injection: while
+   * armed, injected frames (whose WD carries macid 0) go out under the
+   * station context the arm registered, and clear restores the bring-up
+   * entry. A second macid for the responder is untested: whether the
+   * firmware commits an entry other than 0 has not been measured. */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
   /* rxdemo's live-disarm measurement hook (DEVOURER_ACK_DISARM_AFTER_MS): the
@@ -298,6 +308,14 @@ private:
    * replaced (restored by ClearAckResponder). */
   std::optional<devourer::MacAddr> _ack_responder;
   uint32_t _ack_resp0_saved = 0;
+  /* Serializes SetAckResponder/ClearAckResponder: the test disarm below
+   * calls ClearAckResponder from its own thread. */
+  std::mutex _ack_mutex;
+  /* Rewrite macid 0 to the NO_LINK entry, restore RESP_0 and poll the CAM
+   * until it holds none of `held`. Returns the address still held on
+   * timeout, nullopt once gone. Caller holds _ack_mutex. */
+  std::optional<devourer::MacAddr>
+  disarm_ack_locked(std::span<const devourer::MacAddr> held);
   std::optional<uint32_t> _ack_disarm_after_ms;
   std::jthread _ack_disarm_thread;
   /* DEVOURER_ACK_RESPONDER: arm at the end of bring-up, throw if refused. */

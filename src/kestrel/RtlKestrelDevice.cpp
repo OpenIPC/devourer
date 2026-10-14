@@ -93,6 +93,9 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
 }
 
 RtlKestrelDevice::~RtlKestrelDevice() {
+  /* Cancel + join a pending test disarm before the transport is quiesced
+   * under it (Stop() does the same; a caller may skip Stop()). */
+  _ack_disarm_thread = {};
   /* Inert on this generation (its send path is synchronous), but the invariant
    * belongs to every device: nothing gets released while a transfer the
    * transport still owns is outstanding. */
@@ -555,6 +558,7 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
                    "(Init/InitWrite) has finished");
     return false;
   }
+  std::lock_guard<std::mutex> lock(_ack_mutex);
   uint8_t bssid[6];
   std::memcpy(bssid, kAckResponderBssid, sizeof bssid);
   if (std::memcmp(bssid, m, sizeof bssid) == 0)
@@ -589,8 +593,14 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
                    mac_text(m),
                    sent ? "accepted but did not commit" : "refused",
                    sent ? "sent" : "failed");
-    _ack_responder = mac;
-    ClearAckResponder();
+    /* Roll back. On a retarget the previous address may still be committed
+     * (a refused H2C leaves it in place), so verify it is gone too; whatever
+     * is still held stays recorded for ClearAckResponder to retry. */
+    devourer::MacAddr held[2] = {mac};
+    size_t n = 1;
+    if (_ack_responder && _ack_responder->bytes != mac.bytes)
+      held[n++] = *_ack_responder;
+    _ack_responder = disarm_ack_locked({held, n});
     return false;
   }
   _ack_responder = mac;
@@ -601,29 +611,44 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
 }
 
 void RtlKestrelDevice::ClearAckResponder() {
-  namespace r = kestrel::reg;
+  std::lock_guard<std::mutex> lock(_ack_mutex);
   if (!_ack_responder)
     return;
   const devourer::MacAddr mac = *_ack_responder;
-  _ack_responder.reset();
+  /* Forgotten only once the CAM read-back confirms it; a failed clear stays
+   * armed on record so the next call retries. */
+  _ack_responder = disarm_ack_locked({&mac, 1});
+}
+
+std::optional<devourer::MacAddr>
+RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
+  namespace r = kestrel::reg;
   /* Back to what InitWrite registers for macid 0: the NO_LINK self entry,
    * which the firmware does not commit -- so the RMAC stops answering. */
   _hal.register_sta_role(0, 0, 0);
   _hal.add_self_sta(kInjectSA, /*macid=*/0);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, _ack_resp0_saved);
   /* The rewrite is as asynchronous as the arm: give it the same bound. */
+  const auto still_held = [&]() -> const devourer::MacAddr * {
+    for (const auto &a : held)
+      if (_hal.addr_cam_holds(/*idx=*/0, a.bytes.data()))
+        return &a;
+    return nullptr;
+  };
   const auto t0 = std::chrono::steady_clock::now();
-  bool held = true;
-  while ((held = _hal.addr_cam_holds(/*idx=*/0, mac.bytes.data())) &&
+  const devourer::MacAddr *left;
+  while ((left = still_held()) &&
          std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100))
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  if (held)
+  if (left) {
     _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
-                  "0 still holds {}, the MAC may keep answering for it",
-                  mac_text(mac.bytes.data()));
-  else
-    _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry 0 "
-                  "no longer holds {})", mac_text(mac.bytes.data()));
+                  "0 still holds {}, the MAC may keep answering for it "
+                  "(ClearAckResponder retries)", mac_text(left->bytes.data()));
+    return *left;
+  }
+  _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry 0 "
+                "no longer holds {})", mac_text(held.front().bytes.data()));
+  return std::nullopt;
 }
 
 void RtlKestrelDevice::arm_configured_ack_responder() {

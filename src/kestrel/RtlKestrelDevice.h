@@ -100,7 +100,7 @@ public:
    * today. Post-bring-up only. Clear disconnects that station and clears
    * the entry's VALID bit from the host (the 8852B firmware leaves a
    * disconnected station's entry valid), and succeeds only once the entry
-   * has read back empty for 25 ms; an address still held, or not confirmed
+   * has read back empty for 50 ms; an address still held, or not confirmed
    * gone, after a failed clear (or a failed retarget, which checks the old
    * address too) stays recorded, so a later ClearAckResponder retries it.
    * Arm and clear are serialized. */

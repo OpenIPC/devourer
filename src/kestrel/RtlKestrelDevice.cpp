@@ -645,8 +645,10 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
    * nor role CREATE + NO_LINK clears it), so the host clears VALID itself, as
    * the vendor's no-firmware mac_upd_addr_cam path writes the CAM. The H2Cs
    * above land asynchronously (2-20 ms measured for the arm) and rewrite the
-   * entry, so the clear repeats until the entry has read back empty for 25 ms
-   * straight, within a 150 ms bound. */
+   * entry, so the clear repeats until the entry has read back empty for 50 ms
+   * straight, well past that tail. The 150 ms bound only ends the wait while
+   * the entry is still held; an entry that reads empty is always given its
+   * full 50 ms, so the worst case is about 200 ms. */
   const auto still_held = [&]() -> const devourer::MacAddr * {
     for (const auto &a : held)
       if (_hal.addr_cam_holds(kAckAddrCamIdx, a.bytes.data()))
@@ -669,23 +671,22 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
       first = false;
     }
     left = still_held();
-    if (left)
+    if (left) {
       last_held = left;
-    else if (clock::now() - clean_since >= std::chrono::milliseconds(25)) {
+      if (clock::now() - t0 >= std::chrono::milliseconds(150))
+        break;
+    } else if (clock::now() - clean_since >= std::chrono::milliseconds(50)) {
       stable = true;
       break;
     }
-    if (clock::now() - t0 >= std::chrono::milliseconds(150))
-      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   /* Success only once the entry has stayed empty for the whole interval: an
    * empty read right after a late rewrite was cleared is not a confirmation. */
   if (!stable) {
     _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
-                  "{} {} {}, the MAC may keep answering for it "
+                  "{} still holds {}, the MAC may keep answering for it "
                   "(ClearAckResponder retries)", kAckAddrCamIdx,
-                  left ? "still holds" : "did not stay clear of",
                   mac_text(last_held->bytes.data()));
     return *last_held;
   }

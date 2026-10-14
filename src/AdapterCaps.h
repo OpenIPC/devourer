@@ -191,7 +191,14 @@ struct AdapterCaps {
    * 8822B, 8812C/8822C, 8812E/8822E (the 8811A rides the 8812 die path and
    * inherits its row), 8733B (1725/1725 frames ACKed at retries_mean 0.00,
    * and retarget-proof: re-armed on a different MAC, 1728/1728 —
-   * tests/ack_txreport_matrix.sh run with the 8733B as the responder).
+   * tests/ack_txreport_matrix.sh run with the 8733B as the responder),
+   * 8852B (Kestrel has no CCX report, so the soliciting TX is an 8832CU
+   * counting the ACK frames it receives, one attempt per frame, MCS1 on
+   * ch161, 3 runs per row: 14230/14430 armed at Init, 14391/14431 armed at
+   * InitWrite, 14347/14425 retargeted, 0/6440 at the old address after the
+   * retarget, 0/6194 never armed, 0/6603 after a live disarm). The 8852C
+   * reads false: its firmware does not commit the station entry, and the
+   * arm refuses on the read-back.
    *
    * The `on`, `retarget`, and legacy `off` rows establish arming, retargeting,
    * and a never-armed control. A backend-owned `disarmed` row supports only

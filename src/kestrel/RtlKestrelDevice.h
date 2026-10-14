@@ -4,7 +4,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 
 #include "TxMode.h"
@@ -67,6 +69,7 @@ public:
    * demo shutdown). The destructor joins too, but the demos destroy the
    * device object after libusb_exit, so Stop() is the ordered join point. */
   void Stop() override {
+    _ack_disarm_thread = {}; /* cancel + join a pending test disarm */
     _rx_stop = true;
     stop_wp_drain();
     pcie_quiesce();
@@ -83,6 +86,32 @@ public:
    * IRtlRadio contract; SetCcaMode(d) == SetCcaGates(d, d). */
   bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
   bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
+  /* Hardware ACK responder (IRadio contract). The AX MAC has no Jaguar-style
+   * port identity register to retarget: the RMAC answers for an address only
+   * once the firmware has COMMITTED a valid ADDR_CAM entry for it, and it does
+   * that only for a station registered the way a real association registers
+   * one (HalKestrel::register_infra_sta). The arm programs that station with
+   * `mac` as its own address, clears the response-abort CCA gates, and is
+   * verified by reading the physical CAM entry back -- false when the entry
+   * did not commit, which is the 8852C today. Post-bring-up only. Clear puts
+   * macid 0 back to the bring-up NO_LINK entry and verifies the CAM no
+   * longer holds `mac`; an address still held after a failed clear (or a
+   * failed retarget, which checks the old address too) stays recorded, so a
+   * later ClearAckResponder retries it. Arm and clear are serialized.
+   *
+   * The responder shares macid 0 / ADDR_CAM entry 0 with injection: while
+   * armed, injected frames (whose WD carries macid 0) go out under the
+   * station context the arm registered, and clear restores the bring-up
+   * entry. A second macid for the responder is untested: whether the
+   * firmware commits an entry other than 0 has not been measured. */
+  bool SetAckResponder(const devourer::MacAddr &mac) override;
+  void ClearAckResponder() override;
+  /* rxdemo's live-disarm measurement hook (DEVOURER_ACK_DISARM_AFTER_MS): the
+   * delay starts once Init has finished the bring-up, including a configured
+   * SetAckResponder, never from process start. */
+  void ScheduleAckResponderDisarmForTest(uint32_t delay_ms) {
+    _ack_disarm_after_ms = delay_ms;
+  }
   bool send_packet(const uint8_t *packet, size_t length) override;
   devourer::TxStats GetTxStats() override { return _device.GetTxStats(); }
   SelectedChannel GetSelectedChannel() override { return _channel; }
@@ -275,6 +304,22 @@ private:
    * ACH0 is channel 0, so "TX is up" is its own flag, not a non-zero handle. */
   bool _tx_up = false;
   bool _brought_up = false; /* Init/InitWrite completed the MAC bring-up */
+  /* Armed ACK responder address, and the R_AX_TRXPTCL_RESP_0 value the arm
+   * replaced (restored by ClearAckResponder). */
+  std::optional<devourer::MacAddr> _ack_responder;
+  uint32_t _ack_resp0_saved = 0;
+  /* Serializes SetAckResponder/ClearAckResponder: the test disarm below
+   * calls ClearAckResponder from its own thread. */
+  std::mutex _ack_mutex;
+  /* Rewrite macid 0 to the NO_LINK entry, restore RESP_0 and poll the CAM
+   * until it holds none of `held`. Returns the address still held on
+   * timeout, nullopt once gone. Caller holds _ack_mutex. */
+  std::optional<devourer::MacAddr>
+  disarm_ack_locked(std::span<const devourer::MacAddr> held);
+  std::optional<uint32_t> _ack_disarm_after_ms;
+  std::jthread _ack_disarm_thread;
+  /* DEVOURER_ACK_RESPONDER: arm at the end of bring-up, throw if refused. */
+  void arm_configured_ack_responder();
   uint8_t _tx_mgmt_q = 0;
   uint8_t _tx_data_q = 0;
   bool _tx_data_ok = false; /* data frames may use _tx_data_q */

@@ -91,19 +91,17 @@ public:
    * once the firmware has COMMITTED a valid ADDR_CAM entry for it, and it does
    * that only for a station registered the way a real association registers
    * one (HalKestrel::register_infra_sta). The arm programs that station with
-   * `mac` as its own address, clears the response-abort CCA gates, and is
-   * verified by reading the physical CAM entry back -- false when the entry
-   * did not commit, which is the 8852C today. Post-bring-up only. Clear puts
-   * macid 0 back to the bring-up NO_LINK entry and verifies the CAM no
-   * longer holds `mac`; an address still held after a failed clear (or a
-   * failed retarget, which checks the old address too) stays recorded, so a
-   * later ClearAckResponder retries it. Arm and clear are serialized.
-   *
-   * The responder shares macid 0 / ADDR_CAM entry 0 with injection: while
-   * armed, injected frames (whose WD carries macid 0) go out under the
-   * station context the arm registered, and clear restores the bring-up
-   * entry. A second macid for the responder is untested: whether the
-   * firmware commits an entry other than 0 has not been measured. */
+   * `mac` as its own address, on its own macid 1 / ADDR_CAM entry 1 so the
+   * injection context at macid 0 / entry 0 (what every injected frame's WD
+   * points at) is left as bring-up programmed it; clears the response-abort
+   * CCA gates; and is verified by reading the physical CAM entry back --
+   * false when the entry did not commit, which is the 8852C today.
+   * Post-bring-up only. Clear disconnects that station and clears the
+   * entry's VALID bit from the host (the 8852B firmware leaves a
+   * disconnected station's entry valid), and verifies the CAM no longer
+   * holds `mac`; an address still held after a failed clear (or a failed
+   * retarget, which checks the old address too) stays recorded, so a later
+   * ClearAckResponder retries it. Arm and clear are serialized. */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
   /* rxdemo's live-disarm measurement hook (DEVOURER_ACK_DISARM_AFTER_MS): the

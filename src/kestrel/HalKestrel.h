@@ -279,15 +279,45 @@ public:
    * with addr_cam_holds(). The 8852C firmware accepts both commands and does
    * not commit. */
   bool register_infra_sta(const uint8_t own[6], const uint8_t bssid[6],
-                          uint8_t macid = 0, uint8_t band = 0, uint8_t port = 0) {
+                          uint8_t macid, uint8_t addr_cam_idx,
+                          uint8_t bssid_cam_idx, uint8_t band = 0,
+                          uint8_t port = 0) {
     bool ok = _fw.fw_join_info(macid, reg::MAC_AX_NET_TYPE_INFRA,
                                reg::MAC_AX_SELF_ROLE_CLIENT,
                                reg::MAC_AX_WIFI_ROLE_STATION, port, band,
                                /*connect=*/true);
     ok = _fw.fw_upd_addr_cam_sta(macid, own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
-                                 /*addr_cam_idx=*/0, /*bssid_cam_idx=*/1) &&
+                                 addr_cam_idx, bssid_cam_idx) &&
          ok;
     return ok;
+  }
+
+  /* Undo register_infra_sta in the firmware: join_info(disconnect), then a
+   * NO_LINK addr_cam for `macid`. On the 8852B this does NOT invalidate the
+   * physical entry (it stays VALID with the station's SMA), so callers also
+   * clear_addr_cam_entry() and verify with addr_cam_holds(). */
+  bool unregister_infra_sta(const uint8_t own[6], uint8_t macid,
+                            uint8_t addr_cam_idx, uint8_t bssid_cam_idx,
+                            uint8_t band = 0, uint8_t port = 0) {
+    bool ok = _fw.fw_join_info(macid, reg::MAC_AX_NET_TYPE_INFRA,
+                               reg::MAC_AX_SELF_ROLE_CLIENT,
+                               reg::MAC_AX_WIFI_ROLE_STATION, port, band,
+                               /*connect=*/false);
+    ok = _fw.fw_upd_addr_cam(macid, own, reg::MAC_AX_NET_TYPE_NO_LINK,
+                             addr_cam_idx, bssid_cam_idx) &&
+         ok;
+    return ok;
+  }
+
+  /* Write one dword of the MAC's internal table SRAM (the write half of
+   * read_mac_mem32). */
+  void write_mac_mem32(uint32_t internal_addr, uint32_t value) {
+    _device.rtw_write32(reg::R_AX_FILTER_MODEL_ADDR, internal_addr);
+    _device.rtw_write32_wide(reg::R_AX_INDIR_ACCESS_ENTRY, value);
+  }
+  /* Clear VALID on address-CAM entry `idx`. */
+  void clear_addr_cam_entry(uint8_t idx) {
+    write_mac_mem32(reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE, 0u);
   }
 
   /* One dword of the MAC's internal table SRAM (rtw89 mac_mem_read): the

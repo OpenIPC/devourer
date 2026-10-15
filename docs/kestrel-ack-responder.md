@@ -27,9 +27,14 @@ was measured to get there.
   dropped to 82.4% single-shot; three with it stayed at >= 99.6%. On a quiet
   ch161 it made no difference.
 - **Own slot.** The slot itself is documented at `ack_slot()`. Measured: the
-  8852B firmware commits entry 127 in the same ~2.2 ms as entry 1 or 0; the
-  8852C's CAM reads back 0xdeadbeef from entry 64 up, which is why its slot is
-  63. With the station at entry 1 during development, entry 0 read back
+  8852B firmware commits entry 127 in the same ~2.2 ms as entry 1 or 0. The
+  CAM has 128 entries on both dies, laid out at a per-die stride (the vendor's
+  get_addr_cam_size): 0x40 on the 8852B, 0x20 on the 8852C. An earlier
+  revision used the 8852B's stride on both, so its 8852C "entry 63" was
+  hardware entry 126 and the 0xdeadbeef it read "from entry 64 up" was the
+  end of the 128-entry CAM. Dword 5 of an 8852C entry reads 0xdeadbeef
+  whatever is written (the other seven read back as written), so the host's
+  read-back skips it. With the station at entry 1 during development, entry 0 read back
   byte-identical before the arm, after it and after the clear. Sharing entry 0
   (the previous layout) had no measurable cost: a witness counted the same >=
   2900 of 3000 injected frames armed and unarmed, on both layouts.
@@ -82,23 +87,30 @@ read-backs). Measured on its own:
   them cleared.
 - **The lookup hits the entry.** The long RX descriptor (dword 5:
   ADDR_CAM_VLD, addr_cam index, macid) shows every frame addressed to the
-  responder matching the host-written entry (macid 63; the index reads 126,
-  the entry counted in 32-byte units).
-- **Clear** reads back empty and the soliciting peer then gets no ACK (the
-  live-disarm row in `AdapterCaps.h`).
+  responder matching the host-written entry (macid 63). That was measured on
+  the earlier layout, where the index read 126: the entry the 0x40-stride
+  write had landed in, counted at the 8852C's 0x20 stride.
+- **Clear** reads back empty and the soliciting peer then gets no ACK. On
+  this die a 0 after a disarm only counts when the same session answered
+  before it (a dead bring-up also reads 0), so the live-disarm row in
+  `AdapterCaps.h` solicits across the disarm.
 
 ## 8852C: bring-ups that answer no ACKs
 
 Some 8852C bring-ups answer no ACK at all: the responder arms, the entry reads
 back, and the adapter answers nothing for the whole session, where a good
-session answers >= 97.5%. How often tracks how long the adapter has been
-running. Over a day of back-to-back sessions it rose from about one in ten to
-three in four (10 of 83 sessions overall); after the adapter was unplugged for
-a long while, the first 12 sessions in a row answered 97.5-99.4%, and 3 of the
-next 12 armed sessions (the `AdapterCaps.h` matrix) came up dead. The RF
-thermal meter read delta 2 rising to 4, too coarse to say more. So it looks
-thermal or uptime-related, though temperature was not varied on its own. It is
-a property of the bring-up, not of the arm: in one failed session three
+session answers >= 97.5%. How often varies and no cause is established. On
+the first bench it looked tied to uptime: over a day of back-to-back sessions
+it rose from about one in ten to three in four (10 of 83 overall), and after a
+long power-off the first 12 sessions answered 97.5-99.4% before 3 of the next
+12 came up dead. A second bench (two TX50UH, an 8812CU soliciting) does not
+support that reading: dead sessions came interleaved with good ones
+(dead/good/dead/good/dead in one series), one came on the second session after
+a 3 s VBUS cut, a VBUS cold cycle before every session still left 1 of 13
+dead, and the RF thermal meter sat at delta 2-3 throughout. Back on the first
+bench, with the entry at hardware entry 63, 6 of 15 sessions were dead, in
+runs (3 dead, 3 good, 2 dead, 4 good). It is a property of the bring-up, not
+of the arm: in one failed session three
 separate injector processes in a row all saw 0, and no session has ever
 recovered or failed partway. Measured in failed sessions:
 
@@ -117,13 +129,15 @@ recovered or failed partway. Measured in failed sessions:
 - Ruled out by measurement: the response NAV checks (`R_AX_RSP_CHK_SIG` bits
   19-21 cleared, still fails), the BSSID CAM (all zero in good and failed
   sessions alike; writing entry 1 valid, still fails), the injector, the
-  host's per-frame RX cost, the arm's timing relative to the RX loop, and the
-  slot.
+  host's per-frame RX cost, and the arm's timing relative to the RX loop.
+  The slot is not ruled out: development tested hardware entry 126 only, and
+  on a second bench entry 126 gave more dead sessions than entry 63 (8 of 21
+  against 1 of 16), but entry 63 gave 6 of 15 on the first, so the slot does
+  not explain it.
 
 What decides it is not found. The 8852B shows the same shape far more rarely
 (about one bring-up in 55). Because a dead session reads back like a good one,
 `GetAdapterCaps` reports `ack_responder_ok` false on the 8852C (true on the
 8852B), while `SetAckResponder` still arms it. A caller that needs the ACK on
 the 8852C should treat a soliciting peer's retries as the tell and bring the
-adapter up again; when that keeps failing, letting the adapter cool down is
-what brought it back here.
+adapter up again.

@@ -311,6 +311,17 @@ public:
     return ok;
   }
 
+  /* Internal address of address-CAM entry `idx`. The stride is per die, as
+   * the vendor's get_addr_cam_size + mac_upd_addr_cam lay it out (entry N at
+   * N * len): the LONG entry (0x40) on the 8852B, the SHORT one (0x20) on the
+   * 8852C, 128 entries on both (ADDRCAM_NUM). */
+  uint32_t addr_cam_entry_addr(uint8_t idx) const {
+    const uint32_t stride = _variant == ChipVariant::C8852C
+                                ? reg::ADDR_CAM_ENT_SHORT_SIZE
+                                : reg::ADDR_CAM_ENT_LONG_SIZE;
+    return reg::ADDR_CAM_MEM_BASE + idx * stride;
+  }
+
   /* Write one dword of the MAC's internal table SRAM (the write half of
    * read_mac_mem32). False when either register transfer failed. */
   bool write_mac_mem32(uint32_t internal_addr, uint32_t value) {
@@ -319,8 +330,7 @@ public:
   }
   /* Clear VALID on address-CAM entry `idx`. */
   bool clear_addr_cam_entry(uint8_t idx) {
-    return write_mac_mem32(
-        reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE, 0u);
+    return write_mac_mem32(addr_cam_entry_addr(idx), 0u);
   }
 
   /* Write the station entry register_infra_sta asks the firmware for straight
@@ -340,7 +350,7 @@ public:
                           uint8_t bssid_cam_idx) {
     const auto w = addr_cam_sta_entry(own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
                                       bssid_cam_idx, macid);
-    const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
+    const uint32_t base = addr_cam_entry_addr(idx);
     /* VALID off first (a retarget rewrites a live entry), then the body, then
      * VALID last, so the RMAC never matches a half-written entry. */
     if (!write_mac_mem32(base, 0u))
@@ -362,7 +372,7 @@ public:
                           uint8_t bssid_cam_idx) {
     const auto w = addr_cam_sta_entry(own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
                                       bssid_cam_idx, macid);
-    const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
+    const uint32_t base = addr_cam_entry_addr(idx);
     for (int i = 0; i < 8; ++i)
       if (i != 5 && read_mac_mem32(base + 4 * i) != w[i])
         return false;
@@ -383,7 +393,7 @@ public:
    * the firmware to write. Layout (rtw89 cam.h): word0 bit0 = VALID, then
    * SMA[0..3] in word2 and SMA[4..5] in the low half of word3. */
   bool addr_cam_holds(uint8_t idx, const uint8_t sma[6]) {
-    const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
+    const uint32_t base = addr_cam_entry_addr(idx);
     if (!(read_mac_mem32(base) & 0x1u))
       return false;
     const uint32_t w2 = read_mac_mem32(base + 8);

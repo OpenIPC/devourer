@@ -1104,10 +1104,9 @@ bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
 
 bool RtlKestrelDevice::peer_slot_reserved(const char *who, uint8_t macid,
                                           uint8_t addr_cam_idx) const {
-  if (addr_cam_idx >= addr_cam_entries()) {
-    _logger->error("Kestrel: {} refused: ADDR_CAM entry {} is past this die's "
-                   "last entry ({})", who, addr_cam_idx,
-                   addr_cam_entries() - 1);
+  if (addr_cam_idx >= kAddrCamEntries) {
+    _logger->error("Kestrel: {} refused: ADDR_CAM entry {} is past the CAM's "
+                   "last entry ({})", who, addr_cam_idx, kAddrCamEntries - 1);
     return true;
   }
   if (macid != ack_slot() && addr_cam_idx != ack_slot())
@@ -1181,7 +1180,7 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
    * modal {1,3} on-air copies exactly, limit 8 -> an 8/9 near-tie consistent
    * with ~90% witness capture of a 9-copy truth — obedient, no wedge). */
   c.tx_retry_limit_ok = true;
-  c.ack_responder_ok = _variant != kestrel::ChipVariant::C8852C;
+  c.ack_responder_ok = _variant == kestrel::ChipVariant::C8852B;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */

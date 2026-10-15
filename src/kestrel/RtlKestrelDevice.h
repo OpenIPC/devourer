@@ -105,11 +105,10 @@ public:
    * entry has read back empty for 50 ms; an address still held after a failed
    * clear (or a failed retarget, which checks the old address too) stays
    * recorded, so a later ClearAckResponder retries it. Arm and clear are
-   * serialized. On the 8852C a true return is not a guarantee: some bring-ups
-   * read the entry back and answer no ACK for the whole session
-   * (docs/kestrel-ack-responder.md); nothing on
-   * the host was found to detect it, so GetAdapterCaps reports
-   * ack_responder_ok false on that die. */
+   * serialized. On the 8852C the response also depends on the bring-up
+   * taking the TX path selection from the BB's P-MAC registers
+   * (kestrel_halbb_ctrl_tx_path); without it some bring-ups armed and
+   * answered no ACK (docs/kestrel-ack-responder.md). */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
   /* rxdemo's live-disarm measurement hook (DEVOURER_ACK_DISARM_AFTER_MS): the

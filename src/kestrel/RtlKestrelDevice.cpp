@@ -1170,17 +1170,17 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   /* Hardware ARQ: SetAckResponder arms on both dies, verified by CAM read-back
    * -- the 8852B through a firmware-committed INFRA station entry
    * (HalKestrel::register_infra_sta), the 8852C through a host-written one
-   * (HalKestrel::write_addr_cam_sta), its firmware ignoring the H2C. The flag
-   * is the 8852B's only: on the 8852C some bring-ups arm, read the entry back
-   * and answer no ACK for the whole session, and nothing on the host tells
-   * those apart (SetAckResponder), so a caller cannot rely on the loop
-   * closing there. SetAckResponder still arms the 8852C. The retry knob IS wired
+   * (HalKestrel::write_addr_cam_sta), its firmware ignoring the H2C. Both dies
+   * are measured; the 8852C has answered in every measured session since the
+   * bring-up takes the TX path selection from P-MAC
+   * (kestrel_halbb_ctrl_tx_path). Any other variant does not inherit it. The retry knob IS wired
    * (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the N-retries
    * contract in send_packet; witness-measured on the 8832CU: limits {0,2} ->
    * modal {1,3} on-air copies exactly, limit 8 -> an 8/9 near-tie consistent
    * with ~90% witness capture of a 9-copy truth — obedient, no wedge). */
   c.tx_retry_limit_ok = true;
-  c.ack_responder_ok = _variant == kestrel::ChipVariant::C8852B;
+  c.ack_responder_ok = _variant == kestrel::ChipVariant::C8852B ||
+                       _variant == kestrel::ChipVariant::C8852C;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */

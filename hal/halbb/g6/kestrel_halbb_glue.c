@@ -277,8 +277,19 @@ void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx) {
   /* 8852C-only: the 8852B routes TX antennas per-STA via the CMAC antenna
    * model (TXWD/cctl), there is no path-com block to program. */
 #ifdef BB_8852C_SUPPORT
-  if (ctx && ctx->bb.ic_type == BB_RTL8852C)
+  if (ctx && ctx->bb.ic_type == BB_RTL8852C) {
     halbb_ctrl_tx_path_tmac_8852c(&ctx->bb, RF_PATH_A, false);
+    /* Then take the TX path enable and the path A/B maps from the BB's P-MAC
+     * registers (0x09a4[4:2]) instead of the TX info the MAC sends with each
+     * PPDU: paths A+B, A on IFFT 0, B on IFFT 1, with the vendor's per-path
+     * TSSI reset pulse. The path selection the MAC attaches to a hardware
+     * response (ACK) comes from state nothing initialises on this die: in
+     * some bring-ups it enables only a path the die does not have, or maps
+     * path A off the signal, and the response is composed but never radiated
+     * (docs/kestrel-ack-responder.md). The switch applies to every PPDU;
+     * injection was measured unchanged for 1SS only. */
+    halbb_ctrl_tx_path_pmac_8852c(&ctx->bb, RF_PATH_AB, false);
+  }
 #else
   (void)ctx;
 #endif

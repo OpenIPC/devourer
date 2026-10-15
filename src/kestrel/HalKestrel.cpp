@@ -2281,7 +2281,8 @@ void HalKestrel::vnd_bb_set_gain(uint8_t channel, uint8_t band_type) {
 void HalKestrel::vnd_bb_ctrl_tx_path() {
   if (_halbb_ctx && _variant == ChipVariant::C8852C) {
     kestrel_halbb_ctrl_tx_path(_halbb_ctx);
-    _logger->info("Kestrel PHY: T-MAC TX path-com routed (vendored, 8852C)");
+    _logger->info("Kestrel PHY: T-MAC TX path-com routed (vendored, 8852C), "
+                  "TX path enable/map from P-MAC (A+B)");
   }
 }
 

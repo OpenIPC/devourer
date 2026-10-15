@@ -683,7 +683,8 @@ constexpr uint8_t FWCMD_H2C_CL_FR_EXCHG = 0x5;
 constexpr uint8_t FWCMD_H2C_FUNC_CCTLINFO_UD = 0x2;
 constexpr uint8_t FWCMD_H2C_FUNC_DCTLINFO_UD = 0x1;
 
-/* addr_cam entry geometry (addr_cam.h): 8852B uses the LONG entry (0x40). */
+/* addr_cam entry geometry (addr_cam.h get_addr_cam_size): the 8852B uses the
+ * LONG entry (0x40) as its CAM stride, the 8852C the SHORT one (0x20). */
 constexpr uint8_t ADDR_CAM_ENT_LONG_SIZE = 0x40;
 /* The entry length the vendor driver writes for an associated station. */
 constexpr uint8_t ADDR_CAM_ENT_SHORT_SIZE = 0x20;

@@ -197,11 +197,26 @@ struct AdapterCaps {
    * ch161, 3 runs per row, responder on its own macid 127 / ADDR_CAM entry
    * 127: 14414/14422 armed at Init, 14376/14417 armed at InitWrite,
    * 14419/14432 retargeted, 0/6597 at the old address after the retarget,
-   * 0/6575 never armed, 0/6561 after a live disarm; one cell in about 55
+   * 0/6575 never armed, 0/6561 after a live disarm, re-run with the
+   * solicitor across the disarm: 3842/3848 then 0/1773; one cell in about 55
    * across the development runs, at entry 1, read the entry back committed
-   * and answered no ACKs, not reproduced since). The 8852C reads false: its
-   * firmware does not commit the station entry, and the arm refuses on the
-   * read-back.
+   * and answered no ACKs, not reproduced since), 8852C (the same bench with
+   * the roles swapped, the 8852B soliciting; the entry is host-written at
+   * macid / ADDR_CAM entry 63, docs/kestrel-ack-responder.md. 3 runs per row
+   * with the entry at hardware entry 126, an earlier layout that used the
+   * 8852B's CAM stride: 13831/14041 armed at Init, 14239/14408 retargeted,
+   * armed at InitWrite 98.9% and 97.0% in two runs with the third a dead
+   * session, 0/5993 at the old address, 0/6062 never armed. At hardware
+   * entry 63, the solicitor running across a live disarm in one session:
+   * 3812/3837 then 0/1616, 3846/3848 then 0/1623 (a third cell was a dead
+   * session and says nothing); 15 armed sessions back to back, 9 answering
+   * 97.5-99.9% and 6 dead. Some bring-ups answer no ACK at all, at any
+   * entry tried: 3 of 12 and 6 of 15 here, 8 of 21 and 1 of 16 on a second
+   * bench, interleaved with good sessions). The 8852C is measured but reports
+   * FALSE: a dead session reads its entry back like a good one, so the flag
+   * could not tell a caller the loop closes; SetAckResponder still arms it,
+   * and a caller that wants it there judges by the soliciting peer's
+   * retries.
    *
    * The `on`, `retarget`, and legacy `off` rows establish arming, retargeting,
    * and a never-armed control. A backend-owned `disarmed` row supports only
@@ -226,8 +241,8 @@ struct AdapterCaps {
    * generation — the AP-mode work proved the gate where it was measured.
    * False-as-unmeasured (the
    * vht_2g4_ok reading: unmeasured, not incapable): the 8821C — it shares
-   * the recipe but no 8821CU/CE cell has run. FALSE on Kestrel:
-   * SetAckResponder is not implemented on the AX generation.
+   * the recipe but no 8821CU/CE cell has run. FALSE on the Kestrel 8852C
+   * (measured, see above).
    * tx_retry_limit_ok: DEVOURER_TX_RETRY_LIMIT drives hardware autonomous
    * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; the 8733B
    * by airtime dose-response instead, 0/3/12 -> 1.00/4.00/12.32–12.33 airings per

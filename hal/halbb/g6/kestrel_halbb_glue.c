@@ -165,18 +165,20 @@ void halbb_diagnostic_event_notify(struct bb_info *bb, enum habb_fun_t type,
  * vendor applies that regulatory threshold only under a chplan that demands
  * it; its mode for an unassociated device is EDCCA_NORMAL_MODE, whose
  * threshold is EDCCA_MAX (never busy) while not linked — that is what is
- * programmed here, so 6 GHz TX defers on the preamble carrier sense (primary
- * CCA, still on) and not on the uncalibrated energy floor. The regulatory
- * 6 GHz energy-detect level is therefore not enforced by this driver.
+ * programmed here, so 5 and 6 GHz TX defer on the preamble carrier sense
+ * (primary CCA, still on) and not on the uncalibrated energy floor. The
+ * regulatory energy-detect levels for those bands are therefore not enforced
+ * by this driver.
  * First call fills the EDCCA CR table (a vendor dm_init stage the minimal
  * bring-up skips — without it every address is 0/mask 0 and writes land
  * nowhere), the per-chip cap defaults and the one-shot init. */
-void kestrel_halbb_edcca_6g(struct kestrel_halbb_ctx *ctx, unsigned char bw) {
+void kestrel_halbb_edcca_park(struct kestrel_halbb_ctx *ctx, unsigned char band_type,
+                              unsigned char bw) {
   if (!ctx)
     return;
   struct bb_info *bb = &ctx->bb;
   struct rtw_chan_def *cd = &bb->hal_com->band[0].cur_chandef;
-  cd->band = BAND_ON_6G;
+  cd->band = band_type == 2 ? BAND_ON_6G : band_type == 1 ? BAND_ON_5G : BAND_ON_24G;
   cd->bw = (enum channel_width)bw;
   if (!ctx->edcca_inited) {
     if (!ctx->edcca_cr_inited) {

@@ -69,7 +69,8 @@ void kestrel_halbb_ctrl_tx_path(struct kestrel_halbb_ctx *ctx);
 /* 6 GHz EDCCA threshold after a 6 GHz tune (the vendor's unlinked
  * EDCCA_NORMAL_MODE level — see the definition); bw is the halbb
  * channel_width enum. */
-void kestrel_halbb_edcca_6g(struct kestrel_halbb_ctx *ctx, unsigned char bw);
+void kestrel_halbb_edcca_park(struct kestrel_halbb_ctx *ctx, unsigned char band_type,
+                              unsigned char bw);
 /* EDCCA hardware report: pwdB fb/p20/s20, busy flags fb/p20/s20, pwdB path 0/1. */
 void kestrel_halbb_edcca_report(struct kestrel_halbb_ctx *ctx, int out[8]);
 

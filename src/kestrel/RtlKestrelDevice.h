@@ -108,7 +108,8 @@ public:
    * serialized. On the 8852C a true return is not a guarantee: some bring-ups
    * read the entry back and answer no ACK for the whole session, more often
    * the longer the adapter has run (docs/kestrel-ack-responder.md); nothing on
-   * the host was found to detect it. */
+   * the host was found to detect it, so GetAdapterCaps reports
+   * ack_responder_ok false on that die. */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
   /* rxdemo's live-disarm measurement hook (DEVOURER_ACK_DISARM_AFTER_MS): the
@@ -222,7 +223,9 @@ public:
 
   /* Register an associated peer STA (macid/addr-cam) so a Trigger's per-user
    * grant scores against it — the AP-side companion to SendTrigger for the
-   * end-to-end UL path. */
+   * end-to-end UL path. Refuses the ACK responder's slot (ack_slot()) and an
+   * `addr_cam_idx` past the die's CAM (64 entries on the 8852C), as does
+   * RegisterBeamformee. */
   bool RegisterPeerSta(const uint8_t peer_mac[6], uint8_t macid,
                        uint8_t addr_cam_idx) override;
 
@@ -330,13 +333,19 @@ private:
   uint8_t ack_slot() const {
     return _variant == kestrel::ChipVariant::C8852C ? 63 : 127;
   }
+  /* Address-CAM entries that hold what is written to them: 64 on the 8852C
+   * (0xdeadbeef from entry 64 up), 128 on the 8852B. */
+  unsigned addr_cam_entries() const {
+    return _variant == kestrel::ChipVariant::C8852C ? 64u : 128u;
+  }
   /* The 8852C firmware ignores the addr_cam H2C, so the ACK responder's
    * station entry is written (and cleared) by the host on that die. */
   bool host_written_ack_cam() const {
     return _variant == kestrel::ChipVariant::C8852C;
   }
   /* True (and logged) when a peer registration would take the ACK
-   * responder's reserved macid or ADDR_CAM entry. */
+   * responder's reserved macid or ADDR_CAM entry, or an ADDR_CAM entry past
+   * the die's last one (addr_cam_entries()). */
   bool peer_slot_reserved(const char *who, uint8_t macid,
                           uint8_t addr_cam_idx) const;
   std::optional<uint32_t> _ack_disarm_after_ms;

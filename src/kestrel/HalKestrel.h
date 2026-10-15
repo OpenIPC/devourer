@@ -312,14 +312,15 @@ public:
   }
 
   /* Write one dword of the MAC's internal table SRAM (the write half of
-   * read_mac_mem32). */
-  void write_mac_mem32(uint32_t internal_addr, uint32_t value) {
-    _device.rtw_write32(reg::R_AX_FILTER_MODEL_ADDR, internal_addr);
-    _device.rtw_write32_wide(reg::R_AX_INDIR_ACCESS_ENTRY, value);
+   * read_mac_mem32). False when either register transfer failed. */
+  bool write_mac_mem32(uint32_t internal_addr, uint32_t value) {
+    return _device.rtw_write32(reg::R_AX_FILTER_MODEL_ADDR, internal_addr) &&
+           _device.rtw_write32_wide(reg::R_AX_INDIR_ACCESS_ENTRY, value);
   }
   /* Clear VALID on address-CAM entry `idx`. */
-  void clear_addr_cam_entry(uint8_t idx) {
-    write_mac_mem32(reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE, 0u);
+  bool clear_addr_cam_entry(uint8_t idx) {
+    return write_mac_mem32(
+        reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE, 0u);
   }
 
   /* Write the station entry register_infra_sta asks the firmware for straight
@@ -330,9 +331,11 @@ public:
    * `bssid_cam_idx`, SMA=own, TMA=bssid, `macid` plus the vendor's bit 14.
    * Only the address CAM: the vendor path also writes the BSSID CAM entry,
    * but host-writing it changed nothing measurable (the response rate, and
-   * the bring-ups that answer no ACKs, both stayed). Synchronous; callers
-   * verify with addr_cam_holds(). */
-  void write_addr_cam_sta(uint8_t idx, const uint8_t own[6],
+   * the bring-ups that answer no ACKs, both stayed). Synchronous. False on
+   * the first failed transfer, VALID then not set again (a failure after the
+   * VALID-off write leaves the entry invalid, not half-written and live);
+   * callers verify with addr_cam_sta_holds(). */
+  bool write_addr_cam_sta(uint8_t idx, const uint8_t own[6],
                           const uint8_t bssid[6], uint8_t macid,
                           uint8_t bssid_cam_idx) {
     const auto w = addr_cam_sta_entry(own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
@@ -340,10 +343,30 @@ public:
     const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
     /* VALID off first (a retarget rewrites a live entry), then the body, then
      * VALID last, so the RMAC never matches a half-written entry. */
-    write_mac_mem32(base, 0u);
+    if (!write_mac_mem32(base, 0u))
+      return false;
     for (int i = 7; i >= 1; --i)
-      write_mac_mem32(base + 4 * i, w[i]);
-    write_mac_mem32(base, w[0]);
+      if (!write_mac_mem32(base + 4 * i, w[i]))
+        return false;
+    return write_mac_mem32(base, w[0]);
+  }
+
+  /* Whether the physical address-CAM entry `idx` reads back as exactly the
+   * station entry write_addr_cam_sta writes for these arguments -- the check
+   * for the host-written path, where nothing but the read says the whole
+   * entry landed (addr_cam_holds only checks VALID + SMA). Every dword but
+   * dword 5, which the 8852C does not back: it reads 0xdeadbeef whatever was
+   * written (measured; the other seven read back as written). */
+  bool addr_cam_sta_holds(uint8_t idx, const uint8_t own[6],
+                          const uint8_t bssid[6], uint8_t macid,
+                          uint8_t bssid_cam_idx) {
+    const auto w = addr_cam_sta_entry(own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
+                                      bssid_cam_idx, macid);
+    const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
+    for (int i = 0; i < 8; ++i)
+      if (i != 5 && read_mac_mem32(base + 4 * i) != w[i])
+        return false;
+    return true;
   }
 
   /* One dword of the MAC's internal table SRAM (rtw89 mac_mem_read): the

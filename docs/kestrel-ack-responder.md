@@ -121,7 +121,9 @@ recovered or failed partway. Measured in failed sessions:
   slot.
 
 What decides it is not found. The 8852B shows the same shape far more rarely
-(about one bring-up in 55). A caller that needs the ACK on the 8852C should
-treat a soliciting peer's retries as the tell and bring the adapter up again;
-when that keeps failing, letting the adapter cool down is what brought it back
-here.
+(about one bring-up in 55). Because a dead session reads back like a good one,
+`GetAdapterCaps` reports `ack_responder_ok` false on the 8852C (true on the
+8852B), while `SetAckResponder` still arms it. A caller that needs the ACK on
+the 8852C should treat a soliciting peer's retries as the tell and bring the
+adapter up again; when that keeps failing, letting the adapter cool down is
+what brought it back here.

@@ -7,6 +7,7 @@
 
 #include "ChipVariant.h"
 #include "KestrelFw.h"
+#include "KestrelAddrCam.h"
 #include "MacRegAx.h" /* mac_ax role enums */
 #include "RtlAdapter.h"
 #include "SelectedChannel.h" /* ChannelWidth_t */
@@ -276,8 +277,9 @@ public:
    * vendor's surrounding commands (role CLIENT, macid unpause, CMAC and DMAC
    * tables) were each dropped on the 8852B with no change in the commit or the
    * ACK rate, so they are not sent. The commit is asynchronous; callers verify
-   * with addr_cam_holds(). The 8852C firmware accepts both commands and does
-   * not commit. */
+   * with addr_cam_holds(). The 8852C firmware ignores the addr_cam H2C
+   * altogether (neither CAM entry is written), so that die takes
+   * write_addr_cam_sta() instead. */
   bool register_infra_sta(const uint8_t own[6], const uint8_t bssid[6],
                           uint8_t macid, uint8_t addr_cam_idx,
                           uint8_t bssid_cam_idx, uint8_t band = 0,
@@ -318,6 +320,30 @@ public:
   /* Clear VALID on address-CAM entry `idx`. */
   void clear_addr_cam_entry(uint8_t idx) {
     write_mac_mem32(reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE, 0u);
+  }
+
+  /* Write the station entry register_infra_sta asks the firmware for straight
+   * into the physical address CAM -- the vendor's no-firmware path
+   * (mac_upd_addr_cam's indirect SRAM write), for the 8852C, whose firmware
+   * ignores the addr_cam H2C. The same SHORT entry the 8852B firmware commits:
+   * VALID, net_type INFRA, the SMA/TMA hashes (XOR of the address bytes),
+   * `bssid_cam_idx`, SMA=own, TMA=bssid, `macid` plus the vendor's bit 14.
+   * Only the address CAM: the vendor path also writes the BSSID CAM entry,
+   * but host-writing it changed nothing measurable (the response rate, and
+   * the bring-ups that answer no ACKs, both stayed). Synchronous; callers
+   * verify with addr_cam_holds(). */
+  void write_addr_cam_sta(uint8_t idx, const uint8_t own[6],
+                          const uint8_t bssid[6], uint8_t macid,
+                          uint8_t bssid_cam_idx) {
+    const auto w = addr_cam_sta_entry(own, bssid, reg::MAC_AX_NET_TYPE_INFRA,
+                                      bssid_cam_idx, macid);
+    const uint32_t base = reg::ADDR_CAM_MEM_BASE + idx * reg::ADDR_CAM_ENT_LONG_SIZE;
+    /* VALID off first (a retarget rewrites a live entry), then the body, then
+     * VALID last, so the RMAC never matches a half-written entry. */
+    write_mac_mem32(base, 0u);
+    for (int i = 7; i >= 1; --i)
+      write_mac_mem32(base + 4 * i, w[i]);
+    write_mac_mem32(base, w[0]);
   }
 
   /* One dword of the MAC's internal table SRAM (rtw89 mac_mem_read): the

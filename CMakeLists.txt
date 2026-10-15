@@ -923,6 +923,16 @@ target_link_libraries(ToneMaskSelftest PRIVATE devourer)
 
 add_test(NAME tone_mask_math COMMAND ToneMaskSelftest)
 
+# Headless guard for the Kestrel station address-CAM encoder shared by the
+# 8852B's addr_cam H2C and the 8852C's host write; expected words are
+# hardware read-backs (src/kestrel/KestrelAddrCam.h).
+add_executable(KestrelAddrCamSelftest
+    tests/kestrel_addr_cam_selftest.cpp
+)
+target_link_libraries(KestrelAddrCamSelftest PRIVATE devourer)
+
+add_test(NAME kestrel_addr_cam COMMAND KestrelAddrCamSelftest)
+
 # Headless guard for the radio contract: a radio implementing only IRadio's
 # pure-virtual core must compile without any Realtek type, its not-ported
 # defaults must hold, and it must not be an IRtlRadio. A Realtek-typed pure

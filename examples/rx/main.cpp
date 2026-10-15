@@ -1718,7 +1718,7 @@ int main(int argc, char **argv) {
         logger->error(
             "DEVOURER_ACK_DISARM_AFTER_MS is supported only by RTL8733B, "
             "the Jaguar1/CHIP_8812 path (measured on RTL8812AU) and Kestrel "
-            "(measured on RTL8852BU); refusing {}",
+            "(measured on RTL8852BU and RTL8832CU); refusing {}",
             devourer::generation_name(
                 rtlDevice->GetAdapterCaps().generation));
         return 1;

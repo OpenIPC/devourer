@@ -1,7 +1,7 @@
-# Hardware ACK responder on Kestrel (RTL8852BU)
+# Hardware ACK responder on Kestrel (RTL8852BU, RTL8832CU)
 
-How `SetAckResponder` arms the AX MAC's SIFS ACK on the 8852B, what was
-measured to be needed, and what is still open. The bench numbers are the
+How `SetAckResponder` arms the AX MAC's SIFS ACK on both Kestrel dies, what
+was measured to be needed, and what is still open. The bench numbers are the
 `ack_responder_ok` row in `src/AdapterCaps.h`.
 
 ## Evidence behind the mechanism
@@ -26,20 +26,18 @@ was measured to get there.
   On ch149, shared with a neighbour AP, one of three runs without the clear
   dropped to 82.4% single-shot; three with it stayed at >= 99.6%. On a quiet
   ch161 it made no difference.
-- **Own macid.** The station sits at macid 127 / ADDR_CAM entry 127 (the last
-  entry of the 0x7f search range), apart from the injection context at macid 0
-  / entry 0 and from the low slots peer registrations take (`RegisterPeerSta`
-  callers use 1, 2, ...; it and `RegisterBeamformee` refuse 127). The
-  firmware commits entry 127 in the same ~2.2 ms as entry 1 or 0. With the
-  station at entry 1 during development, entry 0 read back byte-identical
-  before the arm, after it and after the clear. Sharing entry 0 (the previous
-  layout) had no measurable cost: a witness counted the same >= 2900 of 3000
-  injected frames armed and unarmed, on both layouts. The separation is for
-  the injection context's integrity, not a delivery fix.
+- **Own slot.** The slot itself is documented at `ack_slot()`. Measured: the
+  8852B firmware commits entry 127 in the same ~2.2 ms as entry 1 or 0; the
+  8852C's CAM reads back 0xdeadbeef from entry 64 up, which is why its slot is
+  63. With the station at entry 1 during development, entry 0 read back
+  byte-identical before the arm, after it and after the clear. Sharing entry 0
+  (the previous layout) had no measurable cost: a witness counted the same >=
+  2900 of 3000 injected frames armed and unarmed, on both layouts.
 - **Unexplained cell.** In about 55 armed cells across development (station at
   entry 1), one read the entry back committed (after 10 ms rather than ~2.2
   ms) and answered no ACKs; other slow commits were fine and it has not
-  reproduced.
+  reproduced. It has the shape of the 8852C bring-ups described below, much
+  rarer.
 - **Clear needs the host.** Measured at entry 1: after `join_info(disconnect)`
   and a NO_LINK addr_cam, the entry stays VALID with the responder's address;
   a role REMOVE, or role CREATE plus NO_LINK, leaves it valid too. Clearing
@@ -47,11 +45,83 @@ was measured to get there.
   H2Cs land asynchronously, the clear repeats until the entry has read back
   empty for 50 ms, and only that counts as disarmed. rxdemo's
   `DEVOURER_ACK_DISARM_AFTER_MS` exercises it live.
-- **8852C:** its firmware accepts both commands and leaves the entry invalid,
-  so the arm refuses. The vendor's 8852C association sends far more before the
-  addr_cam (BB/RF offload, port configuration); which of it the C needs is open.
+- **8852C:** see the next two sections.
 - Measured near field (two dongles, injector at -15 dB), single-shot, no CCX:
   the numbers are in `AdapterCaps.h`. The responder's own transmissions are
   not part of that matrix: with carrier sense off (this die's TX default) a
   responder that also sends unicast loses some ACKs to its own queued frames
   (the response scheduler abort counter at 0xCC18[23:16] moves).
+
+## 8852C: the host writes the entry
+
+The 8852C firmware ignores the addr_cam H2C altogether. After it, neither the
+address CAM entry nor the BSSID CAM entry it carries is written: the address
+CAM still holds the uninitialised SRAM it powered up with, and the BSSID CAM
+stays zero. Nothing changed that, including a byte-for-byte replay of the
+vendor Windows driver's four association H2Cs (CMAC table, DMAC table, a
+12-byte join_info, addr_cam), a 12-byte join_info alone, and a 64-byte
+addr_cam (the vendor Linux `struct fwcmd_addrcam_info`). The same replay
+commits on the 8852B. Both dies report non-secure (`is_sec_ic=0`), and the two
+ways of reading the window (per-dword address, or the vendor's page base plus
+offset) agree, so the read-back itself is not the issue.
+
+The RMAC still answers from the CAM, so on this die the arm writes the entry
+from the host instead, the vendor's no-firmware path (`mac_upd_addr_cam`'s
+indirect SRAM write); what it writes and how is at
+`HalKestrel::write_addr_cam_sta`, and the entry encoding is shared with the
+8852B's H2C (`KestrelAddrCam.h`, pinned by a selftest against hardware
+read-backs). Measured on its own:
+
+- **Only the address CAM entry matters.** Leaving out the join_info H2C, the
+  addr_cam H2C or the BSSID CAM entry, alone or all together, kept the
+  single-shot rate at 97.6-99.4%. Host-writing the BSSID CAM entry the vendor
+  path also writes changed nothing measurable.
+- **The response-abort gates are mandatory here.** This die's EDCCA reads its
+  own floor as busy (-67 dBm, `busy=1` at every tune), and with the gates
+  armed the RMAC dropped every ACK: 0/2060 and 0/2019, against >= 97.6% with
+  them cleared.
+- **The lookup hits the entry.** The long RX descriptor (dword 5:
+  ADDR_CAM_VLD, addr_cam index, macid) shows every frame addressed to the
+  responder matching the host-written entry (macid 63; the index reads 126,
+  the entry counted in 32-byte units).
+- **Clear** reads back empty and the soliciting peer then gets no ACK (the
+  live-disarm row in `AdapterCaps.h`).
+
+## 8852C: bring-ups that answer no ACKs
+
+Some 8852C bring-ups answer no ACK at all: the responder arms, the entry reads
+back, and the adapter answers nothing for the whole session, where a good
+session answers >= 97.5%. How often tracks how long the adapter has been
+running. Over a day of back-to-back sessions it rose from about one in ten to
+three in four (10 of 83 sessions overall); after the adapter was unplugged for
+a long while, the first 12 sessions in a row answered 97.5-99.4%, and 3 of the
+next 12 armed sessions (the `AdapterCaps.h` matrix) came up dead. The RF
+thermal meter read delta 2 rising to 4, too coarse to say more. So it looks
+thermal or uptime-related, though temperature was not varied on its own. It is
+a property of the bring-up, not of the arm: in one failed session three
+separate injector processes in a row all saw 0, and no session has ever
+recovered or failed partway. Measured in failed sessions:
+
+- Every frame addressed to the responder still matches the entry in the RX
+  descriptor (ADDR_CAM_VLD, macid 63), and the adapter airs its own frames
+  normally: only the SIFS response is missing.
+- The response abort counters (0xCC14 NAV, 0xCC18 CCA/EDCCA/scheduler) stay at
+  0: the hardware does not attempt the response and abort it.
+- Every MAC configuration register read (0xC000, 0xC300, 0xC400, 0xC600,
+  0xC800, 0xCA00, 0xCC00, 0xCE00 and the BB path-com block at 0xD800) is
+  identical to a good session's; only counters differ.
+- What does differ: `R_AX_WMAC_NAV_UP_INFO` (0xCC84) records intra-BSS NAV
+  updates and `R_AX_PS_RXINFO` (0xCEA0) flags port-0 data, i.e. the MAC
+  classifies the soliciting frames as its own BSS's traffic, which it does not
+  in a good session.
+- Ruled out by measurement: the response NAV checks (`R_AX_RSP_CHK_SIG` bits
+  19-21 cleared, still fails), the BSSID CAM (all zero in good and failed
+  sessions alike; writing entry 1 valid, still fails), the injector, the
+  host's per-frame RX cost, the arm's timing relative to the RX loop, and the
+  slot.
+
+What decides it is not found. The 8852B shows the same shape far more rarely
+(about one bring-up in 55). A caller that needs the ACK on the 8852C should
+treat a soliciting peer's retries as the tell and bring the adapter up again;
+when that keeps failing, letting the adapter cool down is what brought it back
+here.

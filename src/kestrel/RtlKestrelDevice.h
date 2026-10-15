@@ -91,19 +91,24 @@ public:
    * once the firmware has COMMITTED a valid ADDR_CAM entry for it, and it does
    * that only for a station registered the way a real association registers
    * one (HalKestrel::register_infra_sta). The arm programs that station with
-   * `mac` as its own address, on its own macid 127 / ADDR_CAM entry 127 so
-   * the injection context at macid 0 / entry 0 (what every injected frame's
+   * `mac` as its own address, on its own macid / ADDR_CAM entry (ack_slot())
+   * so the injection context at macid 0 / entry 0 (what every injected frame's
    * WD points at) is left as bring-up programmed it, and RegisterPeerSta /
    * RegisterBeamformee refuse that slot so a peer cannot take it; clears the
    * response-abort CCA gates; and is verified by reading the physical CAM
-   * entry back -- false when the entry did not commit, which is the 8852C
-   * today. Post-bring-up only. Clear disconnects that station and clears
-   * the entry's VALID bit from the host (the 8852B firmware leaves a
-   * disconnected station's entry valid), and succeeds only once the entry
-   * has read back empty for 50 ms; an address still held, or not confirmed
-   * gone, after a failed clear (or a failed retarget, which checks the old
-   * address too) stays recorded, so a later ClearAckResponder retries it.
-   * Arm and clear are serialized. */
+   * entry back -- false when the entry did not commit. The 8852C firmware
+   * ignores the addr_cam H2C, so on that die the host writes the same entry
+   * itself (HalKestrel::write_addr_cam_sta, the vendor's no-firmware path) and
+   * no H2C is sent. Post-bring-up only. Clear disconnects that station (8852B
+   * only) and clears the entry's VALID bit from the host (the 8852B firmware
+   * leaves a disconnected station's entry valid), and succeeds only once the
+   * entry has read back empty for 50 ms; an address still held after a failed
+   * clear (or a failed retarget, which checks the old address too) stays
+   * recorded, so a later ClearAckResponder retries it. Arm and clear are
+   * serialized. On the 8852C a true return is not a guarantee: some bring-ups
+   * read the entry back and answer no ACK for the whole session, more often
+   * the longer the adapter has run (docs/kestrel-ack-responder.md); nothing on
+   * the host was found to detect it. */
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
   /* rxdemo's live-disarm measurement hook (DEVOURER_ACK_DISARM_AFTER_MS): the
@@ -316,6 +321,20 @@ private:
    * timeout, nullopt once gone. Caller holds _ack_mutex. */
   std::optional<devourer::MacAddr>
   disarm_ack_locked(std::span<const devourer::MacAddr> held);
+  /* The ACK responder's own macid and ADDR_CAM entry (the same number), past
+   * the injection context at macid 0 / entry 0 and the low slots peer
+   * registrations take by convention (RegisterPeerSta callers use 1, 2, ...).
+   * 127 on the 8852B, where the firmware commits and the RMAC answers there
+   * (measured); 63 on the 8852C, its last entry: the CAM reads back
+   * 0xdeadbeef from entry 64 up. */
+  uint8_t ack_slot() const {
+    return _variant == kestrel::ChipVariant::C8852C ? 63 : 127;
+  }
+  /* The 8852C firmware ignores the addr_cam H2C, so the ACK responder's
+   * station entry is written (and cleared) by the host on that die. */
+  bool host_written_ack_cam() const {
+    return _variant == kestrel::ChipVariant::C8852C;
+  }
   /* True (and logged) when a peer registration would take the ACK
    * responder's reserved macid or ADDR_CAM entry. */
   bool peer_slot_reserved(const char *who, uint8_t macid,

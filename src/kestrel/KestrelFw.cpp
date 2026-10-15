@@ -1,4 +1,5 @@
 #include "KestrelFw.h"
+#include "KestrelAddrCam.h"
 
 #include <cstring>
 #include <utility>
@@ -502,30 +503,19 @@ bool KestrelFw::fw_upd_addr_cam_sta(uint8_t macid, const uint8_t sma[6],
                                     const uint8_t tma[6], uint8_t net_type,
                                     uint8_t addr_cam_idx, uint8_t bssid_cam_idx) {
   /* Field layout as fw_upd_addr_cam (rtw89 cam.h), with the station values the
-   * vendor driver uses: SHORT length, separate SMA/TMA hashes, the BSSID CAM
-   * index in dword3, macid plus the vendor's bit 14 in dword8, and an embedded
-   * valid BSSID CAM entry carrying tma. */
-  uint8_t sma_hash = 0, tma_hash = 0;
-  for (int i = 0; i < 6; i++) {
-    sma_hash ^= sma[i];
-    tma_hash ^= tma[i];
-  }
+   * vendor driver uses: SHORT length, the entry from addr_cam_sta_entry (the
+   * same words the host writes on the 8852C), and an embedded valid BSSID CAM
+   * entry carrying tma. */
   uint8_t c[60] = {0};
   auto sw = [](uint32_t v, uint32_t msk, uint32_t sh) {
     return (v & msk) << sh;
   };
   put_le32(c + 4, sw(addr_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
                       sw(r::ADDR_CAM_ENT_SHORT_SIZE, 0xff, 16));
-  put_le32(c + 8, 0x1u | sw(net_type, 0x3, 1) | sw(r::MAC_AX_NO_MSK, 0x3, 14) |
-                      sw(sma_hash, 0xff, 16) | sw(tma_hash, 0xff, 24));
-  put_le32(c + 12, sw(bssid_cam_idx, 0x3f, 0));
-  put_le32(c + 16, sw(sma[0], 0xff, 0) | sw(sma[1], 0xff, 8) |
-                       sw(sma[2], 0xff, 16) | sw(sma[3], 0xff, 24));
-  put_le32(c + 20, sw(sma[4], 0xff, 0) | sw(sma[5], 0xff, 8) |
-                       sw(tma[0], 0xff, 16) | sw(tma[1], 0xff, 24));
-  put_le32(c + 24, sw(tma[2], 0xff, 0) | sw(tma[3], 0xff, 8) |
-                       sw(tma[4], 0xff, 16) | sw(tma[5], 0xff, 24));
-  put_le32(c + 32, sw(macid, 0xff, 0) | (1u << 14));
+  const auto w = kestrel::addr_cam_sta_entry(sma, tma, net_type,
+                                             bssid_cam_idx, macid);
+  for (size_t i = 0; i < w.size(); ++i)
+    put_le32(c + 8 + 4 * i, w[i]);
   put_le32(c + 48, sw(bssid_cam_idx, 0xff, 0) | sw(0, 0xff, 8) |
                        sw(r::BSSID_CAM_ENT_SIZE, 0xff, 16));
   put_le32(c + 52, 0x1u | sw(r::MAC_AX_NO_MSK, 0x3f, 2) | sw(0, 0x3f, 8) |

@@ -536,16 +536,9 @@ namespace {
  * on it (A1 alone selects the response), it only has to be a unicast address
  * distinct from the responder's own. */
 constexpr uint8_t kAckResponderBssid[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
-/* The responder's own station: a macid and ADDR_CAM entry apart from the
- * injection context InitWrite programs at macid 0 / entry 0 (which the WD of
- * every injected frame keeps pointing at), and from the low slots peer
- * registrations take by convention (RegisterPeerSta callers use 1, 2, ...):
- * the last entry of the 0x7f ADDR_CAM search range, reserved against
- * RegisterPeerSta / RegisterBeamformee. BSSID CAM 1, apart from the injection
- * context's index 0 (peers use 0 too, and only the addr entry selects the
- * response). */
-constexpr uint8_t kAckMacid = 127;
-constexpr uint8_t kAckAddrCamIdx = 127;
+/* BSSID CAM entry of the responder's station: 1, apart from the injection
+ * context's index 0 (peers use 0 too, and only the address entry selects the
+ * response). The macid / ADDR_CAM slot is per die: ack_slot(). */
 constexpr uint8_t kAckBssidCamIdx = 1;
 
 std::string mac_text(const uint8_t *m) {
@@ -580,16 +573,24 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
   const uint32_t resp0 = _device.rtw_read32(r::R_AX_TRXPTCL_RESP_0);
   if (!_ack_responder)
     _ack_resp0_saved = resp0;
-  const bool sent = _hal.register_infra_sta(m, bssid, kAckMacid, kAckAddrCamIdx,
-                                            kAckBssidCamIdx);
+  /* The 8852B firmware commits the station entry from H2C; the 8852C
+   * firmware ignores the addr_cam H2C, so on that die the host writes it. */
+  const bool host_cam = host_written_ack_cam();
+  bool sent = true;
+  if (host_cam)
+    _hal.write_addr_cam_sta(ack_slot(), m, bssid, ack_slot(),
+                            kAckBssidCamIdx);
+  else
+    sent = _hal.register_infra_sta(m, bssid, ack_slot(), ack_slot(),
+                                   kAckBssidCamIdx);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, resp0 & ~r::B_AX_RSP_CHK_ALL);
-  /* The H2Cs going out says nothing about the firmware committing them: read
-   * the physical CAM entry the RMAC matches against. The firmware applies the
-   * queue asynchronously, so poll for a bounded time rather than read once. */
+  /* Neither the H2Cs going out nor the host write says what the RMAC will
+   * match: read the physical CAM entry back. The firmware applies its queue
+   * asynchronously, so poll for a bounded time rather than read once. */
   const auto t0 = std::chrono::steady_clock::now();
   bool committed = false;
   int polls = 0;
-  while (sent && !(committed = _hal.addr_cam_holds(kAckAddrCamIdx, m)) &&
+  while (sent && !(committed = _hal.addr_cam_holds(ack_slot(), m)) &&
          std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(100)) {
     ++polls;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -600,11 +601,15 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
                  "re-reads)", committed ? "matched" : "did not match",
                  waited_us, polls);
   if (!sent || !committed) {
-    _logger->error("Kestrel: ACK responder for {} did not arm: the firmware "
-                   "{} the ADDR_CAM entry (H2C {})",
-                   mac_text(m),
-                   sent ? "accepted but did not commit" : "refused",
-                   sent ? "sent" : "failed");
+    if (host_cam)
+      _logger->error("Kestrel: ACK responder for {} did not arm: the host-"
+                     "written ADDR_CAM entry does not read back", mac_text(m));
+    else
+      _logger->error("Kestrel: ACK responder for {} did not arm: the firmware "
+                     "{} the ADDR_CAM entry (H2C {})",
+                     mac_text(m),
+                     sent ? "accepted but did not commit" : "refused",
+                     sent ? "sent" : "failed");
     /* Roll back. On a retarget the previous address may still be committed
      * (a refused H2C leaves it in place), so verify it is gone too; whatever
      * is still held stays recorded for ClearAckResponder to retry. */
@@ -617,8 +622,9 @@ bool RtlKestrelDevice::SetAckResponder(const devourer::MacAddr &mac) {
   }
   _ack_responder = mac;
   _logger->info("Kestrel: hardware ACK responder armed for {} (macid {}, "
-                "ADDR_CAM entry {} committed, read back after {} us)",
-                mac_text(m), kAckMacid, kAckAddrCamIdx, waited_us);
+                "ADDR_CAM entry {} {}, read back after {} us)",
+                mac_text(m), ack_slot(), ack_slot(),
+                host_cam ? "written by the host" : "committed", waited_us);
   return true;
 }
 
@@ -635,15 +641,18 @@ void RtlKestrelDevice::ClearAckResponder() {
 std::optional<devourer::MacAddr>
 RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
   namespace r = kestrel::reg;
-  /* Disconnect the responder's station in the firmware; the injection
-   * context at macid 0 is never touched. */
-  _hal.unregister_infra_sta(held.front().bytes.data(), kAckMacid,
-                            kAckAddrCamIdx, kAckBssidCamIdx);
+  /* Disconnect the responder's station in the firmware (the 8852C never
+   * registered one: its entry is host-written and its firmware does not touch
+   * the CAM); the injection context at macid 0 is never touched. */
+  if (!host_written_ack_cam())
+    _hal.unregister_infra_sta(held.front().bytes.data(), ack_slot(),
+                              ack_slot(), kAckBssidCamIdx);
   _device.rtw_write32(r::R_AX_TRXPTCL_RESP_0, _ack_resp0_saved);
   /* The 8852B firmware keeps a disconnected station's entry VALID (measured:
    * neither join_info(disconnect) + a NO_LINK addr_cam, nor a role REMOVE,
    * nor role CREATE + NO_LINK clears it), so the host clears VALID itself, as
-   * the vendor's no-firmware mac_upd_addr_cam path writes the CAM. The H2Cs
+   * the vendor's no-firmware mac_upd_addr_cam path writes the CAM; on the
+   * 8852C that host clear is the whole disarm. The H2Cs
    * above land asynchronously (2-20 ms measured for the arm) and rewrite the
    * entry, so the clear repeats until the entry has read back empty for 50 ms
    * straight, well past that tail. The 150 ms bound only ends the wait while
@@ -651,7 +660,7 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
    * full 50 ms, so the worst case is about 200 ms. */
   const auto still_held = [&]() -> const devourer::MacAddr * {
     for (const auto &a : held)
-      if (_hal.addr_cam_holds(kAckAddrCamIdx, a.bytes.data()))
+      if (_hal.addr_cam_holds(ack_slot(), a.bytes.data()))
         return &a;
     return nullptr;
   };
@@ -666,7 +675,7 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
   bool stable = false;
   for (;;) {
     if (first || left) {
-      _hal.clear_addr_cam_entry(kAckAddrCamIdx);
+      _hal.clear_addr_cam_entry(ack_slot());
       clean_since = clock::now();
       first = false;
     }
@@ -686,12 +695,12 @@ RtlKestrelDevice::disarm_ack_locked(std::span<const devourer::MacAddr> held) {
   if (!stable) {
     _logger->warn("Kestrel: ACK responder clear did not take: ADDR_CAM entry "
                   "{} still holds {}, the MAC may keep answering for it "
-                  "(ClearAckResponder retries)", kAckAddrCamIdx,
+                  "(ClearAckResponder retries)", ack_slot(),
                   mac_text(last_held->bytes.data()));
     return *last_held;
   }
   _logger->info("Kestrel: hardware ACK responder disarmed (ADDR_CAM entry {} "
-                "no longer holds {})", kAckAddrCamIdx,
+                "no longer holds {})", ack_slot(),
                 mac_text(held.front().bytes.data()));
   return std::nullopt;
 }
@@ -1089,11 +1098,11 @@ bool RtlKestrelDevice::ConfigureUlOfdma(const devourer::UlOfdmaConfig &cfg) {
 
 bool RtlKestrelDevice::peer_slot_reserved(const char *who, uint8_t macid,
                                           uint8_t addr_cam_idx) const {
-  if (macid != kAckMacid && addr_cam_idx != kAckAddrCamIdx)
+  if (macid != ack_slot() && addr_cam_idx != ack_slot())
     return false;
   _logger->error("Kestrel: {} refused: macid {} / ADDR_CAM entry {} overlaps "
                  "the ACK responder's reserved macid {} / entry {}",
-                 who, macid, addr_cam_idx, kAckMacid, kAckAddrCamIdx);
+                 who, macid, addr_cam_idx, ack_slot(), ack_slot());
   return true;
 }
 
@@ -1147,17 +1156,18 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
    * computed and discarded. No phydm FA/CCA/IGI monitor either. */
   c.busy_airtime_ok = false;
   c.rx_energy_ok = false;
-  /* Hardware ARQ: SetAckResponder arms on the 8852B -- a committed INFRA
-   * station entry (HalKestrel::register_infra_sta), verified by CAM read-back.
-   * The 8852C firmware does not commit that entry, so its arm refuses and the
-   * flag stays false there. The retry knob IS
-   * wired (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the
-   * N-retries contract in send_packet; witness-measured on the 8832CU:
-   * limits {0,2} -> modal {1,3} on-air copies exactly, limit 8 -> an 8/9
-   * near-tie consistent with ~90% witness capture of a 9-copy truth —
-   * obedient, no wedge). */
+  /* Hardware ARQ: SetAckResponder arms on both dies, verified by CAM read-back
+   * -- the 8852B through a firmware-committed INFRA station entry
+   * (HalKestrel::register_infra_sta), the 8852C through a host-written one
+   * (HalKestrel::write_addr_cam_sta), its firmware ignoring the H2C. True on
+   * the 8852C means the arm works and was measured, not that every bring-up
+   * answers: some answer no ACK (see SetAckResponder). The retry knob IS wired
+   * (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the N-retries
+   * contract in send_packet; witness-measured on the 8832CU: limits {0,2} ->
+   * modal {1,3} on-air copies exactly, limit 8 -> an 8/9 near-tie consistent
+   * with ~90% witness capture of a 9-copy truth — obedient, no wedge). */
   c.tx_retry_limit_ok = true;
-  c.ack_responder_ok = _variant == kestrel::ChipVariant::C8852B;
+  c.ack_responder_ok = true;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   if (_variant == kestrel::ChipVariant::C8852C)
     c.bw_mask |= devourer::kBw160; /* 8852C-only (vendor bw_sup BW_CAP_160M) */

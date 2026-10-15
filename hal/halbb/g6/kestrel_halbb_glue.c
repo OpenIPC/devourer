@@ -14,6 +14,11 @@ struct kestrel_halbb_ctx {
   int env_mntr_ready; /* lazy halbb_env_mntr init done */
   int edcca_inited;
   int edcca_cr_inited;
+  /* The BB table's EDCCA threshold CRs, captured before the first park so a
+   * later 2.4 GHz tune can put them back (level_p, level, ppdu, dwn, obss). */
+  int edcca_table_saved;
+  int edcca_parked;
+  unsigned int edcca_table[5];
 };
 
 struct kestrel_halbb_ctx *kestrel_halbb_create(struct kestrel_halbb_bridge *br,
@@ -193,9 +198,54 @@ void kestrel_halbb_edcca_park(struct kestrel_halbb_ctx *ctx, unsigned char band_
     halbb_edcca_init(bb);
     ctx->edcca_inited = 1;
   }
+  if (!ctx->edcca_table_saved) {
+    struct bb_edcca_cr_info *cr = &bb->bb_cmn_hooker->bb_edcca_cr_i;
+    ctx->edcca_table[0] = halbb_get_reg_curr_phy(bb, cr->r_edcca_level_p, cr->r_edcca_level_p_m);
+    ctx->edcca_table[1] = halbb_get_reg_curr_phy(bb, cr->r_edcca_level, cr->r_edcca_level_m);
+    ctx->edcca_table[2] = halbb_get_reg_curr_phy(bb, cr->r_ppdu_level, cr->r_ppdu_level_m);
+    ctx->edcca_table[3] = halbb_get_reg_curr_phy(bb, cr->r_dwn_level, cr->r_dwn_level_m);
+    ctx->edcca_table[4] = halbb_get_reg_curr_phy(bb, cr->r_obss_level, cr->r_obss_level_m);
+    ctx->edcca_table_saved = 1;
+  }
   bb->bb_edcca_i.edcca_mode = EDCCA_NORMAL_MODE;
   bb->bb_link_i.is_linked = false; /* the unlinked branch: th_h = EDCCA_MAX */
   halbb_edcca_thre_calc(bb);
+  ctx->edcca_parked = 1;
+}
+
+/* A 2.4 GHz tune after a parked 5/6 GHz one: put the BB table's threshold
+ * CRs back (the park rewrote them in place and nothing else does), so 2.4 GHz
+ * keeps the table level its carrier-sense measurement was taken with. Returns
+ * 1 when it restored something. */
+int kestrel_halbb_edcca_restore(struct kestrel_halbb_ctx *ctx, unsigned char bw) {
+  if (!ctx || !ctx->edcca_parked)
+    return 0;
+  struct bb_info *bb = &ctx->bb;
+  struct bb_edcca_cr_info *cr = &bb->bb_cmn_hooker->bb_edcca_cr_i;
+  struct rtw_chan_def *cd = &bb->hal_com->band[0].cur_chandef;
+  cd->band = BAND_ON_24G;
+  cd->bw = (enum channel_width)bw;
+  halbb_set_reg_curr_phy(bb, cr->r_edcca_level_p, cr->r_edcca_level_p_m, ctx->edcca_table[0]);
+  halbb_set_reg_curr_phy(bb, cr->r_edcca_level, cr->r_edcca_level_m, ctx->edcca_table[1]);
+  halbb_set_reg_curr_phy(bb, cr->r_ppdu_level, cr->r_ppdu_level_m, ctx->edcca_table[2]);
+  halbb_set_reg_curr_phy(bb, cr->r_dwn_level, cr->r_dwn_level_m, ctx->edcca_table[3]);
+  halbb_set_reg_curr_phy(bb, cr->r_obss_level, cr->r_obss_level_m, ctx->edcca_table[4]);
+  ctx->edcca_parked = 0;
+  return 1;
+}
+
+/* The EDCCA level CR as programmed (the table's 66 = -62 dBm, or the parked
+ * EDCCA_MAX), for the tune log. */
+unsigned int kestrel_halbb_edcca_level(struct kestrel_halbb_ctx *ctx) {
+  if (!ctx)
+    return 0;
+  struct bb_info *bb = &ctx->bb;
+  if (!ctx->edcca_cr_inited) {
+    halbb_cr_cfg_edcca_init(bb);
+    ctx->edcca_cr_inited = 1;
+  }
+  struct bb_edcca_cr_info *cr = &bb->bb_cmn_hooker->bb_edcca_cr_i;
+  return halbb_get_reg_curr_phy(bb, cr->r_edcca_level, cr->r_edcca_level_m);
 }
 
 /* One EDCCA hardware report (halbb_edcca_get_result): out[0..2] = pwdB of the

@@ -249,7 +249,12 @@ busy. Primary carrier sense (preamble detect) stays on and still defers
 (measured on ch161 after the change: a max-duty 8832CU injector under a
 co-channel MCS1 flood, gates on vs `DEVOURER_DIS_CCA=1`, numbers at the
 bring-up comment in `HalKestrel.cpp`). 2.4 GHz keeps the table default the
-carrier-sense measurement was taken with (floor -82 dBm, busy=0).
+carrier-sense measurement was taken with (floor -82 dBm, busy=0): the glue
+captures the table's threshold CRs before the first park and a 2.4 GHz tune
+after a parked band writes them back (measured: a fresh ch6 tune logs
+`level=66`, a 161->6->161->6 hop session logs 249 on 5 GHz and 66 again on
+each return to ch6, with the ch6 dwells witnessed). The tune log carries the
+programmed level.
 Consequence, stated plainly: this driver does not enforce the 5 GHz or 6 GHz
 energy-detect level the ETSI adaptivity and FCC/ETSI LPI rules call for; the
 caller owns compliance, as everywhere.

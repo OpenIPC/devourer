@@ -2313,15 +2313,20 @@ void HalKestrel::vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
    * keeps the table default the carrier-sense TX measurement was taken with
    * (its floor reads -82 dBm, busy=0). The report line is the per-band
    * evidence (pwdB = the BB's energy reading). */
+  bool restored = false;
   if (band_type == 2 || band_type == 1)
     kestrel_halbb_edcca_park(_halbb_ctx, band_type, hbw);
+  else
+    restored = kestrel_halbb_edcca_restore(_halbb_ctx, hbw) != 0;
   delay_us(5000);
   int rpt[8] = {0};
   kestrel_halbb_edcca_report(_halbb_ctx, rpt);
-  _logger->info("Kestrel PHY: EDCCA band{} pwdB fb={} p20={} path0={} busy={}{}",
-                band_type, rpt[0], rpt[1], rpt[6], rpt[3],
+  _logger->info("Kestrel PHY: EDCCA band{} level={} pwdB fb={} p20={} path0={} busy={}{}",
+                band_type, kestrel_halbb_edcca_level(_halbb_ctx), rpt[0], rpt[1],
+                rpt[6], rpt[3],
                 band_type != 0 ? " (5/6 GHz: energy-detect parked at the vendor's "
                                   "unlinked level; preamble CCA stays on)"
+                : restored     ? " (2.4 GHz: table level restored after a parked band)"
                                : "");
 }
 

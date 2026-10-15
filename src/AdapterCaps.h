@@ -209,14 +209,17 @@ struct AdapterCaps {
    * session, 0/5993 at the old address, 0/6062 never armed. At hardware
    * entry 63, the solicitor running across a live disarm in one session:
    * 3812/3837 then 0/1616, 3846/3848 then 0/1623 (a third cell was a dead
-   * session and says nothing). Some bring-ups used to answer no ACK at all
-   * (3 of 12, 6 of 15 and 4 of 30 here, up to ~85% on a second bench): the
-   * TX path selection the MAC attached to the ACK was uninitialised. With
-   * the path selection taken from the BB's P-MAC registers
-   * (docs/kestrel-ack-responder.md): 0 dead of 123 armed sessions here,
-   * every one 96.8-100%, 0 of 20 on the second bench; solicitor across a
-   * live disarm 3791/3845 then 0/1602 and 3829/3843 then 0/1639, never
-   * armed 0/1591).
+   * session and says nothing). Some bring-ups used to answer no ACK at all:
+   * the TX path selection the MAC attached to the ACK was uninitialised. The
+   * dead rate drifts through a day, so with times (2026-10-15, UTC-3):
+   * without the fix 6 of 15 at 10:12-10:19, 10 of 104 at 12:51-14:45 and
+   * 4 of 30 at 16:15-16:31 (plus 3 of 12 on an earlier day, time not
+   * recorded; up to ~85% on a second bench in the afternoon); with the path selection taken from the BB's
+   * P-MAC registers (docs/kestrel-ack-responder.md) 0 dead of 93 at
+   * 14:47-16:04 and 0 of 30 at 17:27-17:43, every session 96.8-100%, and 0
+   * of 20 on the second bench an hour after its ~85% series; solicitor
+   * across a live disarm 3791/3845 then 0/1602 and 3829/3843 then 0/1639,
+   * never armed 0/1591, at 17:44-17:46).
    *
    * The `on`, `retarget`, and legacy `off` rows establish arming, retargeting,
    * and a never-armed control. A backend-owned `disarmed` row supports only

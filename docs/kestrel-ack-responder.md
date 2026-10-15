@@ -125,6 +125,12 @@ The selection is not taken from the per-macid CMAC table (searched for in all
 written before every arm still gave dead sessions), the firmware version (the
 Windows driver's 0.29.123.4 gave dead sessions too), the slot, temperature, or
 the 5 GHz EDCCA level (#491). Where the MAC takes it from is still not found.
+The two experiments #490 proposed for finding the cause were not run: a
+firmware RAM dump of dead against good sessions, and a vendor-driver A/B on the
+same unit. The attribution rests instead on the TX-info word predicting every
+outcome seen (the map-A-1 selection dead 10 of 10 times, every other value
+alive) and on the fix removing the dead sessions, including those with that
+selection.
 
 **The fix.** Right after the T-MAC path routing at bring-up, the halbb glue
 calls `halbb_ctrl_tx_path_pmac_8852c(RF_PATH_AB)`: 0x09a4 bits [4:2] select
@@ -132,16 +138,30 @@ P-MAC as the source of the path enable and the path A/B maps, set to paths A+B
 with A on IFFT 0 and B on IFFT 1, plus the vendor's per-path TSSI reset pulse.
 It applies to every PPDU, not only responses.
 
-**Measured.** Before: 3 of 12, 6 of 15 and 4 of 30 sessions dead on this bench
-(the last on master with #491), up to about 85% on a second bench. After, on
-this bench (TX50UH responder, TX20U Nano soliciting, ch161, MCS1, 8 s per
-session): 0 dead of 123 armed sessions across the register-level override and
-the vendor call, including 15 with the map-A-1 selection, every session
-96.8-100%; the selection registers held the P-MAC values at the end of every
-session. On the second bench (two TX50UH, an 8812CU soliciting): 0 dead of 20
-on ch6 and ch161, both units. Injection from the 8852C is unchanged for one
-stream (MCS1 and 6M ~1900/2000 to the 8852B on ch6 and on ch161 with carrier
-sense on). Two-stream injection from the 8852C does not decode with or without
+**Measured.** This bench: TX50UH responder, TX20U Nano soliciting, ch161,
+MCS1, 8 s per session, all on 2026-10-15 (local time, UTC-3), since the dead
+rate drifts through a day (#490):
+
+| when | build | dead sessions |
+|---|---|---|
+| 10:12-10:19 | without the fix | 6 of 15 |
+| 12:51-14:45 | without the fix | 3 of 21, 3 of 15, 2 of 25, 1 of 31, 1 of 12 |
+| 14:47-16:04 | with the fix (register-level, then the PoC) | 0 of 93 |
+| 16:15-16:31 | without the fix (master with #491) | 4 of 30 |
+| 17:27-17:43 | with the fix (this commit) | 0 of 30 |
+
+With the fix, 15 sessions had the map-A-1 selection; every session answered
+96.8-100% and the selection registers held the P-MAC values at the end of every
+session. The 4-of-30 series without the fix ran between series with it, so the
+difference is not the time of day. An earlier day's matrix had 3 of 12 dead
+(time not recorded). Second bench (two TX50UH, an 8812CU soliciting): up to
+about 85% dead in the afternoon, then 0 dead of 20 on ch6 and ch161, both
+units, an hour later with the fix. Injection from the 8852C, compared with the
+same build without the change: unchanged for one stream (MCS1 and 6M
+~1900/2000 to the 8852B on ch6 and on ch161 with carrier sense on). That is a
+before/after check of this change only, not an absolute 5 GHz TX figure; the
+vendor-driver injection A/B that #490 asks for before trusting 5 GHz Kestrel TX
+numbers was not run. Two-stream injection from the 8852C does not decode with or without
 the fix (MCS12, VHT2SS_MCS1: 0/2000, while the 8852B's are received by the
 8852C), so what the fix does to two-stream TX is not measured.
 

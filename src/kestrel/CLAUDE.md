@@ -219,7 +219,7 @@ scheduler stalled and the bulk-OUT NAKed). Behavioural quirks beyond the
 the firmware DIG biases the 5 GHz idle-noise measurement):
 `docs/8852c-quirks.md`.
 
-## 6 GHz: EDCCA parked, preamble CCA on
+## 5 and 6 GHz: EDCCA parked, preamble CCA on
 
 With the carrier-sense TX default, injection on 6 GHz stalled after the first
 frame on every 8852C in the lab (8852CU over USB, both 8852CE over PCIe):
@@ -230,20 +230,34 @@ BB's own EDCCA report (`kestrel_halbb_edcca_report`, logged at every tune as
 radio and both bands — no DIG runs here, so the energy measurement sits where
 the table's gain leaves it. The BB table's EDCCA level is 66 (-62 dBm) with
 an 8 dB hysteresis, so once anything trips it the -67 dBm floor keeps the
-gate busy; on 5 GHz the floor flickers under the -70 dBm low level and TX
-proceeds, on 6 GHz it does not. The vendor's regulatory 6 GHz threshold
-(`CBP_6G` = 53, -75 dBm) is below the floor outright.
+gate busy. On 5 GHz the same floor (-65..-69 dBm on the 8832CU) latches it
+too, and more the higher the channel: with the table level, host injection
+from an 8832CU at a 20 ms gap reached an 8812CU witness at ~50% on ch6/36/44,
+52% on ch52, 21% on ch60, 3% on ch64 and 0 of ~435 frames on ch100/149/157/
+161, with 0.0% SDR airtime on ch161 and the injector stalling on bulk-OUT
+timeouts; clearing the EDCCA gate alone restored ch64-161 to the ch6 rate,
+clearing the primary gate alone restored nothing. The vendor's regulatory
+6 GHz threshold (`CBP_6G` = 53, -75 dBm) is below the floor outright.
 
-What is programmed: at a 6 GHz tune the glue runs the vendor's EDCCA init
+What is programmed: at a 5 or 6 GHz tune the glue runs the vendor's EDCCA init
 (`halbb_cr_cfg_edcca_init` — a dm_init stage the minimal bring-up skips,
 without which the EDCCA CR table is all zeros and the writes land nowhere —
 plus `halbb_edcca_dev_hw_cap` and the hw→dev cap copy) and
 `halbb_edcca_thre_calc` in `EDCCA_NORMAL_MODE` with `is_linked = false`,
 which is the vendor's level for an unassociated device: `EDCCA_MAX`, never
-busy. Primary carrier sense (preamble detect) stays on. 2.4/5 GHz keep the
-table default the carrier-sense measurement was taken with. Consequence,
-stated plainly: this driver does not enforce the 6 GHz energy-detect level
-the FCC/ETSI LPI rules call for; the caller owns compliance, as everywhere.
+busy. Primary carrier sense (preamble detect) stays on and still defers
+(measured on ch161 after the change: a max-duty 8832CU injector under a
+co-channel MCS1 flood, gates on vs `DEVOURER_DIS_CCA=1`, numbers at the
+bring-up comment in `HalKestrel.cpp`). 2.4 GHz keeps the table default the
+carrier-sense measurement was taken with (floor -82 dBm, busy=0): the glue
+captures the table's threshold CRs before the first park and a 2.4 GHz tune
+after a parked band writes them back (measured: a fresh ch6 tune logs
+`level=66`, a 161->6->161->6 hop session logs 249 on 5 GHz and 66 again on
+each return to ch6, with the ch6 dwells witnessed). The tune log carries the
+programmed level.
+Consequence, stated plainly: this driver does not enforce the 5 GHz or 6 GHz
+energy-detect level the ETSI adaptivity and FCC/ETSI LPI rules call for; the
+caller owns compliance, as everywhere.
 
 Two things fixed on the way that affect every band: the halbb glue now gives
 the 8852C its own CR bank (`BB_AP2`, as `halbb_hw_cfg` picks from the

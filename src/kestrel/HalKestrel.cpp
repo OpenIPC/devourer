@@ -2295,23 +2295,38 @@ void HalKestrel::vnd_bb_ctrl_bw_ch(uint8_t pri_ch, uint8_t center,
                 : bw == CHANNEL_WIDTH_10 ? 7
                                          : static_cast<uint8_t>(bw);
   kestrel_halbb_ctrl_bw_ch(_halbb_ctx, pri_ch, center, hbw, band_type);
-  /* 6 GHz: with the BB table's EDCCA level the MAC EDCCA gate latches busy
-   * (measured: 1/300 delivered vs 300/300 with that one gate cleared, both
-   * buses, both 8852CE cards and the 8852CU) because the receiver's own
-   * floor as the BB measures it (-67..-69 dBm, every radio, every band)
-   * sits inside the default's hysteresis band. Program the vendor's
-   * unlinked EDCCA_NORMAL_MODE level (never busy) there; 2.4/5 GHz keep the
-   * table default the carrier-sense TX measurement was taken with. The
-   * report line is the per-band evidence (pwdB = the BB's energy reading). */
-  if (band_type == 2)
-    kestrel_halbb_edcca_6g(_halbb_ctx, hbw);
+  /* 5 and 6 GHz: with the BB table's EDCCA level the MAC EDCCA gate latches
+   * busy because the receiver's own floor as the BB measures it (-65..-69
+   * dBm, every radio; no DIG runs here) sits inside the default's hysteresis
+   * band. 6 GHz: 1/300 delivered vs 300/300 with that one gate cleared (both
+   * buses, both 8852CE cards and the 8852CU). 5 GHz, 8832CU, 8812CU witness,
+   * 20 ms gap: ch6/36/44 ~50% witnessed, ch52 52%, ch60 21%, ch64 3%,
+   * ch100/149/157/161 0 of ~435 with 0.0% SDR airtime and the injector
+   * stalling on bulk-OUT timeouts; clearing the EDCCA gate alone restores
+   * ch64-161 to the ch6 rate, clearing the primary gate alone restores
+   * nothing. Program the vendor's unlinked EDCCA_NORMAL_MODE level (never
+   * busy) on both bands — the vendor's own level for an unassociated device;
+   * preamble carrier sense stays on and still defers (ch161 after the change,
+   * max-duty 6M injector, 8 s: 19063 frames sent on a quiet channel; under a
+   * co-channel max-duty MCS1 flood 7327 sent / 7086 witnessed with the gates
+   * on vs 15676 / 10639 with DEVOURER_DIS_CCA=1). 2.4 GHz
+   * keeps the table default the carrier-sense TX measurement was taken with
+   * (its floor reads -82 dBm, busy=0). The report line is the per-band
+   * evidence (pwdB = the BB's energy reading). */
+  bool restored = false;
+  if (band_type == 2 || band_type == 1)
+    kestrel_halbb_edcca_park(_halbb_ctx, band_type, hbw);
+  else
+    restored = kestrel_halbb_edcca_restore(_halbb_ctx, hbw) != 0;
   delay_us(5000);
   int rpt[8] = {0};
   kestrel_halbb_edcca_report(_halbb_ctx, rpt);
-  _logger->info("Kestrel PHY: EDCCA band{} pwdB fb={} p20={} path0={} busy={}{}",
-                band_type, rpt[0], rpt[1], rpt[6], rpt[3],
-                band_type == 2 ? " (6 GHz: energy-detect parked at the vendor's "
-                                 "unlinked level; preamble CCA stays on)"
+  _logger->info("Kestrel PHY: EDCCA band{} level={} pwdB fb={} p20={} path0={} busy={}{}",
+                band_type, kestrel_halbb_edcca_level(_halbb_ctx), rpt[0], rpt[1],
+                rpt[6], rpt[3],
+                band_type != 0 ? " (5/6 GHz: energy-detect parked at the vendor's "
+                                  "unlinked level; preamble CCA stays on)"
+                : restored     ? " (2.4 GHz: table level restored after a parked band)"
                                : "");
 }
 

@@ -209,14 +209,17 @@ struct AdapterCaps {
    * session, 0/5993 at the old address, 0/6062 never armed. At hardware
    * entry 63, the solicitor running across a live disarm in one session:
    * 3812/3837 then 0/1616, 3846/3848 then 0/1623 (a third cell was a dead
-   * session and says nothing); 15 armed sessions back to back, 9 answering
-   * 97.5-99.9% and 6 dead. Some bring-ups answer no ACK at all, at any
-   * entry tried: 3 of 12 and 6 of 15 here, 8 of 21 and 1 of 16 on a second
-   * bench, interleaved with good sessions). The 8852C is measured but reports
-   * FALSE: a dead session reads its entry back like a good one, so the flag
-   * could not tell a caller the loop closes; SetAckResponder still arms it,
-   * and a caller that wants it there judges by the soliciting peer's
-   * retries.
+   * session and says nothing). Some bring-ups used to answer no ACK at all:
+   * the TX path selection the MAC attached to the ACK was uninitialised. The
+   * dead rate drifts through a day, so with times (2026-10-15, UTC-3):
+   * without the fix 6 of 15 at 10:12-10:19, 10 of 104 at 12:51-14:45 and
+   * 4 of 30 at 16:15-16:31 (plus 3 of 12 on an earlier day, time not
+   * recorded; up to ~85% on a second bench in the afternoon); with the path selection taken from the BB's
+   * P-MAC registers (docs/kestrel-ack-responder.md) 0 dead of 93 at
+   * 14:47-16:04 and 0 of 30 at 17:27-17:43, every session 96.8-100%, and 0
+   * of 20 on the second bench an hour after its ~85% series; solicitor
+   * across a live disarm 3791/3845 then 0/1602 and 3829/3843 then 0/1639,
+   * never armed 0/1591, at 17:44-17:46).
    *
    * The `on`, `retarget`, and legacy `off` rows establish arming, retargeting,
    * and a never-armed control. A backend-owned `disarmed` row supports only
@@ -241,8 +244,7 @@ struct AdapterCaps {
    * generation — the AP-mode work proved the gate where it was measured.
    * False-as-unmeasured (the
    * vht_2g4_ok reading: unmeasured, not incapable): the 8821C — it shares
-   * the recipe but no 8821CU/CE cell has run. FALSE on the Kestrel 8852C
-   * (measured, see above).
+   * the recipe but no 8821CU/CE cell has run.
    * tx_retry_limit_ok: DEVOURER_TX_RETRY_LIMIT drives hardware autonomous
    * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; the 8733B
    * by airtime dose-response instead, 0/3/12 -> 1.00/4.00/12.32–12.33 airings per

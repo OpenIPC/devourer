@@ -192,13 +192,68 @@ bool RtlKestrelDevice::PowerOnTrxAndPhy(kestrel::EfuseInfo &out) {
 }
 
 
+bool RtlKestrelDevice::BringUpCheckingFwHalt(
+    const char *what, const std::function<bool()> &once) {
+  /* The redo is measured on USB only (the 8852CE ring re-init under it is
+   * not), so on PCIe a halt fails the bring-up instead. */
+  const int attempts = _device.is_usb() ? kFwHaltAttempts : 1;
+  for (int attempt = 1; attempt <= attempts; ++attempt) {
+    if (attempt > 1)
+      _hal.reset_for_rebringup();
+    /* A failed or throwing pass stops the drain BringUpMonitorOnce started. */
+    bool up = false;
+    try {
+      up = once();
+    } catch (...) {
+      stop_wp_drain();
+      throw;
+    }
+    if (!up) {
+      stop_wp_drain();
+      return false;
+    }
+    const uint32_t err = _hal.fw_err_state(what);
+    if (err == 0) {
+      if (attempt > 1)
+        _logger->info("Kestrel: {} clean on attempt {}", what, attempt);
+      return true;
+    }
+    /* Seen on the 8852C (TX50UH) without the early bulk-IN drain:
+     * DMAC_ERR_ISR B_AX_HAXIDMA_ERR_FLAG during the BB/RF table load, err
+     * 0x999 (L1_PREERR_DMAC), then a fw assert (0x3xxxxxxx). The redo saved
+     * most such runs but not all, so it is a safety net, not the fix; it has
+     * not fired with the drain (docs/8852c-quirks.md). */
+    _logger->warn("Kestrel: firmware halted during {} (attempt {}/{}, "
+                  "HALT_C2H 0x{:08x}){}",
+                  what, attempt, attempts, err,
+                  attempt < attempts ? "; redoing it from power_on" : "");
+    _brought_up = false;
+    _tx_up = false;
+    stop_wp_drain();
+  }
+  _logger->error("Kestrel: firmware halted on all {} attempt(s) of {}",
+                 attempts, what);
+  return false;
+}
+
 bool RtlKestrelDevice::BringUpMonitor(SelectedChannel channel) {
+  return BringUpCheckingFwHalt("monitor bring-up",
+                               [&] { return BringUpMonitorOnce(channel); });
+}
+
+bool RtlKestrelDevice::BringUpMonitorOnce(SelectedChannel channel) {
   _channel = channel;
   /* hal_start_8852b order (rtl8852b_halinit.c:508): mac_hal_init [pwr ->
    * FWDL -> enable_bb_rf -> sys_init -> trx_init -> intf_init] -> efuse ->
    * BB/RF tables -> channel. */
   if (!PowerOnFwAndTrx(_efuse))
     return false;
+  /* Drain the bulk-IN from here on: once intf_init has armed the USB RX
+   * path, nothing in the bring-up reads it, and the 8852C flags its RX DMA
+   * stuck (HAXI_IDCT B_AX_RXMDA_STUCK_IDCT -> DMAC_ERR_ISR HAXIDMA_ERR ->
+   * L1 0x999 -> fw assert 0x30000024) during the H2C-heavy BB/RF table load. */
+  if (_device.is_usb())
+    start_wp_drain();
   if (!_hal.phy_bb_rf_init(_efuse.rfe_type, _hal.read_cut()))
     return false;
   /* halrf RFK: DAC/ADC DC-offset calibration (vendored halrf DACK + RX-DCK)
@@ -271,10 +326,20 @@ void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
   /* A refused bring-up is an exception here as on every other generation
    * (the IRadio contract the demos rely on): a caller that went on to
    * send_packet would otherwise learn of it one refused frame at a time. */
-  if (!BringUpMonitor(channel)) {
+  /* The firmware-halt check runs after the TX half too, so a halt anywhere
+   * in the whole bring-up redoes all of it. */
+  if (!BringUpCheckingFwHalt("TX bring-up", [&] {
+        if (!BringUpMonitorOnce(channel))
+          return false;
+        InitWriteTail(channel);
+        return true;
+      })) {
     _logger->error("Kestrel: TX bring-up failed");
     throw std::runtime_error("Kestrel TX bring-up failed (BringUpMonitor)");
   }
+}
+
+void RtlKestrelDevice::InitWriteTail(SelectedChannel channel) {
   /* TX-only: enable the CMAC port + scheduler contention queues. Kept out
    * of BringUpMonitor so the pure-monitor RX path keeps CCA on and can
    * actually hear frames.

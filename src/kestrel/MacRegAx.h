@@ -471,6 +471,10 @@ constexpr uint16_t R_AX_HALT_H2C_CTRL = 0x0160;
 constexpr uint16_t R_AX_HALT_C2H_CTRL = 0x0164;
 constexpr uint16_t R_AX_HALT_H2C = 0x0168;
 constexpr uint16_t R_AX_HALT_C2H = 0x016C;
+/* SER debug dump (dbgpkg.c dump_err_status_dmac): which DMAC error raised a
+ * halt. Both dies. */
+constexpr uint16_t R_AX_DMAC_ERR_ISR = 0x8524;
+constexpr uint16_t R_AX_SER_DBG_INFO = 0x8424;
 constexpr uint16_t R_AX_HISR0 = 0x01A4;
 constexpr uint16_t R_AX_WCPU_FW_CTRL = 0x01E0;
 /* RISC-V (8852C) bootrom debug: [31:16]=boot_status (fwdl-step code),
@@ -1755,6 +1759,12 @@ constexpr uint16_t R_AX_HAXI_DMA_BUSY2 = 0x11C8;     /* [1:0] CH10/CH11 */
 constexpr uint32_t HAXI_DMA_BUSY2_CHANS = 0x3u;
 constexpr uint16_t R_AX_HAXI_DMA_BUSY3 = 0x1208;     /* [1:0] RXQ/RPQ */
 constexpr uint32_t HAXI_DMA_BUSY3_RX = 0x3u;
+/* HAXI error dump (dbgpkg.c dump_err_status_haxidma_ax, 8852C/8192XB/8852D
+ * only). HAXI_IDCT bit 1 = B_AX_RXMDA_STUCK_IDCT. */
+constexpr uint16_t R_AX_HAXI_IDCT_MSK = 0x10B8;
+constexpr uint16_t R_AX_HAXI_IDCT = 0x10BC;
+constexpr uint16_t R_AX_DBG_ERR_FLAG_V1 = 0x1104;
+constexpr uint16_t R_AX_HDP_DBG_INFO_2_V1 = 0x8888;
 constexpr uint16_t R_AX_TXBD_RWPTR_CLR1 = 0x1014;    /* [10:0] ACH0-7,CH8,CH9,CH12 */
 constexpr uint32_t TXBD_RWPTR_CLR1_ALL = 0x7FFu;
 constexpr uint16_t R_AX_TXBD_RWPTR_CLR2_V1 = 0x11C4; /* [1:0] CH10/CH11 */

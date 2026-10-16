@@ -92,3 +92,56 @@ it: the value jumps ~24 dB the same window bit 30 clears, ~1.5 s after tune,
 while the LNA/RXBB gain registers stay constant. The shipped
 `tests/kestrel_nhm_2g_onair.sh` validates the current band gate (2.4 GHz emits a
 plausible floor; 5 GHz is null → passive fallback).
+
+## An undrained USB bulk-IN during bring-up halts the firmware
+
+### What the chip does
+
+`intf_init` arms the USB RX path partway through the bring-up. If the host
+does not read the bulk-IN from then on, the 8852C flags its RX DMA stuck
+during the H2C-heavy BB/RF table load: `HAXI_IDCT` bit 1
+(`B_AX_RXMDA_STUCK_IDCT`) -> `DMAC_ERR_ISR` `B_AX_HAXIDMA_ERR_FLAG` (0x4000)
+-> L1 pre-error `0x999` (`L1_PREERR_DMAC`) in `HALT_C2H`, and with no host L1
+handshake the firmware asserts (`0x30000024`). Every bring-up step still
+reports success. The radio then transmits for a while, until its TX queues
+stop draining for good (bulk-OUT timeouts on every send). The 8852B tolerates
+the same undrained window. Same failure family as the MT7612U's undrained
+bulk-IN (`mt7612u.md`).
+
+### What devourer does about it
+
+`BringUpMonitorOnce` starts the WP/bulk-IN drain right after
+`PowerOnFwAndTrx`; `StartRxLoop` takes the endpoint over from it as before.
+`BringUpCheckingFwHalt` then reads `HALT_C2H_CTRL` after every monitor and TX
+bring-up. On a halt it logs the DMAC error registers (plus the HAXI block, on
+this die only, as the vendor's `dump_err_status_haxidma_ax` does) and, on
+USB, redoes the whole bring-up from `power_on` (3 attempts). On PCIe the redo
+is unverified, so a halt fails the bring-up there.
+
+Measured on a TX50UH, back-to-back txdemo bring-ups (200 frames, ch149, log
+level warn), with the same halt check in both arms and only the early
+`start_wp_drain()` call removed in the "undrained" one:
+
+| session | undrained: runs that halted | of which failed all 3 attempts | drained |
+|---|---|---|---|
+| 2026-10-18, 16:46-17:00 | 17 of 30 | 3 | 0 of 30 |
+| 2026-10-20, 07:56-08:07 | 7 of 66 | 0 | 0 of 50 |
+
+Every halt read `HAXI_IDCT=0x2` and `DMAC_ERR_ISR=0x4000`. The rate varies a
+lot between sessions; it is timing-sensitive (debug logging hides it) and the
+traffic the radio hears during the bring-up may matter (not isolated). The
+8852B (TX20U Nano) halted 0 of 20 both ways on 2026-10-18, with the same
+bring-up time.
+
+### Residual cost
+
+None measured: bring-up time is unchanged on both dies. Not covered: the
+8852CE (PCIe, no drain thread: its release reports arrive on the RPQ ring)
+and Linux hosts.
+
+### Reproducer
+
+`tests/kestrel_bringup_halt.sh` runs N bring-ups and counts halted attempts
+(exit 1 on any). Run it against a build with the early `start_wp_drain()` in
+`BringUpMonitorOnce` removed to see the halt, and against the stock build for
+the drained arm.

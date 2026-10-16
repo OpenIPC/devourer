@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -274,6 +275,20 @@ public:
   void EnableTxScheduler();
 
 private:
+  /* One pass of BringUpMonitor, no firmware-halt check. */
+  bool BringUpMonitorOnce(SelectedChannel channel);
+  /* The TX half of InitWrite, run after BringUpMonitorOnce. */
+  void InitWriteTail(SelectedChannel channel);
+  /* Run `once` (a full bring-up from power_on), then read HALT_C2H_CTRL. A
+   * bring-up can end with the firmware halted (L1 pre-error 0x999, then an
+   * assertion) while every step reported success; the radio then works for a
+   * while and its TX queues stop draining for good. Redo the bring-up, up to
+   * kFwHaltAttempts in all on USB (PCIe: no redo). False, with the bulk-IN
+   * drain stopped, when `once` fails or every attempt halts. */
+  bool BringUpCheckingFwHalt(const char *what,
+                             const std::function<bool()> &once);
+  static constexpr int kFwHaltAttempts = 3;
+
   /* Route a C2H firmware message (RPKT_TYPE_C2H payload). Currently decodes the
    * USR_TX_RPT_INFO report and emits its freerun TX-egress timestamp. */
   void handle_c2h(const uint8_t *payload, uint32_t len);

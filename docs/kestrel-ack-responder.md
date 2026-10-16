@@ -125,12 +125,35 @@ The selection is not taken from the per-macid CMAC table (searched for in all
 written before every arm still gave dead sessions), the firmware version (the
 Windows driver's 0.29.123.4 gave dead sessions too), the slot, temperature, or
 the 5 GHz EDCCA level (#491). Where the MAC takes it from is still not found.
-The two experiments #490 proposed for finding the cause were not run: a
-firmware RAM dump of dead against good sessions, and a vendor-driver A/B on the
-same unit. The attribution rests instead on the TX-info word predicting every
-outcome seen (the map-A-1 selection dead 10 of 10 times, every other value
-alive) and on the fix removing the dead sessions, including those with that
-selection.
+The two experiments #490 proposed were run after the cause was found:
+
+- **Firmware RAM is not it.** The firmware's data memory reads back through
+  the indirect window at the CPU's own addresses (0x20100000 up: the code
+  section reads back byte-identical to the image). Its writable parts,
+  0x20161000-0x20180000, 0x2020c000-0x20278000 and 0x20300000-0x20308000
+  (about 590 KB), were dumped 8 s after the arm in 26 sessions (2026-10-15,
+  21:18-21:49, UTC-3) and grouped by the TX-info word (that build had the
+  fix, so every session answered): 15 sessions with 0x10e41012 against 11
+  with the 0x10??f012 family. No bit is constant within each group and
+  different between them (the same test with shuffled labels also finds
+  none), and the 160 words the firmware keeps with only 2-4 values across
+  sessions take each value in sessions of both groups. Only one session had
+  the map-A-1 word, and it shares the common values. The path selection is
+  not something the firmware's memory records.
+- **The vendor driver does not show it.** The same TX50UH on the Realtek
+  Windows driver (5001.19.128.1, firmware 0.29.123.4), associated as a
+  station to an AP on ch161, was restarted 45 times (`pnputil
+  /restart-device`, a full driver bring-up each time; 2026-10-16
+  00:15-00:33) and solicited for 8 s after each reconnect by the TX20U Nano
+  (MCS1, one attempt per frame): 0 dead of 45, every one 88.6-98.3%
+  (associated, it also carries the AP's traffic). Without the fix, devourer
+  on the same unit had 4 dead of 30 earlier that day. So the vendor
+  bring-up initialises the response's path selection where devourer's does
+  not; which write does it is still not found.
+
+The attribution rests on the TX-info word predicting every outcome seen
+(the map-A-1 selection dead 10 of 10 times, every other value alive) and on
+the fix removing the dead sessions, including those with that selection.
 
 **The fix.** Right after the T-MAC path routing at bring-up, the halbb glue
 calls `halbb_ctrl_tx_path_pmac_8852c(RF_PATH_AB)`: 0x09a4 bits [4:2] select

@@ -45,7 +45,7 @@ struct KestrelRxFrame {
   bool a1_match = false;
   uint16_t rx_rate = 0; /* 9-bit datarate code (legacy/HT/VHT/HE) */
   uint8_t gi_ltf = 0;
-  uint8_t bw = 0;       /* 0=20 1=40 2=80 */
+  uint8_t bw = 0;       /* 0=20 1=40 2=80 3=160 (3 bits on the 8852C) */
   uint8_t ppdu_type = 0xf; /* RX_DESC_PPDU_T_*: 7=HE_SU 8=HE_ERSU (15=unknown) */
   uint8_t ppdu_cnt = 0;
   uint32_t freerun_cnt = 0; /* free-running counter (TSF-ish) */
@@ -87,7 +87,11 @@ inline bool parse_rx_8852b(const uint8_t *buf, size_t buflen,
   out.ppdu_cnt = static_cast<uint8_t>((d1 >> 4) & 0x7);
   out.rx_rate = static_cast<uint16_t>((d1 >> 16) & 0x1ff);
   out.gi_ltf = static_cast<uint8_t>((d1 >> 25) & 0x7);
-  out.bw = static_cast<uint8_t>((d1 >> 30) & 0x3);
+  /* The 8852C widens the field to [31:29] (rtw89 AX_RXD_BW_v1_MASK); reading
+   * [31:30] there halves every width (80 MHz reads as 40, 40 as 20). The
+   * 16-byte drv_info unit is what marks that die here. */
+  out.bw = drv_info_unit == 16 ? static_cast<uint8_t>((d1 >> 29) & 0x7)
+                               : static_cast<uint8_t>((d1 >> 30) & 0x3);
 
   out.freerun_cnt = detail::rd_le32(buf + 8);
 

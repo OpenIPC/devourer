@@ -208,7 +208,10 @@ Almost every 8852C divergence is a **`_V1` register-bank** move
 32-byte `wd_body_t_v1` (not 24), and the RX-descriptor drv_info unit is
 16 bytes (not 8 — `FrameParserKestrel.h`; with the B's unit the C "receives"
 frames with correct lengths but unreadable bodies, i.e. looks deaf to any
-SA-matching harness). The CBV-cut die loads the `u2_nic` fw image (CAV→u1).
+SA-matching harness); the same descriptor widens the RX bandwidth field to
+dword1 [31:29] (rtw89 `AX_RXD_BW_v1_MASK`) — read with the B's [31:30],
+every width came out halved (80 MHz as 40). The CBV-cut die loads the
+`u2_nic` fw image (CAV→u1).
 Two 8852C-specific TX pieces the 8852B path lacks: the BB IFFT→TX-chain
 routing (`halbb_ctrl_tx_path_tmac_8852c`, the 0xD800..0xD82C "path-com" block
 the 8852B replaces with its per-STA CMAC antenna model), and the V1

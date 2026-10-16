@@ -142,15 +142,19 @@ jobs:
       - name: Set up MSYS2 / mingw-w64
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          # UCRT64, not MINGW64: MSYS2 deprecated the MINGW64 environment and
+          # its package database stopped carrying libusb (pacman: "target not
+          # found: mingw-w64-x86_64-libusb"), while UCRT64 ships every package
+          # below at the same versions. Still gcc, still pkg-config libusb.
+          msystem: UCRT64
           update: true
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-libusb
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-openssl
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-libusb
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-openssl
 
       - name: Configure CMake (mingw, pkg-config libusb, no vcpkg)
         # VCPKG_ROOT is unset, so CMakeLists takes the pkg-config path — the

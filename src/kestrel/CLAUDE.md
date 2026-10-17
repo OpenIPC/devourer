@@ -57,6 +57,17 @@ rates), channel/BW **5/10/20/40/80 MHz on both dies + 160 MHz on the 8852C**
 (the 8852B die has no 160 MHz — vendor bw_sup; caps report accordingly).
 40 MHz tunes to the block center (primary ±2); 80/160 MHz derive the center
 from the channel plan (160 = an 8-wide block, center = block_start+14).
+Every tune also programs the MAC side of the width (`mac_set_bw_txsc`, as
+rtw89 `rtw8852c_set_channel_mac`): `R_AX_WMAC_RFMOD` and the TX sub-carrier
+indices in `R_AX_TX_SUB_CARRIER_VALUE` (`rtw89_phy_get_txsc`). Without them a
+PPDU narrower than the channel — 20 MHz on an 80 MHz channel — airs at the
+block center and nothing on the primary hears it (an iPhone on ch149 never
+saw an 8852C tuned 149/80 until they were written). The wide-channel TX
+validation above injected PPDUs as wide as the channel, which do not use the
+index, so it could not catch this. On-air A/B, txdemo 6M beacons from a DUT
+tuned wide, rxdemo at 20 MHz on the primary, 500 frames a cell: before, 0 on
+every cell of both dies (8852C 149/40, 153/40, 149/80, 161/80, 36/160; 8852B
+the same minus 160); after, 400+ on every cell; a 20 MHz control 400+ both.
 `halbb_ctrl_bw_ch`'s `pri_ch` argument is the primary **channel number**, not a
 sub-band index (vendor phl passes `rtw_chan_def::chan` through unchanged): the
 vendor derives the 0x4978[11:8] sub-band index from `pri_ch` vs `central_ch`,

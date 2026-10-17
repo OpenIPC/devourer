@@ -2611,6 +2611,89 @@ void HalKestrel::bb_reset_all() {
   bb_rmw(0xc3c, 1u << 9, 0);
 }
 
+namespace {
+/* rtw89_phy_get_txsc: which sub-channel of a `cbw` channel a `dbw`-wide PPDU
+ * airs on, from the primary channel number vs the block center. 0 when the
+ * PPDU is as wide as the channel. */
+uint8_t phy_get_txsc(uint8_t pri, uint8_t center, ChannelWidth_t cbw,
+                     ChannelWidth_t dbw) {
+  if (cbw == dbw || cbw == CHANNEL_WIDTH_20)
+    return 0;
+  const bool above = pri > center;
+  const uint8_t idx20 = static_cast<uint8_t>(
+      above ? (pri - center) >> 1 : ((center - pri) >> 1) + 1);
+  switch (cbw) {
+  case CHANNEL_WIDTH_40:
+    return above ? 1 : 2;
+  case CHANNEL_WIDTH_80:
+    return dbw == CHANNEL_WIDTH_20 ? idx20 : (above ? 9 : 10);
+  case CHANNEL_WIDTH_160:
+    if (dbw == CHANNEL_WIDTH_20)
+      return idx20;
+    if (dbw == CHANNEL_WIDTH_40) {
+      if (idx20 == 1 || idx20 == 3)
+        return 9;
+      if (idx20 == 5 || idx20 == 7)
+        return 11;
+      if (idx20 == 2 || idx20 == 4)
+        return 10;
+      if (idx20 == 6 || idx20 == 8)
+        return 12;
+      return 0xff;
+    }
+    return above ? 13 : 14;
+  default:
+    return 0;
+  }
+}
+} /* namespace */
+
+void HalKestrel::mac_set_bw_txsc(uint8_t channel, uint8_t center,
+                                 ChannelWidth_t bw) {
+  /* The MAC side of a tune, as rtw89 rtw8852c_set_channel_mac does it:
+   * R_AX_WMAC_RFMOD carries the channel width, and R_AX_TX_SUB_CARRIER_VALUE
+   * the sub-channel each narrower PPDU airs on. Left at its cmac_com_init
+   * zeros, a 20 MHz frame on an 80 MHz channel airs at the block center,
+   * where nothing listening on the primary hears it. */
+  uint8_t rfmod = 0;
+  uint32_t txsc = 0;
+  const auto field = [](uint8_t v, uint8_t sh) {
+    return (uint32_t{v} & r::B_AX_TXSC_MSK) << sh;
+  };
+  switch (bw) {
+  case CHANNEL_WIDTH_160:
+    rfmod = 3;
+    txsc = field(phy_get_txsc(channel, center, bw, CHANNEL_WIDTH_20),
+                 r::B_AX_TXSC_20M_SH) |
+           field(phy_get_txsc(channel, center, bw, CHANNEL_WIDTH_40),
+                 r::B_AX_TXSC_40M_SH) |
+           field(phy_get_txsc(channel, center, bw, CHANNEL_WIDTH_80),
+                 r::B_AX_TXSC_80M_SH);
+    break;
+  case CHANNEL_WIDTH_80:
+    rfmod = 2;
+    txsc = field(phy_get_txsc(channel, center, bw, CHANNEL_WIDTH_20),
+                 r::B_AX_TXSC_20M_SH) |
+           field(phy_get_txsc(channel, center, bw, CHANNEL_WIDTH_40),
+                 r::B_AX_TXSC_40M_SH);
+    break;
+  case CHANNEL_WIDTH_40:
+    rfmod = 1;
+    txsc = field(phy_get_txsc(channel, center, bw, CHANNEL_WIDTH_20),
+                 r::B_AX_TXSC_20M_SH);
+    break;
+  default: /* 20 MHz and the 5/10 MHz small-BW modes: RF in 20 MHz mode */
+    break;
+  }
+  const uint8_t m = _device.rtw_read8(r::R_AX_WMAC_RFMOD);
+  _device.rtw_write8(r::R_AX_WMAC_RFMOD,
+                     static_cast<uint8_t>((m & ~r::B_AX_WMAC_RFMOD_MSK) | rfmod));
+  _device.rtw_write32(r::R_AX_TX_SUB_CARRIER_VALUE, txsc);
+  if (rfmod)
+    _logger->info("Kestrel set_channel: pri {} center {} rfmod {} txsc 0x{:03x}",
+                  channel, center, rfmod, txsc);
+}
+
 bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                              uint8_t offset, uint8_t band) {
   /* band: 0 = auto (2.4 GHz if ch<=14 else 5 GHz), 6 = 6 GHz. band_type is the
@@ -2662,6 +2745,7 @@ bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                     "MHz for 6 GHz TX.");
   }
 
+  mac_set_bw_txsc(channel, center, bw);
 
   if (_variant == ChipVariant::C8852C) {
     /* DIG PD lower-bound disable (halbb_dig_init_io_en -> dyn_pd_th, set_en=0):

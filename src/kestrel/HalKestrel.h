@@ -162,6 +162,10 @@ public:
    * must ensure same band + same width (20 MHz). */
   void fast_retune(uint8_t channel);
 
+  /* 80 MHz, 5 GHz: move the primary 20 within the current 80 MHz block
+   * (BB primary index + 5 MHz mask + MAC TXSC + BB reset), no RF tune. */
+  void fast_set_primary_80(uint8_t channel, uint8_t center);
+
   /* Lean same-channel 20 <-> 5/10 MHz narrowband toggle: only the BB small-BW
    * field + ACI-detect change (the RF stays in 20 MHz mode for all of 20/5/10,
    * so no RF re-tune, no gain/channel re-apply). ~a BB write + reset vs the full

@@ -379,6 +379,15 @@ changes the `FastRetune` timing contract (it returns before the channel is
 usable); the hop demos' admission window already honours the settle, and
 `DEVOURER_KFR_OFLD=0` restores the self-pacing direct path.
 
+At 80 MHz both Kestrel dies have a narrower shortcut of their own: a hop
+between two channels of the same 80 MHz block (149 <-> 161, center 155) moves
+no RF, only which 20 MHz is primary. `fast_set_primary_80` rewrites the BB
+primary index, the 5 MHz edge mask and the MAC TX sub-carrier and resets the
+BB — median ~2.2 ms on the 8852C against ~213 ms for the full path (which
+also re-runs the IQK this one skips), ~18 ms on the 8852B against ~145 ms,
+its register round-trips being the slower ones (`src/kestrel/CLAUDE.md` has
+the measurement and its limits).
+
 (Median `hop.dwell` switch_us over a 1/6/11 hop set; per-stage numbers from
 `DEVOURER_HOP_PROF=1`. Every hop microsecond is USB round-trips: one register
 read or write is one synchronous control transfer, whose latency is a property

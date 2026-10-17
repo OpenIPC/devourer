@@ -756,6 +756,17 @@ void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {
    * (band change or wide/narrow BW, where the center + BB config differ) takes
    * the full SetMonitorChannel. */
   const bool same_band = (_channel.Channel <= 14) == (channel <= 14);
+  /* 80 MHz, 5 GHz, target inside the same block: only the primary moves. */
+  if (same_band && channel > 14 && _channel.ChannelWidth == CHANNEL_WIDTH_80 &&
+      _channel.Band != 6) {
+    const auto block = [](int ch) { return ch - (((ch - 36) / 4) % 4) * 4; };
+    if (block(channel) == block(_channel.Channel)) {
+      if (channel != _channel.Channel)
+        _hal.fast_set_primary_80(channel, static_cast<uint8_t>(block(channel) + 6));
+      _channel.Channel = channel;
+      return;
+    }
+  }
   if (!same_band || _channel.ChannelWidth != CHANNEL_WIDTH_20) {
     SelectedChannel c = _channel;
     c.Channel = channel;

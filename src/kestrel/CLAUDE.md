@@ -159,6 +159,33 @@ here (H2C 0x1D is 11ac HalMAC; rtw89 has only `SCAN_OFFLOAD` + MCC). The
 dwell-1 / N-channel data plane (`examples/dwelltx`) runs on Kestrel at ~30 ms
 slots (soak: 2000 hops, zero wrong-channel, ~97 % delivery).
 
+Both dies have one shortcut at 80 MHz on 5 GHz: a hop to another channel of
+the **same 80 MHz block** (149 <-> 161 in 149-161) moves no RF, only the
+primary. `fast_set_primary_80` rewrites what `halbb_ctrl_bw_ch_8852{b,c}`
+derives from the primary at 80 MHz — the [11:8] sub-band index (0x4978 on the
+C, 0x49c4 on the B) and the 5 MHz edge mask (`halbb_5m_mask_8852{b,c}`:
+0x4c4c/0x4d10/0x4450[24] on the C, 0x46f8/0x47b8/0x4440[31] on the B, the
+0x4 value on both; the 8852D's 0x5 is not handled) — plus the MAC TX
+sub-carrier, then resets the BB. Median hop **~2.2 ms on the 8852C** (115
+hops, max 2.5 ms) against ~213 ms for the full path, which re-runs the IQK
+this one skips; **~18 ms on the 8852B** against ~145 ms (its register
+round-trips are the slower ones, as above). Measured with an iPhone whose
+AWDL schedule alternates 149/161, on the 8852C: on the full path its 49.5 MB
+transfer spent ~44 s of 49 s deaf; on this one a 50.8 MB transfer took 7.5 s
+with nothing else changed. txdemo alternating 149/161 at 80 MHz (50 frames a
+dwell, 250 on 161) reached an rxdemo witness on 161 at 200+ on both dies,
+fast or full. With the IQK skipped, MAC retries stayed at 2-4% over the
+iPhone sessions — one adapter, one peer, near field — and the fast hop
+relies on the RF center staying put. Register parity against the full path
+(BB 0x0000-0xFFFF incl. the RF window, CMAC 0xC000-0xCFFF; pairs 149/161,
+149/153 and 157/161, 3 full tunes per primary and 12 fast hops each, on each
+die): every register the full path sets per primary matched on all 36 hops
+of each die. The rest that differed either differs between two full tunes
+of the same channel too (SW-SI counters and records, RX counters, AFE status
+outputs, the NCTL/IQK engine's status) or showed on a single hop of six
+(a few undocumented CMAC status words); a missing write would show on every
+hop. Any other wide-channel hop still takes the full path.
+
 ### Firmware IO-offload hop (`DEVOURER_KFR_OFLD`, default on)
 
 `fast_retune_ofld_8852b` ships the *entire* same-sub-band hop — the six RF18/

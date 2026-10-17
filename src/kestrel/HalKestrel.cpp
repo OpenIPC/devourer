@@ -2694,6 +2694,38 @@ void HalKestrel::mac_set_bw_txsc(uint8_t channel, uint8_t center,
                   channel, center, rfmod, txsc);
 }
 
+void HalKestrel::fast_set_primary_80(uint8_t channel, uint8_t center) {
+  /* Move the primary 20 inside the 80 MHz block the RF already sits on: the
+   * pieces of halbb_ctrl_bw_ch_8852{b,c} that read pri_ch at 80 MHz -- the
+   * [11:8] sub-band index and the 5 MHz edge mask (halbb_5m_mask_8852{b,c})
+   * -- and the MAC TXSC, then a BB reset. No RF tune, no IQK: the ~210 ms of
+   * the full path. Same steps on both dies, at the registers each one's
+   * halbb uses; the mask's 0x3f field is 0x4 on both (the 8852D's 0x5 is not
+   * handled). */
+  const bool c = _variant == ChipVariant::C8852C;
+  const uint32_t pri_reg = c ? 0x4978 : 0x49C4;
+  const uint32_t mask_regs[2] = {c ? 0x4c4cu : 0x46f8u, c ? 0x4d10u : 0x47b8u};
+  const uint32_t mask_en_reg = c ? 0x4450 : 0x4440;
+  const uint32_t mask_en_bit = c ? 1u << 24 : 1u << 31;
+  const int d = int(channel) - int(center);
+  const uint8_t idx = static_cast<uint8_t>(d > 0 ? d / 2 : -d / 2 + 1);
+  bb_rmw(pri_reg, 0xf00, idx);
+  const bool mask_en = idx == 3 || idx == 4, mask_low = idx == 4;
+  for (const uint32_t a : mask_regs) {
+    if (mask_en) {
+      bb_rmw(a, 0x3f, 0x4);
+      bb_rmw(a, 1u << 12, 1);
+      bb_rmw(a, 1u << 8, mask_low ? 0 : 1);
+      bb_rmw(a, 1u << 6, mask_low ? 1 : 0);
+    } else {
+      bb_rmw(a, 1u << 12, 0);
+    }
+  }
+  bb_rmw(mask_en_reg, mask_en_bit, mask_en ? 1 : 0);
+  mac_set_bw_txsc(channel, center, CHANNEL_WIDTH_80);
+  bb_reset_all();
+}
+
 bool HalKestrel::set_channel(uint8_t channel, ChannelWidth_t bw,
                              uint8_t offset, uint8_t band) {
   /* band: 0 = auto (2.4 GHz if ch<=14 else 5 GHz), 6 = 6 GHz. band_type is the

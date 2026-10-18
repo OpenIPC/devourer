@@ -1414,6 +1414,8 @@ constexpr uint8_t B_AX_TXSC_20M_SH = 0;
 constexpr uint8_t B_AX_TXSC_40M_SH = 4;
 constexpr uint8_t B_AX_TXSC_80M_SH = 8;
 constexpr uint32_t B_AX_TXSC_MSK = 0xf;
+constexpr uint16_t R_AX_WMAC_RFMOD = 0xC010;
+constexpr uint32_t B_AX_WMAC_RFMOD_MSK = 0x3; /* [1:0]: 0/1/2/3 = 20/40/80/160 */
 constexpr uint16_t R_AX_PTCL_RRSR1 = 0xC090;
 constexpr uint8_t B_AX_RRSR_RATE_EN_SH = 8;
 constexpr uint32_t B_AX_RRSR_RATE_EN_MSK = 0xf;

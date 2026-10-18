@@ -162,6 +162,10 @@ public:
    * must ensure same band + same width (20 MHz). */
   void fast_retune(uint8_t channel);
 
+  /* 80 MHz, 5 GHz: move the primary 20 within the current 80 MHz block
+   * (BB primary index + 5 MHz mask + MAC TXSC + BB reset), no RF tune. */
+  void fast_set_primary_80(uint8_t channel, uint8_t center);
+
   /* Lean same-channel 20 <-> 5/10 MHz narrowband toggle: only the BB small-BW
    * field + ACI-detect change (the RF stays in 20 MHz mode for all of 20/5/10,
    * so no RF re-tune, no gain/channel re-apply). ~a BB write + reset vs the full
@@ -609,6 +613,8 @@ private:
   bool pcie_ltr_silence();
   /* BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
+  /* R_AX_WMAC_RFMOD + R_AX_TX_SUB_CARRIER_VALUE for `bw` around `center`. */
+  void mac_set_bw_txsc(uint8_t channel, uint8_t center, ChannelWidth_t bw);
   uint32_t bb_read(uint32_t addr, uint32_t mask); /* masked+shifted BB read */
   uint32_t rf_read(uint8_t path, uint8_t rf_addr);         /* DDV RF read */
   void rf_write(uint8_t path, uint8_t rf_addr, uint32_t val); /* DDV RF write */

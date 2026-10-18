@@ -756,6 +756,17 @@ void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {
    * (band change or wide/narrow BW, where the center + BB config differ) takes
    * the full SetMonitorChannel. */
   const bool same_band = (_channel.Channel <= 14) == (channel <= 14);
+  /* 80 MHz, 5 GHz, target inside the same block: only the primary moves. */
+  if (same_band && channel > 14 && _channel.ChannelWidth == CHANNEL_WIDTH_80 &&
+      _channel.Band != 6) {
+    const auto block = [](int ch) { return ch - (((ch - 36) / 4) % 4) * 4; };
+    if (block(channel) == block(_channel.Channel)) {
+      if (channel != _channel.Channel)
+        _hal.fast_set_primary_80(channel, static_cast<uint8_t>(block(channel) + 6));
+      _channel.Channel = channel;
+      return;
+    }
+  }
   if (!same_band || _channel.ChannelWidth != CHANNEL_WIDTH_20) {
     SelectedChannel c = _channel;
     c.Channel = channel;
@@ -768,9 +779,15 @@ void RtlKestrelDevice::FastRetune(uint8_t channel, bool /*cache_rf*/) {
 
 void RtlKestrelDevice::FastSetBandwidth(ChannelWidth_t bw) {
   /* Lean path only for the 20 <-> 5/10 MHz narrowband toggle (BB small-BW
-   * field, same channel); 40/80 MHz change the center + RF bw so take the full
-   * SetMonitorChannel. */
-  if (bw != CHANNEL_WIDTH_20 && bw != CHANNEL_WIDTH_5 && bw != CHANNEL_WIDTH_10) {
+   * field, same channel), so both ends must be narrow. Leaving a 40/80/160 MHz
+   * channel moves the RF center and RF bw back to the primary and resets the
+   * MAC width (RFMOD + TX sub-carrier), none of which the lean path touches:
+   * from 149/80 it left RF18 on 155/80 and the MAC at 80 MHz. Any wide end
+   * takes the full SetMonitorChannel. */
+  const auto narrow = [](ChannelWidth_t w) {
+    return w == CHANNEL_WIDTH_20 || w == CHANNEL_WIDTH_5 || w == CHANNEL_WIDTH_10;
+  };
+  if (!narrow(bw) || !narrow(_channel.ChannelWidth)) {
     SelectedChannel c = _channel;
     c.ChannelWidth = bw;
     SetMonitorChannel(c);

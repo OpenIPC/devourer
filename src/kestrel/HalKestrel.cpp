@@ -2548,15 +2548,19 @@ void HalKestrel::fast_retune(uint8_t channel) {
 
 void HalKestrel::fast_set_bw(ChannelWidth_t bw) {
   /* Lean 20 <-> 5/10 MHz toggle (same channel). Only the BB small-BW field
-   * (0x49C4[13:12]) + ACI-detect (0x4738/0x4AA4[16]) differ between 20 MHz and
-   * narrowband; RF_BW stays 0 and RF18[11:10] stays "both" for all of 20/5/10,
-   * so no RF re-tune or gain re-apply is needed. */
+   * ([13:12], per-die address below) + ACI-detect (0x4738/0x4AA4[16])
+   * differ between 20 MHz and narrowband; RF_BW stays 0 and RF18[11:10]
+   * stays "both" for all of 20/5/10, so no RF re-tune or gain re-apply is
+   * needed. */
   const uint32_t smallbw = bw == CHANNEL_WIDTH_5    ? 0x1
                            : bw == CHANNEL_WIDTH_10 ? 0x2
                                                     : 0x0;      /* 20 MHz */
   const uint32_t aci = bw == CHANNEL_WIDTH_20 ? 0x1 : 0x0;      /* off for NB */
-  bb_rmw(0x49C0, 0xC0000000u, 0x0); /* RF_BW = 0 */
-  bb_rmw(0x49C4, 0x3000u, smallbw);
+  /* RF_BW and small-BW sit at 0x4974/0x4978 on the 8852C and 0x49C0/0x49C4 on
+   * the 8852B (halbb_ctrl_bw_8852{c,b}); the ACI bits are shared. */
+  const bool c = _variant == ChipVariant::C8852C;
+  bb_rmw(c ? 0x4974 : 0x49C0, 0xC0000000u, 0x0); /* RF_BW = 0 */
+  bb_rmw(c ? 0x4978 : 0x49C4, 0x3000u, smallbw);
   bb_rmw(0x4738, 0x10000u, aci);
   bb_rmw(0x4AA4, 0x10000u, aci);
   bb_reset_all();

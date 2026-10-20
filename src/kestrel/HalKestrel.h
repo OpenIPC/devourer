@@ -556,8 +556,9 @@ public:
 
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has
    * posted a halt error (HALT_C2H_CTRL set; HALT_C2H_CTRL itself when that
-   * code reads 0), else 0. Logs a labeled line so the
-   * bring-up can pinpoint which init step crashes the running fw. */
+   * code reads 0 or cannot be read), else 0. Logs a labeled line so the
+   * bring-up can pinpoint which init step crashes the running fw. Only the
+   * HALT_C2H_CTRL read can throw; the diagnostics after it never do. */
   uint32_t fw_err_state(const char *where);
 
   /* Forget the host-side state one bring-up leaves behind (the vendored

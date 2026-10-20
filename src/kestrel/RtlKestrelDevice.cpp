@@ -200,10 +200,14 @@ bool RtlKestrelDevice::BringUpCheckingFwHalt(
   for (int attempt = 1; attempt <= attempts; ++attempt) {
     if (attempt > 1)
       _hal.reset_for_rebringup();
-    /* A failed or throwing pass stops the drain BringUpMonitorOnce started. */
+    /* A failed or throwing pass (or halt probe) stops the drain
+     * BringUpMonitorOnce started. */
     bool up = false;
+    uint32_t err = 0;
     try {
       up = once();
+      if (up)
+        err = _hal.fw_err_state(what);
     } catch (...) {
       stop_wp_drain();
       throw;
@@ -212,7 +216,6 @@ bool RtlKestrelDevice::BringUpCheckingFwHalt(
       stop_wp_drain();
       return false;
     }
-    const uint32_t err = _hal.fw_err_state(what);
     if (err == 0) {
       if (attempt > 1)
         _logger->info("Kestrel: {} clean on attempt {}", what, attempt);

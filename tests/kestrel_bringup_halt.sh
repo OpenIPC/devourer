@@ -12,7 +12,9 @@
 #   sudo DEVOURER_PID=0x0101 bash tests/kestrel_bringup_halt.sh      # 8852C
 #   sudo DEVOURER_PID=0x0108 N=20 bash tests/kestrel_bringup_halt.sh # 8852B
 #
-# Exit 0 when no attempt halted, 1 otherwise.
+# Exit 0 when every run completed (txdemo exit 0) and no attempt halted, 1
+# otherwise. A run that exits non-zero for any other reason (adapter absent,
+# open or bring-up error, timeout) tested nothing and counts as an error.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD=${BUILD:-$ROOT/build}
@@ -24,7 +26,7 @@ SUDO=${SUDO-sudo}
 TXDEMO="$BUILD/txdemo"; [ -x "$TXDEMO" ] || TXDEMO="$BUILD/txdemo.exe"
 mkdir -p "$OUT"
 
-runs_halted=0 attempts_halted=0 runs_failed=0 attempts=0
+runs_halted=0 attempts_halted=0 runs_failed=0 runs_errored=0 attempts=0
 for i in $(seq 1 "$N"); do
   log="$OUT/run$i.log"
   $SUDO env DEVOURER_VID=$VID DEVOURER_PID=$PID DEVOURER_CHANNEL=$CH \
@@ -33,13 +35,21 @@ for i in $(seq 1 "$N"); do
   rc=$?
   h=$(grep -c "firmware halted during" "$log" || true)
   f=$(grep -c "firmware halted on all" "$log" || true)
-  attempts=$((attempts + h + 1 - f))
   attempts_halted=$((attempts_halted + h))
   [ "$h" -gt 0 ] && runs_halted=$((runs_halted + 1))
-  [ "$f" -gt 0 ] && runs_failed=$((runs_failed + 1))
-  echo "run $i: rc=$rc halted_attempts=$h$([ "$f" -gt 0 ] && echo ' (all attempts halted)')"
+  note=""
+  if [ "$f" -gt 0 ]; then
+    attempts=$((attempts + h)); runs_failed=$((runs_failed + 1))
+    note=" (all attempts halted)"
+  elif [ "$rc" -ne 0 ]; then
+    attempts=$((attempts + h)); runs_errored=$((runs_errored + 1))
+    note=" (ERROR: txdemo failed without a halt; see $log)"
+  else
+    attempts=$((attempts + h + 1))
+  fi
+  echo "run $i: rc=$rc halted_attempts=$h$note"
   grep -h "FW-SER" "$log" | sed 's/^/    /' | sort -u
 done
 echo "=== $VID:$PID ch$CH: $runs_halted of $N runs halted at least once," \
-     "$attempts_halted of $attempts attempts, $runs_failed runs failed"
-[ "$attempts_halted" -eq 0 ]
+     "$attempts_halted of $attempts attempts, $runs_failed runs failed,"      "$runs_errored runs errored"
+[ "$attempts_halted" -eq 0 ] && [ "$runs_errored" -eq 0 ]

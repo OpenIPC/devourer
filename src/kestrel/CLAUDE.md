@@ -48,13 +48,9 @@ MAC off from any retained state, while a USB reset on running firmware drops
 the chip to ROM — a stale-handle re-enumeration that can land in the dead
 ZeroCD DISK id (`0bda:1a2b`).
 
-USB bulk-IN is drained from right after `intf_init` (`BringUpMonitorOnce`),
-not from the end of bring-up: left unread, the 8852C flags its RX DMA stuck
-and its firmware halts while every bring-up step still reports success; TX
-dies minutes later. `BringUpCheckingFwHalt` catches a halt that still gets
-through (HALT_C2H after the bring-up; USB: full redo, 3 attempts; PCIe: no
-redo, the bring-up fails). Mechanism, numbers and reproducer:
-`docs/8852c-quirks.md`.
+Bring-up drains the USB bulk-IN from `intf_init` on and checks for a halted
+firmware at its end; do not move the drain later (8852C quirk,
+`docs/8852c-quirks.md`).
 
 ## Validated capability surface
 

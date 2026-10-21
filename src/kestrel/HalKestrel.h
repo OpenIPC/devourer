@@ -555,9 +555,17 @@ public:
   }
 
   /* Firmware SER probe: returns the latched mac_ax_err_info code if the fw has
-   * posted a halt error (HALT_C2H_CTRL set), else 0. Logs a labeled line so the
-   * bring-up can pinpoint which init step crashes the running fw. */
+   * posted a halt error (HALT_C2H_CTRL set; HALT_C2H_CTRL itself when that
+   * code reads 0 or cannot be read), else 0. Logs a labeled line so the
+   * bring-up can pinpoint which init step crashes the running fw. Only the
+   * HALT_C2H_CTRL read can throw; the diagnostics after it never do. */
   uint32_t fw_err_state(const char *where);
+
+  /* Forget the host-side state one bring-up leaves behind (the vendored
+   * halbb/halrf contexts and their one-shot inits, the fast-retune caches, the
+   * H2C sequence), so the next power_on -> ... -> set_channel runs as it would
+   * on a freshly constructed device. power_on itself forces the MAC off. */
+  void reset_for_rebringup();
 
   /* Poll HALT_C2H for `ms` with no other bus traffic — detects an async fw
    * self-crash after boot (vs a write-triggered one). */

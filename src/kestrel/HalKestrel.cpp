@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <thread>
 #include <utility>
 
@@ -816,11 +817,37 @@ uint32_t HalKestrel::fw_err_state(const char *where) {
   const uint32_t ctrl = _device.rtw_read32(r::R_AX_HALT_C2H_CTRL);
   if (ctrl == 0)
     return 0;
-  const uint32_t err = _device.rtw_read32(r::R_AX_HALT_C2H);
-  _logger->error("Kestrel FW-SER at [{}]: HALT_C2H_CTRL=0x{:08x} err=0x{:08x} "
-                 "(0x2010=L2_AH_HCI 0x1000=L1_DMAC 0x2000=L2_AH_DMA)",
-                 where, ctrl, err);
-  return err;
+  /* The halt is established by now: everything below is diagnostics, and a
+   * failed read here (the USB transport throws) must not hide it from the
+   * caller, so it is logged and the halt still returned. */
+  uint32_t err = 0;
+  try {
+    err = _device.rtw_read32(r::R_AX_HALT_C2H);
+    _logger->error("Kestrel FW-SER at [{}]: HALT_C2H_CTRL=0x{:08x} err=0x{:08x} "
+                   "(0x2010=L2_AH_HCI 0x1000=L1_DMAC 0x2000=L2_AH_DMA)",
+                   where, ctrl, err);
+    /* Which DMAC error raised it (dbgpkg.c dump_err_status_dmac), then on the
+     * 8852C the HAXI block its USB DMA runs through
+     * (dump_err_status_haxidma_ax, which the vendor builds for the AXI dies
+     * only). */
+    auto rd = [&](uint16_t a) { return _device.rtw_read32(a); };
+    _logger->error("Kestrel FW-SER dmac_isr=0x{:08x} ser_dbg=0x{:08x}",
+                   rd(r::R_AX_DMAC_ERR_ISR), rd(r::R_AX_SER_DBG_INFO));
+    if (_variant == ChipVariant::C8852C)
+      _logger->error("Kestrel FW-SER haxi_idct=0x{:08x}/msk 0x{:08x} "
+                     "dbg_err_v1=0x{:08x} haxi cfg1=0x{:08x} stop1=0x{:08x} "
+                     "busy1=0x{:08x} busy3=0x{:08x} hdp_dbg2=0x{:08x}",
+                     rd(r::R_AX_HAXI_IDCT), rd(r::R_AX_HAXI_IDCT_MSK),
+                     rd(r::R_AX_DBG_ERR_FLAG_V1), rd(r::R_AX_HAXI_INIT_CFG1),
+                     rd(r::R_AX_HAXI_DMA_STOP1), rd(r::R_AX_HAXI_DMA_BUSY1),
+                     rd(r::R_AX_HAXI_DMA_BUSY3), rd(r::R_AX_HDP_DBG_INFO_2_V1));
+  } catch (const std::exception &e) {
+    _logger->error("Kestrel FW-SER at [{}]: HALT_C2H_CTRL=0x{:08x}, error "
+                   "registers unreadable ({})",
+                   where, ctrl, e.what());
+  }
+  /* A posted halt with no (readable) error code still counts as a halt. */
+  return err != 0 ? err : ctrl;
 }
 
 void HalKestrel::fw_err_settle(const char *where, uint32_t ms) {
@@ -2347,6 +2374,21 @@ HalKestrel::~HalKestrel() {
   if (_halbb_ctx)
     kestrel_halbb_destroy(_halbb_ctx);
   delete static_cast<kestrel_halbb_bridge *>(_halbb_bridge);
+}
+
+void HalKestrel::reset_for_rebringup() {
+  if (_halrf_ctx)
+    kestrel_halrf_destroy(_halrf_ctx);
+  if (_halbb_ctx)
+    kestrel_halbb_destroy(_halbb_ctx);
+  delete static_cast<kestrel_halbb_bridge *>(_halbb_bridge);
+  _halrf_ctx = nullptr;
+  _halbb_ctx = nullptr;
+  _halbb_bridge = nullptr;
+  _halrf_rfk_inited = false;
+  _kfr_primed = false;
+  _last_gain_bucket = -1;
+  _fw.reset_h2c_seq();
 }
 
 namespace {

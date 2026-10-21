@@ -48,6 +48,10 @@ MAC off from any retained state, while a USB reset on running firmware drops
 the chip to ROM — a stale-handle re-enumeration that can land in the dead
 ZeroCD DISK id (`0bda:1a2b`).
 
+Bring-up drains the USB bulk-IN from `intf_init` on and checks for a halted
+firmware at its end; do not move the drain later (8852C quirk,
+`docs/8852c-quirks.md`).
+
 ## Validated capability surface
 
 On-air-validated: monitor RX (both dies, 2.4/5 GHz; the RX front-end needs

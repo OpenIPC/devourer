@@ -24,6 +24,11 @@ namespace kestrel {
 class KestrelFw {
 public:
   KestrelFw(RtlAdapter device, Logger_t logger, ChipVariant variant);
+  /* A re-downloaded fw starts its H2C sequence afresh, as a new device would. */
+  void reset_h2c_seq() {
+    std::lock_guard<std::mutex> lk(_h2c_mu);
+    _h2c_seq = 0;
+  }
 
   /* mac_hal_init pre-FWDL half: hci_func_en + dmac_pre_init (DLE/HFC for
    * DLFW). The caller then runs the intf_pre_init step (usb_pre_init /

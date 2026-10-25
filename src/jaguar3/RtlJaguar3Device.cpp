@@ -1177,7 +1177,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
    * adapter's transfer counter, so anything emitted after it would count
    * that thread's register and H2C traffic as bring-up. */
   timer.total();
-  _coex_thread = std::thread([this] { coex_runtime_loop(); });
+  if (_cfg.tuning.j3_runtime_thread)
+    _coex_thread = std::thread([this] { coex_runtime_loop(); });
+  else
+    _logger->info("Jaguar3: coex/phydm runtime thread not started (tuning.j3_runtime_thread)");
   if (_cfg.rx.ack_responder &&
       !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
     throw std::runtime_error(

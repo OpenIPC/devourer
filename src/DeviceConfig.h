@@ -365,6 +365,13 @@ struct DeviceConfig {
     bool skip_trx_reassert = false; /* env: DEVOURER_SKIP_TRX_REASSERT (J2) */
     bool skip_rfe_init = false;     /* env: DEVOURER_SKIP_RFEINIT (J2) */
     bool skip_coex = false;         /* env: DEVOURER_SKIP_COEX (J2) */
+    /* env: DEVOURER_J3_RUNTIME ("0" disables) — Jaguar3: start the coex /
+     * phydm watchdog runtime thread after bring-up (default ON). With no RX
+     * loop running, that thread also keeps a bulk-IN read posted to drain
+     * firmware C2H reports, and every ~2 s it writes coex, TX-power tracking
+     * and DIG/EDCCA registers. A host that owns bulk-IN itself or needs fixed
+     * gain (raw C2H / LA-mode capture) turns it off. */
+    bool j3_runtime_thread = true;
     bool skip_dig = false;          /* env: DEVOURER_SKIP_DIG (J2) */
     /* env: DEVOURER_THERMAL_TRACK — Jaguar2 thermal TX-power tracking
      * (default ON; "0" disables). A ~2 s tick reads the RF 0x42 thermal

@@ -369,10 +369,15 @@ struct DeviceConfig {
      * phydm watchdog runtime thread after bring-up (default ON). With no RX
      * loop running, that thread also keeps a bulk-IN read posted to drain
      * firmware C2H reports, and every ~2 s it writes coex, TX-power tracking
-     * and DIG/EDCCA registers. A host that owns bulk-IN itself or needs fixed
-     * gain (raw C2H / LA-mode capture) turns it off. */
+     * and DIG/EDCCA registers. A host that owns bulk-IN itself (raw C2H)
+     * turns it off. This flag covers only that post-bring-up thread:
+     * StartRxLoop still runs its own phydm watchdog (DIG included) when the
+     * thread is off, so fixed gain during an RX session also needs skip_dig. */
     bool j3_runtime_thread = true;
-    bool skip_dig = false;          /* env: DEVOURER_SKIP_DIG (J2) */
+    /* env: DEVOURER_SKIP_DIG — J2: no DIG at bring-up; J3: the phydm
+     * watchdog (runtime thread and StartRxLoop worker) skips its DIG step,
+     * so IGI stays where the host put it. */
+    bool skip_dig = false;
     /* env: DEVOURER_THERMAL_TRACK — Jaguar2 thermal TX-power tracking
      * (default ON; "0" disables). A ~2 s tick reads the RF 0x42 thermal
      * meter, computes the delta vs the efuse baseline, and writes the vendor

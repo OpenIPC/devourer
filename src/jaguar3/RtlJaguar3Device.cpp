@@ -300,7 +300,7 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
           std::lock_guard<std::mutex> lk(_reg_mu);
           /* edcca_track follows the EDCCA gate alone — see the housekeeping
            * tick below for why the all-or-nothing flag is the wrong input. */
-          _phydm.tick(_channel.Channel, !_cca_edcca_disabled);
+          _phydm.tick(_channel.Channel, !_cca_edcca_disabled, !_cfg.tuning.skip_dig);
         } catch (...) {
           break; /* chip gone — the RX loop will wind down too */
         }
@@ -578,7 +578,7 @@ void RtlJaguar3Device::coex_runtime_loop() {
        * thresholds at 0x84c every ~2 s in the EDCCA-off/primary-on arm,
        * undoing the disable the caller asked for. Jaguar1 does the same
        * thing via SetEdccaTrack(!edcca_disabled) at the end of apply_cca. */
-      _phydm.tick(_channel.Channel, !_cca_edcca_disabled);
+      _phydm.tick(_channel.Channel, !_cca_edcca_disabled, !_cfg.tuning.skip_dig);
       _hal.fw_update_wl_phy_info();
       _hal.fw_set_pwr_mode_active();
       _hal.fw_coex_query_bt_info();

@@ -12,41 +12,7 @@ extern "C" {
 #include <cstdlib>
 #include <map>
 #include <thread>
-#include <unordered_map>
 #include <vector>
-
-namespace {
-
-int get_40mhz_center_channel(int channel) {
-    static const std::unordered_map<int, int> channel_map = {
-        // 2.4GHz 40MHz configuration: only one valid center channel (6)
-        {4, 6},  // primary below center (extension above)
-        {8, 6},  // primary above center (extension below)
-
-        // 5GHz UNII-1
-        {36, 38}, {40, 38},
-        // 5GHz UNII-1 / UNII-2
-        {44, 46}, {48, 46},
-        // 5GHz UNII-2A
-        {52, 54}, {56, 54}, {60, 62}, {64, 62},
-        // 5GHz UNII-2C
-        {100, 102}, {104, 102},
-        {108, 110}, {112, 110},
-        {116, 118}, {120, 118},
-        {124, 126}, {128, 126},
-        // 5GHz UNII-2E (if applicable)
-        {132, 134}, {136, 134},
-        {140, 142}, {144, 142},
-        // 5GHz UNII-3
-        {149, 151}, {153, 155},
-        {157, 159}, {161, 163}
-    };
-
-    auto it = channel_map.find(channel);
-    return (it != channel_map.end()) ? it->second : channel;
-}
-
-}
 
 RadioManagementModule::RadioManagementModule(
     RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
@@ -240,7 +206,12 @@ static uint8_t rtw_get_center_ch(uint8_t channel, ChannelWidth_t chnl_bw,
     else if (channel <= 14)
       center_ch = 7;
   } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_40) {
-      center_ch = get_40mhz_center_channel(center_ch);
+    /* The offset decides the centre, not a channel-plan table: on 2.4 GHz any
+     * primary can carry an HT40 pair, and a centre left on the primary tunes
+     * the RF 10 MHz low, so every HT40 frame is lost. UPPER = primary is the
+     * upper 20 (centre below); LOWER and DONT_CARE take HT40+. */
+    center_ch = chnl_offset == HAL_PRIME_CHNL_OFFSET_UPPER ? channel - 2
+                                                           : channel + 2;
   } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_20 ||
              chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_5 ||
              chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_10) {

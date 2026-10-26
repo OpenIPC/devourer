@@ -19,6 +19,9 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   `InitWrite`): sustained 5 GHz TX needs it — without its ~2 s WiFi-only coex
   re-apply + FW heartbeats, the combo chip's coex firmware silences the
   antenna. It also drains C2H, so TX-only sessions still see `tx.report`.
+  Opt-out: `tuning.j3_runtime_thread = false` (`DEVOURER_J3_RUNTIME=0`), for
+  a host that owns bulk-IN itself. A TX-only session then gets no
+  `tx.report`, no `pwr_track` and no coex/FW heartbeats.
 - **5/10 MHz narrowband**: the re-clock lives in the `0x9b0`/`0x9b4`
   dividers (vs the `0x8ac` block the Jaguar1/2 chips share). 80 MHz works,
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.

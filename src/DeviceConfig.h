@@ -372,7 +372,12 @@ struct DeviceConfig {
      * and DIG/EDCCA registers. A host that owns bulk-IN itself (raw C2H)
      * turns it off. This flag covers only that post-bring-up thread:
      * StartRxLoop still runs its own phydm watchdog (DIG included) when the
-     * thread is off, so fixed gain during an RX session also needs skip_dig. */
+     * thread is off, so fixed gain during an RX session also needs skip_dig.
+     * A TX-only session with the thread off loses all of it: nothing drains
+     * C2H, so no tx.report (CCX) is emitted; pwr_track (thermal TX-power
+     * compensation, which sustains upper 5 GHz) stops; and the coex re-apply
+     * and FW heartbeats stop (src/jaguar3/CLAUDE.md: sustained 5 GHz TX
+     * needs them). */
     bool j3_runtime_thread = true;
     /* env: DEVOURER_SKIP_DIG — J2: no DIG at bring-up; J3: the phydm
      * watchdog (runtime thread and StartRxLoop worker) skips its DIG step.

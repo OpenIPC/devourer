@@ -34,7 +34,7 @@ public:
    * `edcca_track` = false leaves 0x84c untouched (DEVOURER_DIS_CCA /
    * SetCcaMode owns the thresholds then); `dig_track` = false skips DIG, so
    * the IGI the host set is kept (DEVOURER_SKIP_DIG). */
-  void tick(uint8_t channel, bool edcca_track, bool dig_track = true);
+  void tick(uint8_t channel, bool edcca_track, bool dig_track);
 
   /* A channel/bandwidth change invalidates the CCK-PD applied-level cache
    * (the kernel re-checks bw/nrx from registers each apply; the level is

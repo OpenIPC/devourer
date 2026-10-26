@@ -12,41 +12,7 @@ extern "C" {
 #include <cstdlib>
 #include <map>
 #include <thread>
-#include <unordered_map>
 #include <vector>
-
-namespace {
-
-int get_40mhz_center_channel(int channel) {
-    static const std::unordered_map<int, int> channel_map = {
-        // 2.4GHz 40MHz configuration: only one valid center channel (6)
-        {4, 6},  // primary below center (extension above)
-        {8, 6},  // primary above center (extension below)
-
-        // 5GHz UNII-1
-        {36, 38}, {40, 38},
-        // 5GHz UNII-1 / UNII-2
-        {44, 46}, {48, 46},
-        // 5GHz UNII-2A
-        {52, 54}, {56, 54}, {60, 62}, {64, 62},
-        // 5GHz UNII-2C
-        {100, 102}, {104, 102},
-        {108, 110}, {112, 110},
-        {116, 118}, {120, 118},
-        {124, 126}, {128, 126},
-        // 5GHz UNII-2E (if applicable)
-        {132, 134}, {136, 134},
-        {140, 142}, {144, 142},
-        // 5GHz UNII-3
-        {149, 151}, {153, 155},
-        {157, 159}, {161, 163}
-    };
-
-    auto it = channel_map.find(channel);
-    return (it != channel_map.end()) ? it->second : channel;
-}
-
-}
 
 RadioManagementModule::RadioManagementModule(
     RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
@@ -213,6 +179,22 @@ void RadioManagementModule::hw_var_set_monitor() {
   _device.rtw_write16(REG_RXFLTMAP2, value_rxfltmap2);
 }
 
+/* A 2.4 GHz HT40 pair must stay inside channels 1-13: HT40+ needs a primary
+ * of 1-9, HT40- one of 5-13. Off the grid the centre arithmetic leaves the
+ * band (ch13 HT40+ -> 15, classified as 5 GHz; ch1 HT40- wraps to 255), so
+ * such a request takes the side that fits. The vendor never gets here with
+ * one: its channel plan rejects the pair first. 5 GHz is left to the caller,
+ * which owns the channel plan there. */
+static uint8_t fit_2g4_ht40_offset(uint8_t channel, uint8_t chnl_offset) {
+  if (channel > 14)
+    return chnl_offset;
+  if (channel < 5)
+    return HAL_PRIME_CHNL_OFFSET_LOWER;
+  if (channel > 9)
+    return HAL_PRIME_CHNL_OFFSET_UPPER;
+  return chnl_offset;
+}
+
 static uint8_t rtw_get_center_ch(uint8_t channel, ChannelWidth_t chnl_bw,
                                  uint8_t chnl_offset) {
   uint8_t center_ch = channel;
@@ -240,7 +222,12 @@ static uint8_t rtw_get_center_ch(uint8_t channel, ChannelWidth_t chnl_bw,
     else if (channel <= 14)
       center_ch = 7;
   } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_40) {
-      center_ch = get_40mhz_center_channel(center_ch);
+    /* The offset decides the centre, not a channel-plan table: on 2.4 GHz any
+     * primary can carry an HT40 pair, and a centre left on the primary tunes
+     * the RF 10 MHz low, so every HT40 frame is lost. UPPER = primary is the
+     * upper 20 (centre below); LOWER and DONT_CARE take HT40+. */
+    center_ch = chnl_offset == HAL_PRIME_CHNL_OFFSET_UPPER ? channel - 2
+                                                           : channel + 2;
   } else if (chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_20 ||
              chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_5 ||
              chnl_bw == ChannelWidth_t::CHANNEL_WIDTH_10) {
@@ -261,6 +248,17 @@ void RadioManagementModule::set_channel_bwmode(uint8_t channel,
 
   _logger->info("[{}] ch = {}, offset = {}, bwmode = {}", __func__, unsigned(channel),
                 unsigned(channel_offset), (int)bwmode);
+
+  if (bwmode == ChannelWidth_t::CHANNEL_WIDTH_40) {
+    _req40MhzPrimeSc = channel_offset;
+    const uint8_t fitted = fit_2g4_ht40_offset(channel, channel_offset);
+    if (fitted != channel_offset) {
+      _logger->warn("ch {} HT40 offset {} leaves the 2.4 GHz grid — using {}",
+                    unsigned(channel), unsigned(channel_offset),
+                    unsigned(fitted));
+      channel_offset = fitted;
+    }
+  }
 
   /* The full path may rewrite RF_CHNLBW (0x18) bandwidth bits + fc_area +
    * spur regs, so the fast_retune caches are stale after this. */
@@ -314,6 +312,10 @@ bool RadioManagementModule::fast_retune(uint8_t channel, bool cache_rf) {
      * tests/hop_parity_check.sh. */
     if (cache_rf && _eepromManager->version_id.ICType != CHIP_8814A) {
       InitTimer timer(_logger, "fast_retune");
+      /* A hop to the grid edge can force the other HT40 side; the SubChnl
+       * rewrite below follows the changed offset. */
+      if (_currentChannelBw == ChannelWidth_t::CHANNEL_WIDTH_40)
+        _cur40MhzPrimeSc = fit_2g4_ht40_offset(channel, _req40MhzPrimeSc);
       const uint8_t center =
           rtw_get_center_ch(channel, _currentChannelBw, _cur40MhzPrimeSc);
       _currentChannel = center;
@@ -344,8 +346,10 @@ bool RadioManagementModule::fast_retune(uint8_t channel, bool cache_rf) {
      * channel+BW parity) but skip the per-rate TX-power loop + pwrtrk tick via
      * _fast_skip_heavy. */
     InitTimer timer(_logger, "fast_retune");
-    const uint8_t offset = _cur40MhzPrimeSc;
     const ChannelWidth_t bw = _currentChannelBw;
+    const uint8_t offset = bw == ChannelWidth_t::CHANNEL_WIDTH_40
+                               ? _req40MhzPrimeSc
+                               : _cur40MhzPrimeSc;
     _fast_skip_heavy = true;
     set_channel_bwmode(channel, offset, bw);
     _fast_skip_heavy = false;

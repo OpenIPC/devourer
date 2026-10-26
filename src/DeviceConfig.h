@@ -379,8 +379,9 @@ struct DeviceConfig {
      * and FW heartbeats stop (src/jaguar3/CLAUDE.md: sustained 5 GHz TX
      * needs them). */
     bool j3_runtime_thread = true;
-    /* env: DEVOURER_SKIP_DIG — J2: no DIG at bring-up; J3: the phydm
-     * watchdog (runtime thread and StartRxLoop worker) skips its DIG step.
+    /* env: DEVOURER_SKIP_DIG — J2: StartRxLoop starts no DIG thread; J3: the
+     * phydm watchdog (runtime thread and StartRxLoop worker) skips its DIG
+     * step.
      * On J3 the wide-TX IGI floor (wide_tx_igi_floor) still writes IGI: the
      * first 40/80 MHz frame raises a lower IGI to the floor, and leaving the
      * floor clamps IGI down to the DIG window top. For IGI that stays exactly

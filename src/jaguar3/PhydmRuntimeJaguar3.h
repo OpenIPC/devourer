@@ -32,8 +32,9 @@ public:
   /* One watchdog pass: FA/CCA statistics + reset, DIG, CCK-PD (2 GHz),
    * EDCCA. `channel` = current center channel (band + DFS decision),
    * `edcca_track` = false leaves 0x84c untouched (DEVOURER_DIS_CCA /
-   * SetCcaMode owns the thresholds then); `dig_track` = false skips DIG, so
-   * the IGI the host set is kept (DEVOURER_SKIP_DIG). */
+   * SetCcaMode owns the thresholds then); `dig_track` = false skips DIG
+   * (DEVOURER_SKIP_DIG; the wide-TX IGI floor still applies, see
+   * set_igi_floor). */
   void tick(uint8_t channel, bool edcca_track, bool dig_track);
 
   /* A channel/bandwidth change invalidates the CCK-PD applied-level cache

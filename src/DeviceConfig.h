@@ -375,8 +375,11 @@ struct DeviceConfig {
      * thread is off, so fixed gain during an RX session also needs skip_dig. */
     bool j3_runtime_thread = true;
     /* env: DEVOURER_SKIP_DIG — J2: no DIG at bring-up; J3: the phydm
-     * watchdog (runtime thread and StartRxLoop worker) skips its DIG step,
-     * so IGI stays where the host put it. */
+     * watchdog (runtime thread and StartRxLoop worker) skips its DIG step.
+     * On J3 the wide-TX IGI floor (wide_tx_igi_floor) still writes IGI: the
+     * first 40/80 MHz frame raises a lower IGI to the floor, and leaving the
+     * floor clamps IGI down to the DIG window top. For IGI that stays exactly
+     * where the host put it, also set DEVOURER_WIDE_TX_IGI_FLOOR=0. */
     bool skip_dig = false;
     /* env: DEVOURER_THERMAL_TRACK — Jaguar2 thermal TX-power tracking
      * (default ON; "0" disables). A ~2 s tick reads the RF 0x42 thermal

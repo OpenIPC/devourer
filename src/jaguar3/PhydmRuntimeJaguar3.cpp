@@ -226,9 +226,10 @@ void PhydmRuntimeJaguar3::edcca(uint8_t igi) {
   }
 }
 
-void PhydmRuntimeJaguar3::tick(uint8_t channel, bool edcca_track) {
+void PhydmRuntimeJaguar3::tick(uint8_t channel, bool edcca_track, bool dig_track) {
   const FaStats fa = fa_statistics_and_reset();
-  dig(fa, is_dfs_channel(channel));
+  if (dig_track)
+    dig(fa, is_dfs_channel(channel));
   if (fa.cck_enabled)
     cck_pd(fa);
   if (edcca_track)

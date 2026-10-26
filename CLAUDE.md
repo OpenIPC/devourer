@@ -40,7 +40,9 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   and rtl8822e (RTL8812EU/8822EU, chip-id `0x17`). 5/10 MHz narrowband,
   80 MHz (incl. a 40-in-80 frame), halrf calibration. Sustained 5 GHz TX
   needs the coex runtime thread (started in `InitWrite`) — without it the
-  combo chip's coex firmware silences the antenna. 8822e constraints:
+  combo chip's coex firmware silences the antenna. A host that owns bulk-IN
+  itself can opt out (`tuning.j3_runtime_thread`, see `src/jaguar3/CLAUDE.md`
+  for what that costs). 8822e constraints:
   `docs/8822e-quirks.md`.
 - **Kestrel** (`src/kestrel/`): the Wi-Fi 6 / 802.11ax generation —
   RTL8852BU/8832BU (variant C8852B) and RTL8852CU/8832CU (C8852C), one HAL

@@ -230,6 +230,8 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.tuning.skip_trx_reassert = env_flag("DEVOURER_SKIP_TRX_REASSERT");
   cfg.tuning.skip_rfe_init = env_flag("DEVOURER_SKIP_RFEINIT");
   cfg.tuning.skip_coex = env_flag("DEVOURER_SKIP_COEX");
+  if (const char *e = env_str("DEVOURER_J3_RUNTIME"))
+    cfg.tuning.j3_runtime_thread = std::strcmp(e, "0") != 0;
   cfg.tuning.skip_dig = env_flag("DEVOURER_SKIP_DIG");
   /* Default-on knob: unset = tracking on; only "0" disables it. */
   if (const char *e = env_str("DEVOURER_THERMAL_TRACK"))

@@ -365,7 +365,28 @@ struct DeviceConfig {
     bool skip_trx_reassert = false; /* env: DEVOURER_SKIP_TRX_REASSERT (J2) */
     bool skip_rfe_init = false;     /* env: DEVOURER_SKIP_RFEINIT (J2) */
     bool skip_coex = false;         /* env: DEVOURER_SKIP_COEX (J2) */
-    bool skip_dig = false;          /* env: DEVOURER_SKIP_DIG (J2) */
+    /* env: DEVOURER_J3_RUNTIME ("0" disables) — Jaguar3: start the coex /
+     * phydm watchdog runtime thread after bring-up (default ON). With no RX
+     * loop running, that thread also keeps a bulk-IN read posted to drain
+     * firmware C2H reports, and every ~2 s it writes coex, TX-power tracking
+     * and DIG/EDCCA registers. A host that owns bulk-IN itself (raw C2H)
+     * turns it off. This flag covers only that post-bring-up thread:
+     * StartRxLoop still runs its own phydm watchdog (DIG included) when the
+     * thread is off, so fixed gain during an RX session also needs skip_dig.
+     * A TX-only session with the thread off loses all of it: nothing drains
+     * C2H, so no tx.report (CCX) is emitted; pwr_track (thermal TX-power
+     * compensation, which sustains upper 5 GHz) stops; and the coex re-apply
+     * and FW heartbeats stop (src/jaguar3/CLAUDE.md: sustained 5 GHz TX
+     * needs them). */
+    bool j3_runtime_thread = true;
+    /* env: DEVOURER_SKIP_DIG — J2: StartRxLoop starts no DIG thread; J3: the
+     * phydm watchdog (runtime thread and StartRxLoop worker) skips its DIG
+     * step.
+     * On J3 the wide-TX IGI floor (wide_tx_igi_floor) still writes IGI: the
+     * first 40/80 MHz frame raises a lower IGI to the floor, and leaving the
+     * floor clamps IGI down to the DIG window top. For IGI that stays exactly
+     * where the host put it, also set DEVOURER_WIDE_TX_IGI_FLOOR=0. */
+    bool skip_dig = false;
     /* env: DEVOURER_THERMAL_TRACK — Jaguar2 thermal TX-power tracking
      * (default ON; "0" disables). A ~2 s tick reads the RF 0x42 thermal
      * meter, computes the delta vs the efuse baseline, and writes the vendor

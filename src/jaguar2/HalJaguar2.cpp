@@ -1097,14 +1097,27 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   rf_set(0, 0xb8, (1u << 19), 0);
   rf_set(0, 0xb8, (1u << 19), 1);
 
-  /* --- phydm_rxdfirpar_by_bw_8822b (RX digital filter, BW20 path) ---
+  /* --- phydm_rxdfirpar_by_bw_8822b (RX digital filter) ---
    * The RX DFIR must match the bandwidth or the OFDM demod filter is wrong:
    * energy is detected (CCA/FA fire) but no PSDU ever completes and nothing
-   * reaches the MAC RX FIFO. This was the missing piece for first RX. */
-  _device.phy_set_bb_reg(0x0948, (1u << 29) | (1u << 28), 0x2);
-  _device.phy_set_bb_reg(0x094c, (1u << 29) | (1u << 28), 0x2);
-  _device.phy_set_bb_reg(0x0c20, (1u << 31), 0x1);
-  _device.phy_set_bb_reg(0x0e20, (1u << 31), 0x1);
+   * reaches the MAC RX FIFO. This was the missing piece for first RX.
+   * Vendor values per width (BW20 also covers 5/10 MHz). With the BW20 set
+   * at 40/80 MHz the post-DFIR signal stays ~+-10 MHz wide: measured on an
+   * 8812BU cut 3 via the LA ring, the noise floor is +-10 MHz at every width;
+   * with these values it is +-20 MHz (BW40) and +-37 MHz (BW80), and the
+   * rate_sel-0 tap stops duplicating samples at BW80 (genuine 80 MS/s). */
+  {
+    uint32_t a = 0x2, b = 0x2, n20 = 0x1;
+    if (bw == 1) { /* 40 MHz */
+      a = 0x1; b = 0x0; n20 = 0x0;
+    } else if (bw == 2) { /* 80 MHz */
+      a = 0x2; b = 0x1; n20 = 0x0;
+    }
+    _device.phy_set_bb_reg(0x0948, (1u << 29) | (1u << 28), a);
+    _device.phy_set_bb_reg(0x094c, (1u << 29) | (1u << 28), b);
+    _device.phy_set_bb_reg(0x0c20, (1u << 31), n20);
+    _device.phy_set_bb_reg(0x0e20, (1u << 31), n20);
+  }
 
   /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds) --- col: 2G/5G x 1R/2R.
    * RFE types 3/5/12/15/16/17/19 (external-FEM boards, incl. the T3U's

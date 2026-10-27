@@ -324,7 +324,8 @@ private:
   static uint8_t rf_be_for_8822b(uint8_t cch);
   /* 5G AGC table index (1 low / 2 mid / 3 high) and CFO-tracking fc
    * (0x860[28:17]) for any 5G central channel (shared full/fast paths, both
-   * variants). Defined for every channel so no retune inherits a stale value. */
+   * variants). Defined for every channel so no retune inherits a stale
+   * value. */
   uint8_t agc_table_5g(uint8_t cch) const;
   static uint32_t cfo_fc_5g(uint8_t cch);
 

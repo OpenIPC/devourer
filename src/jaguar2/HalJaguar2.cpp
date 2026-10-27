@@ -867,6 +867,24 @@ uint8_t HalJaguar2::central_ch(uint8_t channel, uint8_t bw,
   return channel;
 }
 
+/* Extended-synth channels (below-band 15..35 / the 65..99 gap between the
+ * UNII-2 groups / above 177, freq = 5000 + 5*ch up to ch 253; the central
+ * channel decides, 5 GHz only): the RF tunes them, but the power tables and
+ * per-channel constants are extrapolated from the characterized channels.
+ * Warn once, from the full and both fast paths, so an unexpected retune there
+ * is visible. */
+void HalJaguar2::warn_uncharacterized(uint8_t channel, uint8_t cch) {
+  if (_warned_uncharacterized || channel <= 14)
+    return;
+  if ((cch >= 15 && cch <= 35) || (cch >= 65 && cch <= 99) || cch > 177) {
+    _warned_uncharacterized = true;
+    _logger->warn("channel {} (central {}) is outside the characterized range "
+                  "— TX power and per-channel constants extrapolated from the "
+                  "nearest table entry",
+                  channel, cch);
+  }
+}
+
 void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                                uint8_t primary_ch_idx) {
   /* Any full channel set rewrites what fast_retune caches (RF18 band/BW bits,
@@ -880,20 +898,8 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_cck_key = -1;
   _fw_sw_pending = 0; /* the full set supersedes any in-flight fw switch */
 
-  /* Extended-synth channels (below-band 15..35 / the 65..99 gap between the
-   * UNII-2 groups / above 177, freq = 5000 + 5*ch up to ch 253; the central
-   * channel decides, 5 GHz only): the RF tunes them, but the power tables and
-   * per-channel constants are extrapolated from the characterized channels.
-   * Warn once so an unexpected retune there is visible. */
-  const uint8_t wch = central_ch(channel, bw, primary_ch_idx);
-  if (!_warned_uncharacterized && channel > 14 &&
-      ((wch >= 15 && wch <= 35) || (wch >= 65 && wch <= 99) || wch > 177)) {
-    _warned_uncharacterized = true;
-    _logger->warn("channel {} (central {}) is outside the characterized range "
-                  "— TX power and per-channel constants extrapolated from the "
-                  "nearest table entry",
-                  channel, wch);
-  }
+  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+  warn_uncharacterized(channel, cch);
 
   if (_variant == ChipVariant::C8821C) {
     set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
@@ -902,7 +908,6 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       DumpCanary();
     return;
   }
-  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   const bool r2t2r = _ver.rf_2t2r != 0;
 
@@ -1427,6 +1432,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
       return false;
     prof.mark("confirm");
     const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+    warn_uncharacterized(channel, cch);
     /* get_pri_ch_id encoding: 20 MHz -> 0; 40 MHz upper -> 1, lower -> 2. */
     uint8_t pri = 0;
     if (bw == 1)
@@ -1456,6 +1462,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2",
                          channel);
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+  warn_uncharacterized(channel, cch);
   const bool g2 = cch <= 14;
   const bool c8821 = (_variant == ChipVariant::C8821C);
   const bool r2t2r = _ver.rf_2t2r != 0;

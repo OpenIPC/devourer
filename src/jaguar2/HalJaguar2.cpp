@@ -882,11 +882,11 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
 
   /* Extended-synth channels (below-band 15..35 / the 65..99 gap between the
    * UNII-2 groups / above 177, freq = 5000 + 5*ch up to ch 253; the central
-   * channel decides): the RF tunes them, but the power tables and per-channel
-   * constants are extrapolated from the characterized channels. Warn once so
-   * an unexpected retune there is visible. */
+   * channel decides, 5 GHz only): the RF tunes them, but the power tables and
+   * per-channel constants are extrapolated from the characterized channels.
+   * Warn once so an unexpected retune there is visible. */
   const uint8_t wch = central_ch(channel, bw, primary_ch_idx);
-  if (!_warned_uncharacterized &&
+  if (!_warned_uncharacterized && channel > 14 &&
       ((wch >= 15 && wch <= 35) || (wch >= 65 && wch <= 99) || wch > 177)) {
     _warned_uncharacterized = true;
     _logger->warn("channel {} (central {}) is outside the characterized range "
@@ -1236,8 +1236,9 @@ uint8_t HalJaguar2::rf_be_for_8822b(uint8_t cch) {
 
 /* AGC table index. The vendor buckets (36..64 low, 100..144 mid, 149+ high)
  * are kept; the channels between them take the RF18 sub-band they tune in
- * (8822B: mid from cch 80; 8821C: mid from 100) and 145..148 the high table. Below-band 15..35
- * rides the low bucket and >177 the high one (extended-range clamps). */
+ * (8822B: mid from cch 80; 8821C: mid from 100) and 145..148 the high table.
+ * Below-band 15..35 rides the low bucket and >177 the high one
+ * (extended-range clamps). */
 uint8_t HalJaguar2::agc_table_5g(uint8_t cch) const {
   const uint8_t mid_from = _variant == ChipVariant::C8821C ? 100 : 80;
   if (cch < mid_from)

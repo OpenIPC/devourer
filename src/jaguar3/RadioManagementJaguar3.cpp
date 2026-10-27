@@ -50,10 +50,10 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
 
   /* Extended-synth channels (below-band 15..35 / the 65..99 gap between the
    * UNII-2 groups / above 177, freq = 5000 + 5*ch up to ch 253; the central
-   * channel decides): the RF tunes them, but the power tables and calibration
-   * bands are clamped from the nearest characterized channel. Warn once so an
-   * unexpected retune there is visible. */
-  if (!_warned_uncharacterized &&
+   * channel decides, 5 GHz only): the RF tunes them, but the power tables
+   * and calibration bands are clamped from the nearest characterized channel.
+   * Warn once so an unexpected retune there is visible. */
+  if (!_warned_uncharacterized && channel > 14 &&
       ((central >= 15 && central <= 35) || (central >= 65 && central <= 99) ||
        central > 177)) {
     _warned_uncharacterized = true;

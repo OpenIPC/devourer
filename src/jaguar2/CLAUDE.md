@@ -42,12 +42,16 @@ Jaguar1 (shared `PhyTableLoader`).
   40 MHz, fixed gain, the stale AGC table was what mattered: 5350 / 5450 MHz
   read 3.6 / 4.5 dB apart (floor and a fixed carrier alike, SNR unchanged)
   depending on whether they were reached from 5180 or from 5510/5745; after
-  the fix 0.4 / 0.7 dB, inside an in-table control's 0.8 dB. The AGC split follows the RF18
-  sub-band (80 on the 8822B, 100 on the 8821C). RF 0xBE comes from the
-  12-channel cycle that all 35 defined entries of the vendor's 36..144 tables
-  follow. A stale RF 0xBE alone showed no measurable effect (centrals 51 and
-  163: spread within the control's), so its values are untested either way.
-  The 8821C changes are code-covered only. A firmware hop (`fastretune_fw`)
+  the fix 0.4 / 0.7 dB — but the in-table control spreads 0.8 dB, so that
+  is "no longer resolvable", not zero, and one unit at one width. The AGC
+  split follows the RF18 sub-band (80 on the 8822B, 100 on the 8821C). RF
+  0xBE comes from the 12-channel cycle that all 35 defined entries of the
+  vendor's 36..144 tables follow. A stale RF 0xBE alone showed nothing
+  resolvable (centrals 51 and 163, below ~1.5 dB), so its values are
+  untested either way. Full-vs-fast canary parity holds on the same unit at
+  20 and 40 MHz across the gap (RX-only `DEVOURER_RX_SWEEP` vs
+  `_SWEEP_FULL`, predecessors from every bucket); 80 MHz and the 8821C
+  changes are code-covered only. A firmware hop (`fastretune_fw`)
   invalidates these write-on-change caches every time, not only on a band
   change: the firmware rewrites the same registers.
 - **Firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,

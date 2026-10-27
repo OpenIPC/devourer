@@ -319,9 +319,18 @@ private:
   /* Central channel of the wide channel (shared full/fast paths): 20 MHz ->
    * primary; 40 MHz -> ±2 by primary_ch_idx; 80 MHz -> +6/+2/-2/-6. */
   static uint8_t central_ch(uint8_t channel, uint8_t bw, uint8_t primary_ch_idx);
+  /* One-shot warning for a 5 GHz central channel outside the characterized
+   * range (shared by the full and both fast paths). */
+  void warn_uncharacterized(uint8_t channel, uint8_t cch);
   /* RF 0xBE[17:15] per-5G-channel phase-noise / VCO-band value (8822B); 0 for
-   * 2.4 GHz, 0xff = no write (shared full/fast paths). */
+   * 2.4 GHz (shared full/fast paths). */
   static uint8_t rf_be_for_8822b(uint8_t cch);
+  /* 5G AGC table index (1 low / 2 mid / 3 high) and CFO-tracking fc
+   * (0x860[28:17]) for any 5G central channel (shared full/fast paths, both
+   * variants). Defined for every channel so no retune inherits a stale
+   * value. */
+  uint8_t agc_table_5g(uint8_t cch) const;
+  static uint32_t cfo_fc_5g(uint8_t cch);
 
   /* fast_retune write-on-change caches. Invalidated by every full
    * set_channel_bw (either variant); they only ever mirror fast-path writes —

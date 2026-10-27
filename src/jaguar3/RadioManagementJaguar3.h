@@ -168,6 +168,9 @@ private:
   void write_check_afe_8822e(uint16_t add, uint32_t data);
   void dack_soft_rst_8822e();
 
+  /* One-shot warning for a 5 GHz central channel outside the characterized
+   * range (shared by the full and both fast paths). */
+  void warn_uncharacterized(uint8_t channel, uint8_t central);
   /* Shared by the full and fast channel paths so they cannot diverge. */
   static void central_and_pri(uint8_t channel, uint8_t channel_offset,
                               ChannelWidth_t bwmode, uint8_t &central,

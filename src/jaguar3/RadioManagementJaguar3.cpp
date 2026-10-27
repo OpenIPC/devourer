@@ -48,19 +48,7 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
    * fast-path writes (the J1 RadioManagementModule pattern). */
   invalidate_fast_caches();
 
-  /* Extended-synth channels (below-band 15..35 / above 177, freq =
-   * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables,
-   * calibration bands and per-channel constants are clamped from the nearest
-   * characterized channel. Warn once so an unexpected retune there is
-   * visible. */
-  if (!_warned_uncharacterized &&
-      ((channel >= 15 && channel <= 35) || channel > 177)) {
-    _warned_uncharacterized = true;
-    _logger->warn("channel {} is outside the characterized range — TX power "
-                  "and per-channel constants extrapolated from the nearest "
-                  "table entry",
-                  channel);
-  }
+  warn_uncharacterized(channel, central);
 
   _last_channel = channel;
 
@@ -463,6 +451,26 @@ void RadioManagementJaguar3::DumpCanary() {
   _logger->info("=== END DEVOURER_DUMP_CANARY ===");
 }
 
+/* Extended-synth channels (below-band 15..35 / the 65..99 gap between the
+ * UNII-2 groups / above 177, freq = 5000 + 5*ch up to ch 253; the central
+ * channel decides, 5 GHz only): the RF tunes them, but the power tables and
+ * calibration bands are clamped from the nearest characterized channel. Warn
+ * once, from the full and both fast paths, so an unexpected retune there is
+ * visible. */
+void RadioManagementJaguar3::warn_uncharacterized(uint8_t channel,
+                                                  uint8_t central) {
+  if (_warned_uncharacterized || channel <= 14)
+    return;
+  if ((central >= 15 && central <= 35) || (central >= 65 && central <= 99) ||
+      central > 177) {
+    _warned_uncharacterized = true;
+    _logger->warn("channel {} (central {}) is outside the characterized range "
+                  "— TX power and per-channel constants extrapolated from the "
+                  "nearest table entry",
+                  channel, central);
+  }
+}
+
 void RadioManagementJaguar3::central_and_pri(uint8_t channel,
                                              uint8_t channel_offset,
                                              ChannelWidth_t bwmode,
@@ -700,6 +708,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
     prof.mark("confirm");
     uint8_t central, pri;
     central_and_pri(channel, channel_offset, bwmode, central, pri);
+    warn_uncharacterized(channel, central);
     const uint8_t bw_code = (bwmode == CHANNEL_WIDTH_40) ? 1 : 0;
     const uint32_t msg =
         0x1du | (static_cast<uint32_t>(central) << 8) |
@@ -727,6 +736,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
                          channel);
   uint8_t central, pri;
   central_and_pri(channel, channel_offset, bwmode, central, pri);
+  warn_uncharacterized(channel, central);
 
   /* Compose-cache prime: every masked write costs a read+write round-trip, so
    * read the full dwords of everything the hop touches ONCE per epoch, then

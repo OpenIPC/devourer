@@ -34,6 +34,21 @@ Jaguar1 (shared `PhyTableLoader`).
   RF18-edge bug.
 - The TXAGC block is write-only, so `GetTxPowerState` reports the software
   shadow (`hw_readback=false`).
+- **Every 5G central channel gets a defined AGC table, fc and (8822B) RF
+  0xBE** (`agc_table_5g` / `cfo_fc_5g` / `rf_be_for_8822b`, full and fast
+  paths). Gap 65..99: AGC table 1, 2 from central 80 on the 8822B (1
+  through 99 on the 8821C), fc 0x453, RF 0xBE from the vendor's 12-channel
+  cycle. One 8812BU, 40 MHz, fixed gain: the floor at 5350 / 5450 MHz
+  spreads 0.4 / 0.7 dB by predecessor, against 0.8 dB for an in-table
+  control (5310): unresolved, not zero. The filled RF 0xBE values are
+  untested (a stale one showed nothing below ~1.5 dB). On a second
+  8812BU-class unit the full path's canary registers at four filled
+  targets (20/40 MHz) match across two predecessors each. Full-vs-fast
+  canary parity (RX-only) holds across the gap at 20/40 MHz on both units
+  and at 80 MHz on the second, except the 20 MHz DFS CCA tweak in
+  `0x838[7:4]`, which `fast_retune` never rewrites. A firmware hop
+  invalidates these write-on-change caches, same-band hops included; that,
+  the firmware hop itself and the 8821C are untested.
 - **Firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
   `fw_channel_switch` + the `fastretune_fw` knob; both Jaguar2 dies — the
   path is variant-generic, 8822B on-air-validated, 8821C code-covered

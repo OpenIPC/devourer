@@ -1,5 +1,6 @@
 #include "HalJaguar2.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <stdexcept>
@@ -866,6 +867,24 @@ uint8_t HalJaguar2::central_ch(uint8_t channel, uint8_t bw,
   return channel;
 }
 
+/* Extended-synth channels (below-band 15..35 / the 65..99 gap between the
+ * UNII-2 groups / above 177, freq = 5000 + 5*ch up to ch 253; the central
+ * channel decides, 5 GHz only): the RF tunes them, but the power tables and
+ * per-channel constants are extrapolated from the characterized channels.
+ * Warn once, from the full and both fast paths, so an unexpected retune there
+ * is visible. */
+void HalJaguar2::warn_uncharacterized(uint8_t channel, uint8_t cch) {
+  if (_warned_uncharacterized || channel <= 14)
+    return;
+  if ((cch >= 15 && cch <= 35) || (cch >= 65 && cch <= 99) || cch > 177) {
+    _warned_uncharacterized = true;
+    _logger->warn("channel {} (central {}) is outside the characterized range "
+                  "— TX power and per-channel constants extrapolated from the "
+                  "nearest table entry",
+                  channel, cch);
+  }
+}
+
 void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
                                uint8_t primary_ch_idx) {
   /* Any full channel set rewrites what fast_retune caches (RF18 band/BW bits,
@@ -879,18 +898,8 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_cck_key = -1;
   _fw_sw_pending = 0; /* the full set supersedes any in-flight fw switch */
 
-  /* Extended-synth channels (below-band 15..35 / above 177, freq =
-   * 5000 + 5*ch up to ch 253): the RF tunes them, but the power tables and
-   * per-channel constants are clamped from the nearest characterized
-   * channel. Warn once so an unexpected retune there is visible. */
-  if (!_warned_uncharacterized &&
-      ((channel >= 15 && channel <= 35) || channel > 177)) {
-    _warned_uncharacterized = true;
-    _logger->warn("channel {} is outside the characterized range — TX power "
-                  "and per-channel constants extrapolated from the nearest "
-                  "table entry",
-                  channel);
-  }
+  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+  warn_uncharacterized(channel, cch);
 
   if (_variant == ChipVariant::C8821C) {
     set_channel_bw_8821c(channel, bw, rfe_type, primary_ch_idx);
@@ -899,7 +908,6 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       DumpCanary();
     return;
   }
-  const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
   const bool g2 = cch <= 14;
   const bool r2t2r = _ver.rf_2t2r != 0;
 
@@ -922,24 +930,10 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
       _device.phy_set_bb_reg(0x0a28, 0x0000ffff, 0x1525);
     }
   } else {
-    /* 5G AGC table + fc (config_phydm_switch_channel_8822b 5G branch).
-     * Extended-range clamps: below-band ch 15..35 rides the low bucket
-     * (mirrors Jaguar1's explicit 15..35 case) and ch >177 keeps the top
-     * bucket — the vendor tables end at 177 but the synth tunes past it. */
-    if (cch <= 64)
-      _device.phy_set_bb_reg(0x0958, 0x1f, 0x1);
-    else if (cch >= 100 && cch <= 144)
-      _device.phy_set_bb_reg(0x0958, 0x1f, 0x2);
-    else if (cch >= 149)
-      _device.phy_set_bb_reg(0x0958, 0x1f, 0x3);
-    if (cch <= 48)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
-    else if (cch >= 52 && cch <= 64)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
-    else if (cch >= 100 && cch <= 116)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
-    else if (cch >= 118)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
+    /* 5G AGC table + fc (config_phydm_switch_channel_8822b 5G branch), defined
+     * for every channel — see agc_table_5g / cfo_fc_5g. */
+    _device.phy_set_bb_reg(0x0958, 0x1f, agc_table_5g(cch));
+    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, cfo_fc_5g(cch));
   }
 
   /* config_phydm_switch_band_8822b RxHP-with-SoML block (SoML is enabled at
@@ -962,9 +956,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
    * fast_retune). Omitting it (writing 0 on 5G) leaves the 5G VCO mis-tuned so
    * 5G RX/TX fail entirely — this was the sole gap blocking 5G. Path A only
    * (matches the vendor). */
-  const uint8_t rf_be = rf_be_for_8822b(cch);
-  if (rf_be != 0xff)
-    rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), rf_be);
+  rf_set(0, 0xbe, (1u << 17) | (1u << 16) | (1u << 15), rf_be_for_8822b(cch));
 
   if (cch == 144) {
     rf_set(0, 0xdf, (1u << 18), 0x1);
@@ -1226,32 +1218,52 @@ void HalJaguar2::DumpCanary() {
 }
 
 /* RF 0xBE[17:15] per-5G-channel phase-noise / VCO-band value
- * (config_phydm_switch_channel_8822b low/middle/high-band tables). */
+ * (config_phydm_switch_channel_8822b). Every defined entry of the vendor's
+ * low and middle tables (36..64 / 100..144, 35 of them) follows one 6-step
+ * cycle repeating every 12 channels, continuous across 64 -> 100, so 15..148
+ * take the cycle: identical on the vendor channels, and it also fills the
+ * vendor's no-write entries (centrals 50/114/130, used by its 160 MHz
+ * channels) and the 65..99 / 145..148 gaps, so no retune keeps a stale value.
+ * The high table (odd channels) is kept, its no-write entry at 163 filled
+ * from 12 channels either side (151 and 175 are both 0x5). Below 36 and above
+ * 177 clamp to the nearest edge. Outside the vendor tables: extrapolated,
+ * not characterized. */
 uint8_t HalJaguar2::rf_be_for_8822b(uint8_t cch) {
-  static const uint8_t low_band[15] = {0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7, 0xff,
-                                       0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6};
-  static const uint8_t middle_band[23] = {
-      0x6, 0x5, 0x0, 0x0, 0x7, 0x6, 0x6, 0xff, 0x0, 0x0, 0x7, 0x6,
-      0x6, 0x5, 0x0, 0xff, 0x7, 0x6, 0x6, 0x5, 0x0, 0x0, 0x7};
-  static const uint8_t high_band[15] = {0x5, 0x5, 0x0, 0x7, 0x7, 0x6, 0x5, 0xff,
+  static const uint8_t cycle[6] = {0x7, 0x6, 0x6, 0x5, 0x0, 0x0};
+  static const uint8_t high_band[15] = {0x5, 0x5, 0x0, 0x7, 0x7, 0x6, 0x5, 0x5,
                                         0x0, 0x7, 0x7, 0x6, 0x5, 0x5, 0x0};
   if (cch <= 14)
     return 0x0;
-  /* Extended-range clamps: the vendor tables cover 36..64 / 100..144 /
-   * 149..177; the synth tunes below 36 and above 177 (chan*5+5000 grid up to
-   * 253). Clamp to the nearest table edge so the VCO band is still set —
-   * extrapolated, not characterized. */
-  if (cch < 36)
-    return low_band[0];
-  if (cch <= 64)
-    return low_band[(cch - 36) >> 1];
-  if (cch >= 100 && cch <= 144)
-    return middle_band[(cch - 100) >> 1];
-  if (cch >= 149 && cch <= 177)
-    return high_band[(cch - 149) >> 1];
-  if (cch > 177)
-    return high_band[(177 - 149) >> 1];
-  return 0xff;
+  if (cch >= 149)
+    return high_band[(std::min<uint8_t>(cch, 177) - 149) >> 1];
+  return cycle[((std::max<uint8_t>(cch, 36) - 36) >> 1) % 6];
+}
+
+/* AGC table index. The vendor buckets (36..64 low, 100..144 mid, 149+ high)
+ * are kept; the channels between them take the RF18 sub-band they tune in
+ * (8822B: mid from cch 80; 8821C: mid from 100) and 145..148 the high table.
+ * Below-band 15..35 rides the low bucket and >177 the high one
+ * (extended-range clamps). */
+uint8_t HalJaguar2::agc_table_5g(uint8_t cch) const {
+  const uint8_t mid_from = _variant == ChipVariant::C8821C ? 100 : 80;
+  if (cch < mid_from)
+    return 0x1;
+  if (cch <= 144)
+    return 0x2;
+  return 0x3;
+}
+
+/* CFO-tracking fc: the vendor's 8822B/8821C buckets (<=48 / 52..64 / 100..116
+ * / >=118), with the unlisted channels between them assigned as the 8822C's
+ * contiguous sco table does (<=51 0x494, <=111 0x453, <=119 0x452). */
+uint32_t HalJaguar2::cfo_fc_5g(uint8_t cch) {
+  if (cch <= 51)
+    return 0x494;
+  if (cch <= 99)
+    return 0x453;
+  if (cch <= 117)
+    return 0x452;
+  return 0x412;
 }
 
 bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
@@ -1420,21 +1432,22 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
       return false;
     prof.mark("confirm");
     const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+    warn_uncharacterized(channel, cch);
     /* get_pri_ch_id encoding: 20 MHz -> 0; 40 MHz upper -> 1, lower -> 2. */
     uint8_t pri = 0;
     if (bw == 1)
       pri = (primary_ch_idx == 2 /*HAL_PRIME_CHNL_OFFSET_UPPER*/) ? 1 : 2;
     fw_channel_switch(cch, pri, bw);
     prof.mark("fw");
-    if (band_change) {
-      /* The firmware rewrote the band-keyed state under the sw caches —
-       * invalidate them all; the next sw hop re-primes. */
-      _last_agc_bucket = -1;
-      _last_fc = 0xffffffff;
-      _last_rf_be = -1;
-      _last_df18 = -1;
-      _last_cck_key = -1;
-    }
+    /* The firmware rewrote the channel-keyed state (AGC table, fc, RF 0xBE,
+     * band) under the sw caches, on a same-band hop too — invalidate them
+     * all, or a later sw hop that maps to a cached value skips its write and
+     * keeps the firmware's. The next sw hop re-primes. */
+    _last_agc_bucket = -1;
+    _last_fc = 0xffffffff;
+    _last_rf_be = -1;
+    _last_df18 = -1;
+    _last_cck_key = -1;
     _last_tuned_ch = channel;
     DVR_DEBUG(_logger, "Jaguar2: fw fast retune -> ch {} (central {})",
               channel, cch);
@@ -1449,6 +1462,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   devourer::HopProf prof(_logger->events(), _cfg.debug.hop_prof, "j2",
                          channel);
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
+  warn_uncharacterized(channel, cch);
   const bool g2 = cch <= 14;
   const bool c8821 = (_variant == ChipVariant::C8821C);
   const bool r2t2r = _ver.rf_2t2r != 0;
@@ -1473,19 +1487,10 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   /* Channel-keyed constants, written only when their bucket moves (the caches
    * are invalidated by every full set, so the first fast hop writes them once).
    * AGC table index + CFO-tracking fc share buckets across the variants; only
-   * the AGC register differs (0x958[4:0] on 8822B, 0xc1c[11:8] on 8821C). The
-   * bucket gaps (e.g. cch 65..99) match the full path, which leaves the
-   * registers untouched there. */
-  int agc_bucket = -1;
-  if (g2)
-    agc_bucket = 0;
-  else if (cch <= 64) /* incl. below-band 15..35 (extended-range clamp) */
-    agc_bucket = 1;
-  else if (cch >= 100 && cch <= 144)
-    agc_bucket = 2;
-  else if (cch >= 149)
-    agc_bucket = 3;
-  if (agc_bucket >= 0 && agc_bucket != _last_agc_bucket) {
+   * the AGC register differs (0x958[4:0] on 8822B, 0xc1c[11:8] on 8821C).
+   * Both are defined for every channel, as in the full path. */
+  const int agc_bucket = g2 ? 0 : agc_table_5g(cch);
+  if (agc_bucket != _last_agc_bucket) {
     if (c8821) {
       _cw_agc = (_cw_agc & ~0x00000F00u) |
                 (static_cast<uint32_t>(agc_bucket) << 8);
@@ -1497,18 +1502,8 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     _last_agc_bucket = agc_bucket;
   }
 
-  uint32_t fc = 0xffffffff;
-  if (g2)
-    fc = 0x96a;
-  else if (cch <= 48) /* incl. below-band 15..35 (extended-range clamp) */
-    fc = 0x494;
-  else if (cch >= 52 && cch <= 64)
-    fc = 0x453;
-  else if (cch >= 100 && cch <= 116)
-    fc = 0x452;
-  else if (cch >= 118) /* open-ended: extended channels >177 keep 0x412 */
-    fc = 0x412;
-  if (fc != 0xffffffff && fc != _last_fc) {
+  const uint32_t fc = g2 ? 0x96a : cfo_fc_5g(cch);
+  if (fc != _last_fc) {
     _cw_fc = (_cw_fc & ~0x1ffe0000u) | (fc << 17);
     _device.rtw_write32(0x0860, _cw_fc);
     _last_fc = fc;
@@ -1518,7 +1513,7 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     /* 8822B: RF 0xBE VCO band (per-5G-channel — omitting it detunes the 5G
      * VCO), the ch144 RF 0xDF[18] flag, and the 2G spur registers. */
     const uint8_t rf_be = rf_be_for_8822b(cch);
-    if (rf_be != 0xff && rf_be != _last_rf_be) {
+    if (rf_be != _last_rf_be) {
       _cw_rfbe = (_cw_rfbe & ~0x38000u) |
                  (static_cast<uint32_t>(rf_be) << 15);
       rf_write(0, 0xbe, _cw_rfbe);
@@ -1826,22 +1821,10 @@ void HalJaguar2::set_channel_bw_8821c(uint8_t channel, uint8_t bw,
       _device.phy_set_bb_reg(0x0aac, 0xffffffff, _cck_aac_8821c);
     }
   } else {
-    /* Extended-range clamps (see the 8822B branch): ch 15..35 rides the low
-     * bucket, ch >177 keeps the top bucket. */
-    if (cch <= 64)
-      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x1);
-    else if (cch >= 100 && cch <= 144)
-      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x2);
-    else if (cch >= 149)
-      _device.phy_set_bb_reg(0x0c1c, 0x00000F00, 0x3);
-    if (cch <= 48)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x494);
-    else if (cch >= 52 && cch <= 64)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x453);
-    else if (cch >= 100 && cch <= 116)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x452);
-    else if (cch >= 118)
-      _device.phy_set_bb_reg(0x0860, 0x1ffe0000, 0x412);
+    /* AGC table + fc defined for every channel (see agc_table_5g /
+     * cfo_fc_5g). */
+    _device.phy_set_bb_reg(0x0c1c, 0x00000F00, agc_table_5g(cch));
+    _device.phy_set_bb_reg(0x0860, 0x1ffe0000, cfo_fc_5g(cch));
     if (cch >= 100 && cch <= 140)
       rf18 |= (1u << 17);
     else if (cch > 140)

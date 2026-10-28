@@ -101,6 +101,7 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     _station_ready = false;
     _station.retire(_device, _logger, "Jaguar3");
   }
+  _rx_stop = false;
   _channel = channel;
   _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
                     std::memory_order_relaxed);
@@ -210,6 +211,8 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
 
 void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _packetProcessor = std::move(packetProcessor);
+  if (_rx_stop || g_devourer_should_stop)
+      return;
   /* Restartable: clear any stop request left by a prior StopRxLoop(). */
   _rx_stop = false;
   /* Take over bulk-IN from the coex thread's C2H drain up front — also during

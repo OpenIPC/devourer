@@ -1696,6 +1696,7 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
       _logger->error("Jaguar1: post-arm Init rollback was not fully verified; "
                      "see the register-specific error above");
   });
+  should_stop = false;
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
 
@@ -1804,6 +1805,8 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 
 void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _packetProcessor = std::move(packetProcessor);
+  if (should_stop || g_devourer_should_stop)
+      return;
   /* Restartable: clear any stop request left by a prior StopRxLoop(). */
   should_stop = false;
 

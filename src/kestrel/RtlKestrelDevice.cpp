@@ -295,6 +295,7 @@ void RtlKestrelDevice::EnableTxScheduler() {
 
 void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+  _rx_stop = false;
   if (!BringUpMonitor(channel)) {
     _logger->error("Kestrel: monitor bring-up failed");
     return;
@@ -440,6 +441,8 @@ void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   /* Take the bulk-IN over from the TX WP-release drain (this loop also consumes
    * rpkt_type=7 releases) so the two never read the endpoint concurrently. */
   stop_wp_drain();
+  if (_rx_stop || g_devourer_should_stop)
+    return;
   _rx_stop = false;
   _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. The

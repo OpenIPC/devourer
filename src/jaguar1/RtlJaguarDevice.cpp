@@ -1667,6 +1667,14 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
 
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
+  /* Mark that device initialization is currently in progress. */
+  _init_in_progress.store(true, std::memory_order_release);
+
+  /* Ensure initialization progress flag is cleared upon exit or rollback. */
+  JaguarScopeExit init_guard([this] {
+      _init_in_progress.store(false, std::memory_order_release);
+  });
+
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
    * GetChannelBusy() take the armed branch and report a stale period. */
@@ -1805,10 +1813,27 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
 
 void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _packetProcessor = std::move(packetProcessor);
-  if (should_stop || g_devourer_should_stop)
+
+  if (g_devourer_should_stop)
+    return;
+
+  /*
+   * Differentiate between an initialization-time stop request and a stale stop
+   * request left by a completed receive loop:
+   * - If initialization is currently in progress and a stop was requested, abort
+   *   StartRxLoop immediately.
+   * - If this is a standalone restart after initialization has completed, clear
+   *   the stale stop request.
+   */
+  if (_init_in_progress.load(std::memory_order_acquire)) {
+    if (should_stop) {
+      /* Stop requested during Init must prevent its receive loop from starting */
       return;
-  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
-  should_stop = false;
+    }
+  } else {
+    /* Clear a completed loop's stale stop request for a standalone restart */
+    should_stop = false;
+  }
 
   /* DEVOURER_RX_PATHS=0xNN restricts which RX chains the chip enables/combines,
    * by masking the RX-path-enable register (0x808 byte 0: bits 0/4 = path A

@@ -510,6 +510,19 @@ void RtlJaguar2Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+    /* Mark that device initialization is currently in progress. */
+    _init_in_progress.store(true, std::memory_order_release);
+
+    /* Ensure initialization progress flag is cleared upon exit or rollback.
+     * (Equivalent to JaguarScopeExit without needing a class definition) */
+    auto init_guard_closer = [&]() {
+        _init_in_progress.store(false, std::memory_order_release);
+    };
+    struct ScopeGuard {
+        std::function<void()> fn;
+        ~ScopeGuard() { fn(); }
+    } init_guard{init_guard_closer};
+
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
    * GetChannelBusy() take the armed branch and report a stale period. */
@@ -596,10 +609,27 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
 
 void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
   _packetProcessor = std::move(packetProcessor);
-  if (_rx_stop || g_devourer_should_stop)
+  if (g_devourer_should_stop)
       return;
-  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
-  _rx_stop = false;
+
+  /*
+   * Differentiate between an initialization-time stop request and a stale stop
+   * request left by a completed receive loop:
+   * - If initialization is currently in progress and a stop was requested, abort
+   *   StartRxLoop immediately.
+   * - If this is a standalone restart after initialization has completed, clear
+   *   the stale stop request.
+   */
+  if (_init_in_progress.load(std::memory_order_acquire)) {
+    if (_rx_stop) {
+      /* Stop requested during Init must prevent its receive loop from starting */
+      return;
+    }
+  } else {
+    /* Clear a completed loop's stale stop request for a standalone restart */
+    _rx_stop = false;
+  }
+
   /* Start the DIG thread: track IGI to the false-alarm rate so weak signals are
    * caught without an FA storm (a fixed IGI can't span the range). */
   _dig_stop = false;

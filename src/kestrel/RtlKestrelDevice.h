@@ -301,6 +301,10 @@ private:
   SelectedChannel _channel{};
   kestrel::EfuseInfo _efuse{};
   volatile bool _rx_stop = false;
+
+  /* Track whether device initialization (Init()) is currently in progress */
+  std::atomic<bool> _init_in_progress{false};
+
   /* WP-release drain (Kestrel STF USB): the fw returns each transmitted frame's
    * WD/PLE pages as an RX packet (rpkt_type=7, TX_PD_RELEASE_HOST) on the bulk-
    * IN. A TX-only path must still drain the bulk-IN or the pages never recycle

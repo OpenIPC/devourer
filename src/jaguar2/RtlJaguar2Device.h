@@ -418,6 +418,9 @@ private:
    * signal-flag pattern used across the library (g_devourer_should_stop). */
   volatile bool _rx_stop = false;
 
+  // Track whether device initialization (Init()) is currently in progress
+  std::atomic<bool> _init_in_progress{false};
+
   /* Shared cold bring-up (power-on -> DLFW -> MAC/BB/RF -> channel -> LCK ->
    * IQK -> coex -> enable RX/TX engine). Used by both Init (RX) and InitWrite
    * (TX). Leaves the chip fully calibrated on `channel`. */

@@ -67,10 +67,22 @@ the peer's address. What in the calibration lets it through is not
 established. Undrained, RXDCOC and every command after it ran out the 3 s reply
 budget, so a ~1 s bring-up took 27-34 s.
 
-`mcu_wait_resp()` therefore drains EP 4 once per command, on its first 300 ms
-timeout, and only while `mt7612u_dev::ep4_owner` says nobody else reads it (the
-field's comment says why it lives on the device, not the ring). A reply on time
-costs nothing; a late one costs one `mt_rx_flush()`. The ten-read reply budget
+`mcu_wait_resp()` therefore drains EP 4 on a 300 ms timeout, and only while
+`mt7612u_dev::ep4_owner` says nobody else reads it (the field's comment says
+why it lives on the device, not the ring). It drains again on a later timeout
+only if the previous drain moved data; all of one command's drains share one
+64-read budget (10 ms reads), so a command still costs at most its 3 s of
+reply reads plus 0.64 s. A drain ends on an empty read, a hard error or that
+budget — not on a timed-out read that moved bytes, since more may be queued
+behind them. A reply on time costs nothing; the measured late ones cost one
+drain each, during RXDCOC: 8.6–10.1 kB at 20 MHz, 15.8–17.3 kB at 40 MHz,
+with the same ~0.3 s on the bring-up either way (`docs/mt7612u.md`). The RX
+ring and the synchronous drain claim EP 4 under `io_lock`, the lock the
+drain's owner check runs under, and a failed claim refuses to start either
+one (before `mt_mac_start` writes a register), so the MCU-wait drain never
+shares EP 4 with them. The teardown and recovery flushes (`mt_mac_stop`,
+`mt_init_hardware`, `mt_recover_usb`) do not consult the owner; their
+callers order them after the ring is reaped. The ten-read reply budget
 above it predates this and is probably the same symptom; it was not re-measured.
 Measurements and their limits: `docs/mt7612u.md`, "Bring-up on a busy channel";
 reproducer `tests/mt7612u_busy_bringup.sh`.

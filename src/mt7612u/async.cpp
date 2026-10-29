@@ -219,9 +219,17 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 		/* Under io_lock: an MCU wait holds it across its owner check and
 		 * drain, so the claim cannot land in between. */
 		d->io_lock.lock();
-		int none = MT_EP4_NONE;
-		d->ep4_owner.compare_exchange_strong(none, MT_EP4_RING);
+		int owner = MT_EP4_NONE;
+		const bool claimed = d->ep4_owner.compare_exchange_strong(owner, MT_EP4_RING);
 		d->io_lock.unlock();
+		/* A synchronous drainer would share EP 4 with the ring, and its
+		 * release (SYNC -> NONE) would later let mcu_wait_resp() drain the
+		 * ring's frames. (A stranded ring keeps RING, but that state is
+		 * refused above, on transfers_stranded.) */
+		if (!claimed) {
+			ERR("RX ring not started: EP 4 already has a reader (owner %d)", owner);
+			goto fail;
+		}
 		a->lock.lock();
 		a->rx_active = 1;
 		a->lock.unlock();

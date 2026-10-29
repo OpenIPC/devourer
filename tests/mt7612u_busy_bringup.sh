@@ -29,8 +29,9 @@
 #
 # Exit status: 0 every loaded bring-up reached its RX ring within SLOW_MS; 1
 # at least one did not; 2 INCONCLUSIVE (the rig was refused, the control did
-# not come up, a bring-up exited early or would not exit, or no bring-up heard
-# the peer); 3 interrupted (INT/TERM).
+# not come up, a bring-up exited early or would not exit, the peer was not
+# running before a bring-up, or a bring-up that came up did not hear the peer
+# - each loaded run has to prove its own load); 3 interrupted (INT/TERM).
 #
 # Env: DUT_SYSFS, PEER_VID, PEER_PID, PEER_SYSFS, CH, BW, PEER_RATE, REPS, PEER_GAP_US,
 #      PEER_PWR_QDB, SLOW_MS, FW_DIR, BUILD, OUT.
@@ -161,18 +162,19 @@ sta_pid_record peer $!
 sleep 5
 sta_pid_live peer || { echo "INCONCLUSIVE: the peer exited (see $OUT/peer.log)"; exit 2; }
 
-slow=0; heard=0; died=0
+slow=0; deaf=0; died=0
 i=1
 while [ "$i" -le "$REPS" ]; do
+  sta_pid_live peer || { echo "INCONCLUSIVE: the peer exited before bring-up $i (see $OUT/peer.log)"; exit 2; }
   # shellcheck disable=SC2046  # three words by construction
   set -- $(bringup "load$i")
   case "$1" in
     STUCK) echo "INCONCLUSIVE: bring-up $i would not exit"; exit 2 ;;
     DIED)  died=$((died + 1)); r="exited before its RX ring" ;;
     NONE)  slow=$((slow + 1)); r="no RX ring within 60 s" ;;
-    *)     [ "$1" -gt "$SLOW_MS" ] && slow=$((slow + 1)); r="$1 ms to the RX ring" ;;
+    *)     [ "$1" -gt "$SLOW_MS" ] && slow=$((slow + 1)); r="$1 ms to the RX ring"
+           [ "$2" = 1 ] || deaf=$((deaf + 1)) ;;
   esac
-  heard=$((heard + $2))
   printf '  bring-up %2d: %s, %s MCU timeouts, peer heard: %s\n' "$i" "$r" "$3" "$2"
   sleep 3
   i=$((i + 1))
@@ -182,13 +184,14 @@ if [ "$died" -gt 0 ]; then
   echo "INCONCLUSIVE: $died bring-up(s) exited early (see $OUT/dut_load*.log)"
   exit 2
 fi
-if [ "$heard" = 0 ]; then
-  echo "INCONCLUSIVE: no bring-up heard the peer - the channel was not loaded"
-  exit 2
-fi
+# A slow bring-up is the stall whether or not its own run heard the peer.
 if [ "$slow" -gt 0 ]; then
   echo "FAIL: $slow of $REPS bring-ups under load took over $SLOW_MS ms"
   exit 1
+fi
+if [ "$deaf" -gt 0 ]; then
+  echo "INCONCLUSIVE: $deaf bring-up(s) came up without hearing the peer - not proven loaded"
+  exit 2
 fi
 echo "PASS: all $REPS bring-ups under load reached the RX ring within $SLOW_MS ms"
 exit 0

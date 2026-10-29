@@ -28,7 +28,8 @@ static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq, int cmd, int len,
 {
 	uint8_t buf[MCU_RESP_URB_SIZE];
 	int got, rc;
-	int ep4_drained = 0;
+	int ep4_reads = 64;	/* one drain budget for the whole command */
+	size_t ep4_last = 1;	/* bytes the previous drain moved (1 = none yet) */
 
 	/* Ten reads of 300 ms, not five.  Measured on 2-1 with a peer 20 cm
 	 * away saturating the channel: the MCU answered every command, but
@@ -43,16 +44,20 @@ static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq, int cmd, int len,
 		if (rc == LIBUSB_ERROR_TIMEOUT) {
 			/* Data parked in EP 4 holds back this EP 5 reply too
 			 * (src/mt7612u/CLAUDE.md, "MCU replies and EP 4"). Drain it
-			 * once per command, on the first timeout, and only while
-			 * nobody else reads EP 4 - an RX ring or a synchronous
-			 * drainer owns what arrives there. io_lock is held from
-			 * this check through the drain, and a ring claims EP 4
-			 * under it, so none can start in between. */
-			if (!ep4_drained &&
+			 * on a timeout - again on a later one only if the previous
+			 * drain found data (the channel can refill EP 4 while the
+			 * MCU works) - all drains of one command sharing one 64-read
+			 * budget, so a command costs at most the 3 s of reply reads
+			 * plus 64 drain reads of 10 ms, as with a single drain. And
+			 * only while nobody else reads EP 4: an RX ring or a
+			 * synchronous drainer owns what arrives there. io_lock is
+			 * held from this check through the drain, and both claim
+			 * EP 4 under it, so neither can start in between. */
+			if (ep4_reads > 0 && ep4_last &&
 			    d->ep4_owner.load(std::memory_order_acquire) == MT_EP4_NONE) {
-				size_t n = mt_rx_flush(d);
+				size_t n = mt_rx_flush(d, &ep4_reads);
 
-				ep4_drained = 1;
+				ep4_last = n;
 				if (n)
 					LOG("mcu wait: drained %zu B from EP 4 (cmd %d len %d "
 					    "arg0 0x%08x)", n, cmd, len, (unsigned)arg0);

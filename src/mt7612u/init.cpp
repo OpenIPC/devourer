@@ -257,19 +257,24 @@ static void wcid_and_key_clear(struct mt7612u_dev *d)
  * mcu_wait_resp() also calls it, but only while d->ep4_owner says nobody else
  * reads EP 4.
  */
-size_t mt_rx_flush(struct mt7612u_dev *d)
+size_t mt_rx_flush(struct mt7612u_dev *d, int *reads_left)
 {
 	uint8_t buf[4096];
 	size_t total = 0;
+	int own = 64;
+	int *left = reads_left ? reads_left : &own;
 
-	for (int i = 0; i < 64; i++) {
+	while (*left > 0) {
 		int n = 0;
 		int rc = mt_bulk(d, MT_EP_IN_PKT_RX, buf, sizeof buf, &n, 10);
 
-		/* A read that times out can still have moved bytes. */
+		(*left)--;
+		/* A read that times out can still have moved bytes, and then
+		 * more may be queued behind them: an empty read, a hard error or
+		 * the read budget ends the drain. */
 		if (n > 0)
 			total += (size_t)n;
-		if (rc || n == 0)
+		if (n == 0 || (rc && rc != LIBUSB_ERROR_TIMEOUT))
 			break;
 	}
 	return total;
@@ -293,18 +298,34 @@ int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 		    "mt7612u_rx_start() first, or pass MT_RX_DRAIN_SYNC");
 		return -1;
 	}
+	/* SYNC claims EP 4 before any register is touched: a ring already
+	 * reading it would share it with this thread's mt_rx_one(), and a
+	 * refusal must leave that ring's receiver and filter as they are. SYNC
+	 * is already ours on a repeated start. Under io_lock, as the ring's
+	 * claim is: mcu_wait_resp() holds it from its owner check through its
+	 * drain, so the claim cannot land in between. */
+	bool claimed_now = false;
+	if (enable_rx == MT_RX_DRAIN_SYNC) {
+		std::lock_guard<std::recursive_mutex> lk(d->io_lock);
+		int owner = MT_EP4_NONE;
+		claimed_now = d->ep4_owner.compare_exchange_strong(owner, MT_EP4_SYNC);
+		if (!claimed_now && owner != MT_EP4_SYNC) {
+			ERR("mac_start(MT_RX_DRAIN_SYNC) while an RX ring owns EP 4");
+			return -1;
+		}
+	}
 	mt_wr(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX);
 	if (!mt_poll(d, MT_WPDMA_GLO_CFG,
 	             MT_WPDMA_GLO_CFG_TX_DMA_BUSY | MT_WPDMA_GLO_CFG_RX_DMA_BUSY,
 	             0, 200000)) {
 		ERR("mac_start: WPDMA stayed busy");
+		if (claimed_now) {	/* the receiver never came on: nothing to own */
+			int sync = MT_EP4_SYNC;
+			d->ep4_owner.compare_exchange_strong(sync, MT_EP4_NONE);
+		}
 		return -1;
 	}
 	mt_wr(d, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_MANAGED);
-	if (enable_rx == MT_RX_DRAIN_SYNC) {
-		int none = MT_EP4_NONE;
-		d->ep4_owner.compare_exchange_strong(none, MT_EP4_SYNC);
-	}
 	/* Only turn the receiver on when the caller will actually drain EP 4.
 	 * mt76's mac_start always sets both bits, but mt76 also keeps RX URBs
 	 * permanently queued; a TX-only injector that never reads has no such

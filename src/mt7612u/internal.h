@@ -402,7 +402,10 @@ int mt_init_hardware(struct mt7612u_dev *d, const char *fw_dir);
 #define MT_RX_DRAIN_RING 1   /* the async ring is already draining - asserted */
 #define MT_RX_DRAIN_SYNC 2   /* caller drains with mt_rx_one() on this thread */
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx);
-size_t mt_rx_flush(struct mt7612u_dev *d);
+/* Drain EP 4: reads until an empty read, a hard error, or *reads_left reads
+ * (64 when reads_left is null), decrementing *reads_left per read. Returns the
+ * bytes drained. */
+size_t mt_rx_flush(struct mt7612u_dev *d, int *reads_left = nullptr);
 int mt_mac_stop(struct mt7612u_dev *d);
 /*
  * Silence the receiver while leaving TX up. Must run BEFORE the EP 4 ring is

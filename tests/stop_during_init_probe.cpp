@@ -2,9 +2,13 @@
  * (tests/stop_during_init.sh runs the matrix):
  *
  *   initstop   Init() on a thread; StopRxLoop() after --stop-at-ms; the Init
- *              thread must return within --timeout-s. A stop that lands while
- *              Init is still bringing the chip up is honoured — before the fix
- *              StartRxLoop cleared the flag and the loop ran forever.
+ *              thread must still be inside Init at the stop and must return
+ *              within --timeout-s after it. Then a standalone StartRxLoop()
+ *              runs for --rx-ms and must see frames: the chip the stop
+ *              interrupted has to be a working receiver, so a bring-up that
+ *              failed and returned on its own cannot pass as an honoured
+ *              stop. (Before the fix StartRxLoop cleared the flag and the
+ *              loop ran forever.)
  *   restart    Init() on a thread; after --stop-at-ms StopRxLoop(); join;
  *              then StartRxLoop() on a new thread, run --rx-ms, StopRxLoop(),
  *              join. Both joins must return and the second loop must see
@@ -144,6 +148,16 @@ int main(int argc, char **argv) {
                                                                    : rx_ms;
   std::this_thread::sleep_for(std::chrono::milliseconds(first_wait));
   const long frames_at_stop = frames.load();
+  if (mode == "initstop" && init_done.load()) {
+    /* Init came back on its own before the scheduled stop: a failed bring-up
+     * (Kestrel returns normally on one) or a stop time past the loop's life.
+     * Nothing about the contract was exercised. */
+    init_thread.join();
+    std::printf("RESULT mode=initstop outcome=INIT_RETURNED_BEFORE_STOP "
+                "stop_at_ms=%d frames=%ld\n",
+                stop_at_ms, frames_at_stop);
+    return 1;
+  }
   dev->StopRxLoop();
   long waited = 0;
   if (!join_within(init_thread, init_done, timeout_s, &waited))
@@ -177,8 +191,23 @@ int main(int argc, char **argv) {
                 ok ? "OK" : "INIT_RX_REFUSED", frames_at_stop, init_return_ms);
     return ok ? 0 : 1;
   }
-  std::printf("RESULT mode=initstop outcome=OK stop_at_ms=%d init_return_ms=%ld "
-              "frames=%ld\n",
-              stop_at_ms, init_return_ms, frames.load());
-  return 0;
+  /* The stop was honoured; now show the chip it interrupted is up. */
+  frames = 0;
+  std::atomic<bool> rx_done{false};
+  std::thread rx_thread([&]() {
+    dev->StartRxLoop(on_pkt);
+    rx_done = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(rx_ms));
+  const long verify_frames = frames.load();
+  const bool loop_still_running = !rx_done.load();
+  dev->StopRxLoop();
+  if (!join_within(rx_thread, rx_done, timeout_s, &waited))
+    fail_hung("verify", waited);
+  const bool ok = loop_still_running && verify_frames > 0;
+  std::printf("RESULT mode=initstop outcome=%s stop_at_ms=%d init_return_ms=%ld "
+              "frames_at_stop=%ld verify_frames=%ld\n",
+              ok ? "OK" : "NO_RX_AFTER_STOP", stop_at_ms, init_return_ms,
+              frames_at_stop, verify_frames);
+  return ok ? 0 : 1;
 }

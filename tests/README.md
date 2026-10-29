@@ -570,26 +570,26 @@ shown to fix something rather than asserted to.
 
 ### `stop_during_init.sh`: a stop that lands inside `Init()`
 
-`StopRxLoop()` is the only way out of a blocking `Init()`, and a stop that
-lands while the chip is still being brought up used to be erased by the loop
-start that followed, leaving the caller joining a thread that never returns.
-The script drives `build/StopDuringInitProbe` through the contract on
-`StopRxLoop` in `src/IRadio.h`: a stop at 100 / 400 / 1000 / 2500 ms into
-`Init` (the first ones land inside bring-up on every generation, all four on
-Kestrel), a standalone restart after a stop, and a stale stop before `Init`.
+Drives `build/StopDuringInitProbe` through the `StopRxLoop` contract stated
+on its declaration in `src/IRadio.h`: a stop at 100 / 400 / 1000 / 2500 ms
+into `Init` (each must find Init still running, end it, and leave a chip
+that then receives on a standalone loop), a standalone restart after a stop,
+and a stale stop before `Init`. The frame checks need a channel with
+traffic; ambient beacons do.
 
 ```bash
-sudo tests/stop_during_init.sh                                  # 8822BU, ch6
-PID=0xa81a CHANNEL=36 sudo tests/stop_during_init.sh            # 8812EU
-VID=0x35bc PID=0x0101 CHANNEL=36 NO_RESET=1 sudo tests/stop_during_init.sh
+sudo tests/stop_during_init.sh                                       # 8822BU, ch6
+sudo env PID=0xa81a CHANNEL=36 tests/stop_during_init.sh             # 8812EU
+sudo env VID=0x35bc PID=0x0101 CHANNEL=36 NO_RESET=1 tests/stop_during_init.sh
 ```
 
-Each line reports how long after the stop `Init` came back; a `DEADLOCK`
-line means it never did, and the probe drops the USB lock and exits so the
-adapter may need a re-plug. The Kestrel run needs `NO_RESET=1`: a USB reset
-on its running firmware re-enumerates the adapter out from under the probe.
-Measured on the 8822BU, 8812EU and 8832CU; the 8812AU, RTL8733B and MT7612U
-carry the same guard and have not been run.
+`sudo env VAR=...`, not `VAR=... sudo`: sudo scrubs the environment the
+script reads its knobs from. A `DEADLOCK` line means `Init` never came back;
+the probe drops the USB lock and exits, so the adapter may need a re-plug.
+The Kestrel run needs `NO_RESET=1`: a USB reset on its running firmware
+re-enumerates the adapter out from under the probe. Measured on the 8822BU,
+8812EU and 8832CU; the 8812AU, RTL8733B and MT7612U carry the same guard and
+have not been run.
 
 ### `kestrel_prich_onair.sh`: Kestrel per-channel BB programming
 

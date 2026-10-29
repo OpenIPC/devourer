@@ -94,6 +94,24 @@ Jaguar1 (shared `PhyTableLoader`).
   one control read a minute failed while the chip worked on, and an unguarded
   `GetTxDmaStatus` poll killed that AP at minute 9. The poller contract is at
   `IRtlRadio::GetTxDmaStatus`.
+- **Under co-channel saturation, a failed 8812BU register read is the device
+  stalling the request.** One 8812BU at USB 3, ch 149 HT40+, an 8812EU 50 cm
+  away injecting MCS1/40 at saturation (-10 dB offset, ~1.8k frames/s, CLM
+  busy ~83%): every failure is `LIBUSB_ERROR_PIPE` in ~100 µs - no
+  timeouts, no reads slower than 5 ms - on every address sampled (MAC
+  0x0100, BB config 0x9a4/0xa2c/0xb58/0xc50, BB report 0xf08/0xf48, the RF
+  window 0x2908). With DIG plus a 1 s busy window and thermal poll that is
+  1-6 failures per 90 s run; adding a 5 ms busy window and 50 ms thermal
+  poll, 23-26 per 60 s. An immediate re-read, from a throwaway probe patch that is
+  not in the tree, succeeded 6/6 in one 90 s run. Nothing retries: neither
+  `UsbTransport::ctrl_read` nor, by default, the vendor driver
+  (`MAX_USBCTRL_VENDORREQ_TIMES` is 1 without `CONFIG_VENDOR_REQ_RETRY`).
+  Counterparts: zero failures in 45 s with the injector off (ambient, busy
+  ~2%); one in 60 s at MCS5/40 (busy ~68%); zero in 60 s each at MCS1/20
+  and 6M/20 - but the 40 MHz witness's CLM read those at only 6% / 29% busy,
+  so 20 vs 40 MHz and airtime are not separated. The vendor's 0x4E0 write
+  after an always-on-section access (`usbctrl_vendorreq`, rtw88
+  `rtw_usb_reg_sec`) is not ported and was not tested as a cause.
 
 ## TX power
 

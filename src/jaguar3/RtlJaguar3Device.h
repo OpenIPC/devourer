@@ -534,8 +534,7 @@ private:
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
 
-  /* Track whether device initialization (Init()) is currently in progress */
-  std::atomic<bool> _init_in_progress{false};
+  void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
 
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */
   std::atomic<bool> _rx_loop_active{false};

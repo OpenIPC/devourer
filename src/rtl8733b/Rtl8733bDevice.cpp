@@ -171,6 +171,7 @@ void Rtl8733bDevice::bring_up_to_phy() {
 
 void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
+  _rx_stop = false;
   try {
     {
       std::lock_guard<std::recursive_mutex> lock(_reg_mu);
@@ -225,7 +226,7 @@ void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
             ClearAckResponder();
           });
     }
-    StartRxLoop(std::move(packetProcessor));
+    start_rx_loop(std::move(packetProcessor), false);
   } catch (...) {
     Stop();
     throw;
@@ -355,6 +356,14 @@ bool Rtl8733bDevice::configure_tx_power(SelectedChannel channel) {
 
 void Rtl8733bDevice::StartRxLoop(
     Action_ParsedRadioPacket packetProcessor) {
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void Rtl8733bDevice::start_rx_loop(
+    Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
   Action_ParsedRadioPacket rx_packet_processor = std::move(packetProcessor);
   uint8_t rx_channel = 0;
   {
@@ -363,7 +372,12 @@ void Rtl8733bDevice::StartRxLoop(
       throw std::runtime_error("RTL8733B RX loop requires initialized hardware");
     if (_rx_active)
       throw std::runtime_error("RTL8733B RX loop is already active");
-    _rx_stop = false;
+    if (clear_stale) {
+      _rx_stop = false;
+    } else if (_rx_stop) {
+      /* Stop requested during Init must prevent its receive loop from starting */
+      return;
+    }
     _rx_active = true;
     rx_channel = _channel.Channel;
   }

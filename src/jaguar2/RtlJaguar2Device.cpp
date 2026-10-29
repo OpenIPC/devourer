@@ -510,18 +510,7 @@ void RtlJaguar2Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
-    /* Mark that device initialization is currently in progress. */
-    _init_in_progress.store(true, std::memory_order_release);
-
-    /* Ensure initialization progress flag is cleared upon exit or rollback.
-     * (Equivalent to JaguarScopeExit without needing a class definition) */
-    auto init_guard_closer = [&]() {
-        _init_in_progress.store(false, std::memory_order_release);
-    };
-    struct ScopeGuard {
-        std::function<void()> fn;
-        ~ScopeGuard() { fn(); }
-    } init_guard{init_guard_closer};
+  _rx_stop = false;
 
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
@@ -538,7 +527,6 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     _station_ready = false;
     _station.retire(_device, _logger, "Jaguar2");
   }
-  _rx_stop = false;
   _channel = channel;
   bring_up(channel);
   _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
@@ -604,30 +592,24 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     std::lock_guard<std::mutex> lk(_reg_mu);
     _station_ready = true; /* every port-0 write of this bring-up is done */
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
 }
 
 void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
-  _packetProcessor = std::move(packetProcessor);
-  if (g_devourer_should_stop)
-      return;
+  start_rx_loop(std::move(packetProcessor), true);
+}
 
-  /*
-   * Differentiate between an initialization-time stop request and a stale stop
-   * request left by a completed receive loop:
-   * - If initialization is currently in progress and a stop was requested, abort
-   *   StartRxLoop immediately.
-   * - If this is a standalone restart after initialization has completed, clear
-   *   the stale stop request.
-   */
-  if (_init_in_progress.load(std::memory_order_acquire)) {
-    if (_rx_stop) {
-      /* Stop requested during Init must prevent its receive loop from starting */
-      return;
-    }
-  } else {
-    /* Clear a completed loop's stale stop request for a standalone restart */
+void RtlJaguar2Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
+  _packetProcessor = std::move(packetProcessor);
+
+  if (clear_stale) {
     _rx_stop = false;
+  } else if (_rx_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
   }
 
   /* Start the DIG thread: track IGI to the false-alarm rate so weak signals are

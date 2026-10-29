@@ -127,6 +127,7 @@ private:
   void bring_up(SelectedChannel channel);           /* _mu held */
   void apply_config();                              /* _mu held */
   int  txpower_target_dbm() const;                  /* _mu held */
+  void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
   void start_tick();                                /* _mu held */
   void stop_tick();                                 /* _mu NOT held */
   void tick_loop();

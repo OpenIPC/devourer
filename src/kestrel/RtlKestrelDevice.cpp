@@ -295,19 +295,6 @@ void RtlKestrelDevice::EnableTxScheduler() {
 
 void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
-    /* Mark that device initialization is currently in progress. */
-    _init_in_progress.store(true, std::memory_order_release);
-
-    /* Ensure initialization progress flag is cleared upon exit or rollback.
-     * (Equivalent to JaguarScopeExit without needing a class definition) */
-    auto init_guard_closer = [&]() {
-        _init_in_progress.store(false, std::memory_order_release);
-    };
-    struct ScopeGuard {
-        std::function<void()> fn;
-        ~ScopeGuard() { fn(); }
-    } init_guard{init_guard_closer};
-
   _rx_stop = false;
   if (!BringUpMonitor(channel)) {
     _logger->error("Kestrel: monitor bring-up failed");
@@ -332,7 +319,7 @@ void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
       ClearAckResponder();
     });
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
 }
 
 void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
@@ -451,29 +438,23 @@ void RtlKestrelDevice::InitWriteTail(SelectedChannel channel) {
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
-  /* Take the bulk-IN over from the TX WP-release drain (this loop also consumes
-   * rpkt_type=7 releases) so the two never read the endpoint concurrently. */
-  stop_wp_drain();
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
   if (g_devourer_should_stop)
     return;
 
-  /*
-   * Differentiate between an initialization-time stop request and a stale stop
-   * request left by a completed receive loop:
-   * - If initialization is currently in progress and a stop was requested, abort
-   *   StartRxLoop immediately.
-   * - If this is a standalone restart after initialization has completed, clear
-   *   the stale stop request.
-   */
-  if (_init_in_progress.load(std::memory_order_acquire)) {
-    if (_rx_stop) {
-      /* Stop requested during Init must prevent its receive loop from starting */
-      return;
-    }
-  } else {
-    /* Clear a completed loop's stale stop request for a standalone restart */
+  if (clear_stale) {
     _rx_stop = false;
+  } else if (_rx_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
   }
+
+  /* Take the bulk-IN over from the TX WP-release drain (this loop also consumes
+   * rpkt_type=7 releases) so the two never read the endpoint concurrently. */
+  stop_wp_drain();
 
   _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. The

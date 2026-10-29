@@ -324,6 +324,7 @@ void Mt7612uRadio::tick_loop() {
 
 void Mt7612uRadio::Init(Action_ParsedRadioPacket packetProcessor,
                         SelectedChannel channel) {
+  _rx_stop = false;
   /* Stop() on the way out, as the sibling backends do: a throw from the channel
    * set or the config would otherwise leave the device open and the tick thread
    * running until the destructor happens to run, and a caller that catches and
@@ -351,7 +352,7 @@ void Mt7612uRadio::Init(Action_ParsedRadioPacket packetProcessor,
    * failed to start" left the device open and the tick running, which is the
    * half-open object this whole guard exists to prevent. */
   try {
-    StartRxLoop(std::move(packetProcessor));
+    start_rx_loop(std::move(packetProcessor), false);
   } catch (...) {
     Stop();
     throw;
@@ -392,6 +393,13 @@ void Mt7612uRadio::InitWrite(SelectedChannel channel) {
 }
 
 void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void Mt7612uRadio::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
   struct mt7612u_dev *mac_failed = nullptr;
   /* An armed station keeps its managed filter: the monitor request below is
    * recorded, not installed (mt7612u_set_monitor_rx). The log says which
@@ -416,7 +424,12 @@ void Mt7612uRadio::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
     if (_rx_active.load())
       throw std::runtime_error("MT7612U RX loop is already active");
     _rx_processor = std::move(packetProcessor);
-    _rx_stop = false;
+    if (clear_stale) {
+      _rx_stop = false;
+    } else if (_rx_stop.load()) {
+      /* Stop requested during Init must prevent its receive loop from starting */
+      return;
+    }
     /* 64 slots is about 45 ms of headroom at the measured 1400 fps - enough to
      * ride out a slow processor without letting the producer block. The ring
      * itself is allocated here; each slot's payload buffer then grows to the

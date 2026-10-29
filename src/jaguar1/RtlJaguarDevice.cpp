@@ -1667,13 +1667,7 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
 
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
-  /* Mark that device initialization is currently in progress. */
-  _init_in_progress.store(true, std::memory_order_release);
-
-  /* Ensure initialization progress flag is cleared upon exit or rollback. */
-  JaguarScopeExit init_guard([this] {
-      _init_in_progress.store(false, std::memory_order_release);
-  });
+  should_stop = false;
 
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
@@ -1704,7 +1698,6 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
       _logger->error("Jaguar1: post-arm Init rollback was not fully verified; "
                      "see the register-specific error above");
   });
-  should_stop = false;
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
 
@@ -1807,32 +1800,25 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
     std::lock_guard<std::recursive_mutex> lock(_port0_mu);
     _station_ready = true; /* every port-0 write of this bring-up is done */
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
   rollback.release();
 }
 
 void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
-  _packetProcessor = std::move(packetProcessor);
+  start_rx_loop(std::move(packetProcessor), true);
+}
 
+void RtlJaguarDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
   if (g_devourer_should_stop)
     return;
 
-  /*
-   * Differentiate between an initialization-time stop request and a stale stop
-   * request left by a completed receive loop:
-   * - If initialization is currently in progress and a stop was requested, abort
-   *   StartRxLoop immediately.
-   * - If this is a standalone restart after initialization has completed, clear
-   *   the stale stop request.
-   */
-  if (_init_in_progress.load(std::memory_order_acquire)) {
-    if (should_stop) {
-      /* Stop requested during Init must prevent its receive loop from starting */
-      return;
-    }
-  } else {
-    /* Clear a completed loop's stale stop request for a standalone restart */
+  _packetProcessor = std::move(packetProcessor);
+
+  if (clear_stale) {
     should_stop = false;
+  } else if (should_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
   }
 
   /* DEVOURER_RX_PATHS=0xNN restricts which RX chains the chip enables/combines,

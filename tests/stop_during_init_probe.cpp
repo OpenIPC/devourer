@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
@@ -45,6 +46,17 @@
 #include "logger.h"
 
 using clk = std::chrono::steady_clock;
+
+/* The RESULT line is one machine record; an exception message is free text
+ * that may carry quotes or newlines, so it is flattened before it goes in. */
+static std::string result_safe(std::string s) {
+  for (char &c : s)
+    if (c == '"' || c == '\\')
+      c = '\'';
+    else if ((unsigned char)c < 0x20)
+      c = ' ';
+  return s;
+}
 
 static bool join_within(std::thread &t, std::atomic<bool> &done, int timeout_s,
                         long *elapsed_ms) {
@@ -117,8 +129,19 @@ int main(int argc, char **argv) {
   session.adopt_handle(handle);
   session.adopt_lock(lock);
   devourer::DeviceConfig cfg;
-  if (!fw_dir.empty())
+  if (!fw_dir.empty()) {
+    /* An explicit directory must hold both files: the backend falls back to
+     * its default search paths otherwise, and a run would then pass on
+     * firmware the caller did not name. */
+    for (const char *f : {"mt7662.bin", "mt7662_rom_patch.bin"}) {
+      if (!std::filesystem::exists(std::filesystem::path(fw_dir) / f)) {
+        std::printf("RESULT mode=%s outcome=BAD_FW_DIR missing=%s/%s\n",
+                    mode.c_str(), fw_dir.c_str(), f);
+        return 2;
+      }
+    }
     cfg.mt7612u.firmware_dir = fw_dir;
+  }
   WiFiDriver driver(logger);
   std::unique_ptr<IRadio> owned = driver.CreateRadio(handle, ctx, lock, cfg);
   if (!owned) {
@@ -170,7 +193,7 @@ int main(int argc, char **argv) {
      * firmware, a dead adapter): nothing below would measure it. */
     init_thread.join();
     std::printf("RESULT mode=%s outcome=INIT_THREW what=\"%s\"\n", mode.c_str(),
-                init_what.c_str());
+                result_safe(init_what).c_str());
     return 1;
   }
   if (mode == "initstop" && init_done.load()) {
@@ -190,7 +213,7 @@ int main(int argc, char **argv) {
   const long init_return_ms = waited;
   if (init_threw.load()) {
     std::printf("RESULT mode=%s outcome=INIT_THREW what=\"%s\"\n", mode.c_str(),
-                init_what.c_str());
+                result_safe(init_what).c_str());
     return 1;
   }
 

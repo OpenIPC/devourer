@@ -1459,6 +1459,14 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     uint8_t pri = 0;
     if (bw == 1)
       pri = (primary_ch_idx == 2 /*HAL_PRIME_CHNL_OFFSET_UPPER*/) ? 1 : 2;
+    /* A notch / CSI mask / dsde CCA tweak belongs to the channel it was
+     * armed on; clear it before the switch, while the BB is still on the
+     * source channel and the RF bus is idle (the sw path does the same on
+     * its hop). The firmware never arms one. */
+    if (_notch_armed) {
+      notch_reset();
+      _device.rtw_write32(0x082c, cca_word(0, cch <= 14));
+    }
     fw_channel_switch(cch, pri, bw);
     prof.mark("fw");
     /* The firmware rewrote the channel-keyed state (AGC table, fc, RF 0xBE,

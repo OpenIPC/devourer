@@ -568,6 +568,29 @@ quiesce must still return, and a `tx.quiesce_timeout` event in the log says it
 never drained. `BUILD=<dir>` points at another tree, which is how a fix is
 shown to fix something rather than asserted to.
 
+### `stop_during_init.sh`: a stop that lands inside `Init()`
+
+Drives `build/StopDuringInitProbe` through the `StopRxLoop` contract stated
+on its declaration in `src/IRadio.h`: a stop at 100 / 400 / 1000 / 2500 ms
+into `Init` (each must find Init still running, end it, and leave a chip
+that then receives on a standalone loop), a standalone restart after a stop,
+and a stale stop before `Init`. The frame checks need a channel with
+traffic; ambient beacons do.
+
+```bash
+sudo tests/stop_during_init.sh                                       # 8822BU, ch6
+sudo env PID=0xa81a CHANNEL=36 tests/stop_during_init.sh             # 8812EU
+sudo env VID=0x35bc PID=0x0101 CHANNEL=36 NO_RESET=1 tests/stop_during_init.sh
+```
+
+`sudo env VAR=...`, not `VAR=... sudo`: sudo scrubs the environment the
+script reads its knobs from. A `DEADLOCK` line means `Init` never came back;
+the probe drops the USB lock and exits, so the adapter may need a re-plug.
+The Kestrel run needs `NO_RESET=1`: a USB reset on its running firmware
+re-enumerates the adapter out from under the probe. Measured on the 8822BU,
+8812EU and 8832CU; the 8812AU, RTL8733B and MT7612U carry the same guard and
+have not been run.
+
 ### `kestrel_prich_onair.sh`: Kestrel per-channel BB programming
 
 Counts delivered frames across the configurations that the vendored

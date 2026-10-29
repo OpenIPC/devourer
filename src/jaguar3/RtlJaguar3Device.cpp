@@ -215,6 +215,8 @@ void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
 }
 
 void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  /* A signal has already landed: skip the setup below rather than build it
+   * for a loop whose own predicate would exit on its first pass. */
   if (g_devourer_should_stop)
     return;
 

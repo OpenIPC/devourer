@@ -1475,17 +1475,19 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
      * after it. Written straight after the H2C the host's word loses to
      * the firmware's; 1 ms later it holds (8822BU, 36 -> 52, 3/3 at 1, 2
      * and 3 ms). Host-side cost only: the switch itself is the firmware's,
-     * dead air is unchanged. 0x82c / 0x830 the firmware leaves alone. */
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    {
+     * dead air is unchanged. 0x82c / 0x830 the firmware leaves alone.
+     * 8822B only: the CCA table is that die's, the 8821C's 0x838 is its
+     * PHY-table value and its fw hop is unmeasured. */
+    if (_variant == ChipVariant::C8822B) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
       const int nib = static_cast<int>(cca_838_nib(cch, bw));
       const uint32_t w838 = (cca_word(2, cch <= 14) & ~0xf0u) |
                             (static_cast<uint32_t>(nib) << 4);
       _device.rtw_write32(0x0838, w838);
       _cw_838 = w838;
       _last_838_nib = nib;
+      prof.mark("cca");
     }
-    prof.mark("cca");
     /* The firmware rewrote the channel-keyed state (AGC table, fc, RF 0xBE,
      * band) under the sw caches, on a same-band hop too — invalidate them
      * all, or a later sw hop that maps to a cached value skips its write and

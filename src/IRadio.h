@@ -781,7 +781,8 @@ public:
    * reading, or none where that path is not ported). A
    * failed read of the window leaves it as it was. A failed write is not
    * reported at all, so an arm can succeed over an engine it did not fully
-   * program. */
+   * program. A poller catches, skips that window and carries on - rxdemo's
+   * DEVOURER_RX_BUSY_MS thread is the reference (examples/common/poll_skip.h). */
   virtual uint32_t ArmChannelBusy(uint32_t window_us) {
     (void)window_us;
     return 0;

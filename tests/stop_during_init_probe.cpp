@@ -21,6 +21,9 @@
  *
  * --no-reset skips libusb_reset_device before the claim (Kestrel: a reset
  * on running firmware re-enumerates the adapter, src/kestrel/CLAUDE.md).
+ * --fw-dir <dir> (or DEVOURER_MT7612U_FW_DIR) names the decompressed
+ * mt7662.bin + mt7662_rom_patch.bin for an MT7612U, whose firmware is not
+ * embedded. A bring-up that throws is reported as INIT_THREW, not a core.
  * Prints one line: RESULT mode=<m> outcome=<OK|DEADLOCK|...> ...
  * Exit 0 = OK, 1 = the contract failed, 3 = no adapter.
  */
@@ -29,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <thread>
@@ -42,6 +46,17 @@
 #include "logger.h"
 
 using clk = std::chrono::steady_clock;
+
+/* The RESULT line is one machine record; an exception message is free text
+ * that may carry quotes or newlines, so it is flattened before it goes in. */
+static std::string result_safe(std::string s) {
+  for (char &c : s)
+    if (c == '"' || c == '\\')
+      c = '\'';
+    else if ((unsigned char)c < 0x20)
+      c = ' ';
+  return s;
+}
 
 static bool join_within(std::thread &t, std::atomic<bool> &done, int timeout_s,
                         long *elapsed_ms) {
@@ -63,6 +78,9 @@ int main(int argc, char **argv) {
   int channel = 6, stop_at_ms = 500, rx_ms = 4000, timeout_s = 20;
   std::string mode = "initstop";
   bool do_reset = true;
+  std::string fw_dir;
+  if (const char *e = std::getenv("DEVOURER_MT7612U_FW_DIR"))
+    fw_dir = e;
   for (int i = 1; i < argc; i++) {
     if (!std::strcmp(argv[i], "--vid") && i + 1 < argc)
       vid = (uint16_t)std::strtoul(argv[++i], nullptr, 0);
@@ -80,6 +98,8 @@ int main(int argc, char **argv) {
       mode = argv[++i];
     else if (!std::strcmp(argv[i], "--no-reset"))
       do_reset = false;
+    else if (!std::strcmp(argv[i], "--fw-dir") && i + 1 < argc)
+      fw_dir = argv[++i];
     else {
       std::fprintf(stderr, "bad arg %s\n", argv[i]);
       return 2;
@@ -109,6 +129,19 @@ int main(int argc, char **argv) {
   session.adopt_handle(handle);
   session.adopt_lock(lock);
   devourer::DeviceConfig cfg;
+  if (!fw_dir.empty()) {
+    /* An explicit directory must hold both files: the backend falls back to
+     * its default search paths otherwise, and a run would then pass on
+     * firmware the caller did not name. */
+    for (const char *f : {"mt7662.bin", "mt7662_rom_patch.bin"}) {
+      if (!std::filesystem::exists(std::filesystem::path(fw_dir) / f)) {
+        std::printf("RESULT mode=%s outcome=BAD_FW_DIR missing=%s/%s\n",
+                    mode.c_str(), fw_dir.c_str(), f);
+        return 2;
+      }
+    }
+    cfg.mt7612u.firmware_dir = fw_dir;
+  }
   WiFiDriver driver(logger);
   std::unique_ptr<IRadio> owned = driver.CreateRadio(handle, ctx, lock, cfg);
   if (!owned) {
@@ -140,14 +173,29 @@ int main(int argc, char **argv) {
     dev->StopRxLoop(); /* the pre-Init stale request */
 
   std::atomic<bool> init_done{false};
+  std::atomic<bool> init_threw{false};
+  std::string init_what;
   std::thread init_thread([&]() {
-    dev->Init(on_pkt, chan);
+    try {
+      dev->Init(on_pkt, chan);
+    } catch (const std::exception &e) {
+      init_what = e.what();
+      init_threw = true;
+    }
     init_done = true;
   });
   const int first_wait = (mode == "initstop" || mode == "restart") ? stop_at_ms
                                                                    : rx_ms;
   std::this_thread::sleep_for(std::chrono::milliseconds(first_wait));
   const long frames_at_stop = frames.load();
+  if (init_threw.load()) {
+    /* Bring-up failed before the contract was reached (missing MT7612U
+     * firmware, a dead adapter): nothing below would measure it. */
+    init_thread.join();
+    std::printf("RESULT mode=%s outcome=INIT_THREW what=\"%s\"\n", mode.c_str(),
+                result_safe(init_what).c_str());
+    return 1;
+  }
   if (mode == "initstop" && init_done.load()) {
     /* Init came back on its own before the scheduled stop: a failed bring-up
      * (Kestrel returns normally on one) or a stop time past the loop's life.
@@ -163,6 +211,11 @@ int main(int argc, char **argv) {
   if (!join_within(init_thread, init_done, timeout_s, &waited))
     fail_hung("init", waited);
   const long init_return_ms = waited;
+  if (init_threw.load()) {
+    std::printf("RESULT mode=%s outcome=INIT_THREW what=\"%s\"\n", mode.c_str(),
+                result_safe(init_what).c_str());
+    return 1;
+  }
 
   if (mode == "restart") {
     frames = 0;

@@ -20,6 +20,10 @@
 #   sudo tests/stop_during_init.sh                                 # 8822BU, ch6
 #   sudo env PID=0xa81a CHANNEL=36 tests/stop_during_init.sh       # 8812EU
 #   sudo env VID=0x35bc PID=0x0101 CHANNEL=36 NO_RESET=1 tests/stop_during_init.sh
+#   sudo env VID=0x0e8d PID=0x7612 FW_DIR=reference/mt76/firmware tests/stop_during_init.sh
+#
+# FW_DIR names the decompressed mt7662.bin + mt7662_rom_patch.bin for an
+# MT7612U (not embedded, tests/README.md "For MediaTek (MT7612U) DUTs").
 #
 # (`sudo env ...` rather than `VAR=... sudo`: sudo scrubs the caller's
 # environment, and the script reads its knobs from its own.)
@@ -35,6 +39,7 @@ PID="${PID:-0xb812}"
 CHANNEL="${CHANNEL:-6}"
 NO_RESET="${NO_RESET:-0}"
 TIMEOUT_S="${TIMEOUT_S:-20}"
+FW_DIR="${FW_DIR:-}"
 
 [ -x "$PROBE" ] || { echo "missing $PROBE (cmake --build build --target StopDuringInitProbe)" >&2; exit 1; }
 # A fresh private directory per run: the script is documented as a sudo run,
@@ -53,6 +58,7 @@ trap cleanup EXIT INT TERM
 
 extra=()
 [ "$NO_RESET" = 1 ] && extra+=(--no-reset)
+[ -n "$FW_DIR" ] && extra+=(--fw-dir "$FW_DIR")
 fail=0
 run() { # name args...
   local name=$1; shift

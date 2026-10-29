@@ -57,10 +57,14 @@ Jaguar1 (shared `PhyTableLoader`).
   threshold, the full path armed the dsde CCA tweak in `0x82c` on every
   40 MHz set at ch153 and a fast hop onto 153 carried none, 10/10 dwells —
   the asymmetry above, measured). A firmware hop
-  invalidates these write-on-change caches, same-band hops included, and
-  writes its own CCA word: on a fw hop 36<->52 at 20 MHz, `0x838` reads
-  `0x86666341` on ch52, neither the full path's `0x86666351` nor the
-  software hop's — unfixed. The 8821C is untested.
+  invalidates these write-on-change caches, same-band hops included. The
+  firmware also writes its own `0x838` CCA word during the switch (on ch52
+  at 20 MHz `0x86666341`, where the vendor driver and the full path land
+  `0x86666351`), so the fw hop re-applies the DFS nibble 1 ms after the
+  H2C: written straight after it the host's word loses to the firmware's,
+  at 1 ms it holds (8822BU, 36 -> 52, 3/3 at 1, 2 and 3 ms; `0x82c` /
+  `0x830` the firmware leaves alone). Host-side cost only, dead air is
+  the firmware's. The 8821C is untested.
 - **Firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
   `fw_channel_switch` + the `fastretune_fw` knob; both Jaguar2 dies — the
   path is variant-generic, 8822B on-air-validated, 8821C code-covered

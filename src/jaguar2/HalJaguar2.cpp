@@ -1469,6 +1469,23 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     }
     fw_channel_switch(cch, pri, bw);
     prof.mark("fw");
+    /* The firmware writes its own 0x838 CCA word during the switch — on a
+     * DFS channel at 20 MHz that is 0x86666341 where the vendor driver
+     * (and the full path) land 0x86666351 — so the DFS nibble is re-applied
+     * after it. Written straight after the H2C the host's word loses to
+     * the firmware's; 1 ms later it holds (8822BU, 36 -> 52, 3/3 at 1, 2
+     * and 3 ms). Host-side cost only: the switch itself is the firmware's,
+     * dead air is unchanged. 0x82c / 0x830 the firmware leaves alone. */
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+      const int nib = static_cast<int>(cca_838_nib(cch, bw));
+      const uint32_t w838 = (cca_word(2, cch <= 14) & ~0xf0u) |
+                            (static_cast<uint32_t>(nib) << 4);
+      _device.rtw_write32(0x0838, w838);
+      _cw_838 = w838;
+      _last_838_nib = nib;
+    }
+    prof.mark("cca");
     /* The firmware rewrote the channel-keyed state (AGC table, fc, RF 0xBE,
      * band) under the sw caches, on a same-band hop too — invalidate them
      * all, or a later sw hop that maps to a cached value skips its write and
@@ -1478,7 +1495,6 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     _last_rf_be = -1;
     _last_df18 = -1;
     _last_cck_key = -1;
-    _last_838_nib = -1;
     _last_tuned_ch = channel;
     DVR_DEBUG(_logger, "Jaguar2: fw fast retune -> ch {} (central {})",
               channel, cch);

@@ -581,15 +581,19 @@ traffic; ambient beacons do.
 sudo tests/stop_during_init.sh                                       # 8822BU, ch6
 sudo env PID=0xa81a CHANNEL=36 tests/stop_during_init.sh             # 8812EU
 sudo env VID=0x35bc PID=0x0101 CHANNEL=36 NO_RESET=1 tests/stop_during_init.sh
+sudo env VID=0x0e8d PID=0x7612 FW_DIR=reference/mt76/firmware tests/stop_during_init.sh
 ```
 
 `sudo env VAR=...`, not `VAR=... sudo`: sudo scrubs the environment the
 script reads its knobs from. A `DEADLOCK` line means `Init` never came back;
 the probe drops the USB lock and exits, so the adapter may need a re-plug.
 The Kestrel run needs `NO_RESET=1`: a USB reset on its running firmware
-re-enumerates the adapter out from under the probe. Measured on the 8822BU,
-8812EU and 8832CU; the 8812AU, RTL8733B and MT7612U carry the same guard and
-have not been run.
+re-enumerates the adapter out from under the probe. The MT7612U needs
+`FW_DIR` (its firmware is not embedded); a bring-up that throws is reported
+as `INIT_THREW` rather than counted. On that part the stop call itself
+blocks on the lock its bring-up holds, so the reported return time is near
+zero: the stop returns when bring-up ends, and `Init` leaves right behind
+it. Measured 18/18 on each of the six backends.
 
 ### `kestrel_prich_onair.sh`: Kestrel per-channel BB programming
 

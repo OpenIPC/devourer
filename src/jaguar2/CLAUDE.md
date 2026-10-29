@@ -45,10 +45,22 @@ Jaguar1 (shared `PhyTableLoader`).
   8812BU-class unit the full path's canary registers at four filled
   targets (20/40 MHz) match across two predecessors each. Full-vs-fast
   canary parity (RX-only) holds across the gap at 20/40 MHz on both units
-  and at 80 MHz on the second, except the 20 MHz DFS CCA tweak in
-  `0x838[7:4]`, which `fast_retune` never rewrites. A firmware hop
-  invalidates these write-on-change caches, same-band hops included; that,
-  the firmware hop itself and the 8821C are untested.
+  and at 80 MHz on the second. `fast_retune` keeps the 20 MHz DFS CCA
+  tweak in `0x838[7:4]` in step (write-on-change, same cache family) and
+  clears a notch / CSI mask / dsde CCA tweak that a full set's
+  `spur_calibration` or the `DEVOURER_RX_NBI` / `_CSI_MASK` knobs armed —
+  it never arms one, so a spur channel reached by a fast hop runs
+  un-notched until the next full set (8822BU: 83 dwells at 20 MHz over
+  36..165 incl. 52/64/100/117/144 and 66 at 40 MHz with zero fast-vs-full
+  differences; the knob-armed registers 0x874/0x87c/0x880 and 0xc20/0xe20
+  [28] read clear on the hop target; on a day the PSD at 5760 MHz crossed
+  threshold, the full path armed the dsde CCA tweak in `0x82c` on every
+  40 MHz set at ch153 and a fast hop onto 153 carried none, 10/10 dwells —
+  the asymmetry above, measured). A firmware hop
+  invalidates these write-on-change caches, same-band hops included, and
+  writes its own CCA word: on a fw hop 36<->52 at 20 MHz, `0x838` reads
+  `0x86666341` on ch52, neither the full path's `0x86666351` nor the
+  software hop's — unfixed. The 8821C is untested.
 - **Firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
   `fw_channel_switch` + the `fastretune_fw` knob; both Jaguar2 dies — the
   path is variant-generic, 8822B on-air-validated, 8821C code-covered

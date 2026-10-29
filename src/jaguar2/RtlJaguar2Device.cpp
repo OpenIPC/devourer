@@ -646,6 +646,8 @@ void RtlJaguar2Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
       _device, _logger, devourer::tonemask::Family::AC2_8822B, _channel, 2,
       _cfg.rx.csi_mask ? _cfg.rx.csi_mask->c_str() : nullptr,
       _cfg.rx.nbi ? _cfg.rx.nbi->c_str() : nullptr);
+  if (_cfg.rx.csi_mask || _cfg.rx.nbi)
+    _hal.note_tone_mask_armed();
 
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", _channel.Channel);
 

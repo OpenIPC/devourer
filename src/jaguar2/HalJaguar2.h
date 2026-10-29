@@ -164,6 +164,13 @@ public:
    * clock spur and program the NBI notch + CSI mask above threshold. 8822B
    * only. `cch` = central channel (notch center frequency). */
   void spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw);
+  /* The RX loop armed the DEVOURER_RX_CSI_MASK / _NBI registers (the ones
+   * spur_calibration resets): the next fast_retune clears them, as a full set
+   * does on the 8822B. */
+  void note_tone_mask_armed() {
+    if (_variant != ChipVariant::C8821C)
+      _notch_armed = true;
+  }
 
   /* Lean intra-band, same-bandwidth hop retune — the Jaguar2 FastRetune core
    * (see docs/frequency-hopping.md), variant-dispatched like set_channel_bw.
@@ -331,6 +338,18 @@ private:
    * value. */
   uint8_t agc_table_5g(uint8_t cch) const;
   static uint32_t cfo_fc_5g(uint8_t cch);
+  /* 8822B CCA thresholds (phydm_ccapar_by_rfe_8822b): the table word for row
+   * 0/1/2 = 0x82c/0x830/0x838 on the given band, and 0x838[7:4] with the
+   * 20 MHz DFS-channel adjust (shared full/fast paths). */
+  uint32_t cca_word(int row, bool g2) const;
+  uint32_t cca_838_nib(uint8_t cch, uint8_t bw) const;
+  bool _cca_rfe_tab = false; /* RFE type takes the cca_ifem_ccut_rfe table */
+  /* NBI notch / CSI mask reset (spur_calibration's entry half). */
+  void notch_reset();
+  /* A notch, CSI mask or the dsde 0x82c CCA tweak is armed — set by
+   * spur_calibration on a spur channel and by note_tone_mask_armed, cleared
+   * by notch_reset. fast_retune clears it on the next hop (8822B). */
+  bool _notch_armed = false;
 
   /* fast_retune write-on-change caches. Invalidated by every full
    * set_channel_bw (either variant); they only ever mirror fast-path writes —
@@ -344,12 +363,13 @@ private:
    * dwords — zero per-hop reads (every masked write is otherwise a read+write
    * USB round-trip). _cw_rfbe is the 8822B RF 0xBE 20-bit word. */
   bool _cw_primed = false;
-  uint32_t _cw_agc = 0, _cw_fc = 0, _cw_rfbe = 0;
+  uint32_t _cw_agc = 0, _cw_fc = 0, _cw_rfbe = 0, _cw_838 = 0;
   int _last_agc_bucket = -1;
   uint32_t _last_fc = 0xffffffff;
   int _last_rf_be = -1;
   int _last_df18 = -1;   /* 8822B ch144 RF 0xdf[18] state */
   int _last_cck_key = -1; /* 2G spur (8822B) / CCK-filter (8821C) key: ch14? */
+  int _last_838_nib = -1; /* 8822B 0x838[7:4] (20 MHz DFS-channel adjust) */
   bool _warned_uncharacterized = false; /* one-shot extended-channel warning */
   uint8_t _h2c_box = 0; /* round-robin HMEBOX index for send_h2c_raw */
   uint8_t _fw_sw_pending = 0; /* central ch of an unconfirmed fw switch */

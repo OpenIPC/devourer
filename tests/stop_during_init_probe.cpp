@@ -1,0 +1,184 @@
+/* stop_during_init_probe — exercises the StopRxLoop contract on IRadio.h
+ * (tests/stop_during_init.sh runs the matrix):
+ *
+ *   initstop   Init() on a thread; StopRxLoop() after --stop-at-ms; the Init
+ *              thread must return within --timeout-s. A stop that lands while
+ *              Init is still bringing the chip up is honoured — before the fix
+ *              StartRxLoop cleared the flag and the loop ran forever.
+ *   restart    Init() on a thread; after --stop-at-ms StopRxLoop(); join;
+ *              then StartRxLoop() on a new thread, run --rx-ms, StopRxLoop(),
+ *              join. Both joins must return and the second loop must see
+ *              frames: a stop left by a finished loop must not refuse a
+ *              standalone restart.
+ *   stale      StopRxLoop() BEFORE Init(); Init() on a thread; after --rx-ms
+ *              StopRxLoop(); join. RX must have run (frames > 0 on a channel
+ *              that carries traffic): a pre-Init stale stop must not refuse
+ *              Init's own loop.
+ *
+ * --no-reset skips libusb_reset_device before the claim (Kestrel: a reset
+ * on running firmware re-enumerates the adapter, src/kestrel/CLAUDE.md).
+ * Prints one line: RESULT mode=<m> outcome=<OK|DEADLOCK|...> ...
+ * Exit 0 = OK, 1 = the contract failed, 3 = no adapter.
+ */
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <thread>
+
+#include <libusb.h>
+
+#include "DeviceSession.h"
+#include "IRadio.h"
+#include "UsbOpen.h"
+#include "WiFiDriver.h"
+#include "logger.h"
+
+using clk = std::chrono::steady_clock;
+
+static bool join_within(std::thread &t, std::atomic<bool> &done, int timeout_s,
+                        long *elapsed_ms) {
+  const auto t0 = clk::now();
+  while (!done.load() &&
+         clk::now() - t0 < std::chrono::seconds(timeout_s))
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  *elapsed_ms = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    clk::now() - t0)
+                    .count();
+  if (!done.load())
+    return false;
+  t.join();
+  return true;
+}
+
+int main(int argc, char **argv) {
+  uint16_t vid = 0x0bda, pid = 0xb812;
+  int channel = 6, stop_at_ms = 500, rx_ms = 4000, timeout_s = 20;
+  std::string mode = "initstop";
+  bool do_reset = true;
+  for (int i = 1; i < argc; i++) {
+    if (!std::strcmp(argv[i], "--vid") && i + 1 < argc)
+      vid = (uint16_t)std::strtoul(argv[++i], nullptr, 0);
+    else if (!std::strcmp(argv[i], "--pid") && i + 1 < argc)
+      pid = (uint16_t)std::strtoul(argv[++i], nullptr, 0);
+    else if (!std::strcmp(argv[i], "--channel") && i + 1 < argc)
+      channel = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--stop-at-ms") && i + 1 < argc)
+      stop_at_ms = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--rx-ms") && i + 1 < argc)
+      rx_ms = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--timeout-s") && i + 1 < argc)
+      timeout_s = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--mode") && i + 1 < argc)
+      mode = argv[++i];
+    else if (!std::strcmp(argv[i], "--no-reset"))
+      do_reset = false;
+    else {
+      std::fprintf(stderr, "bad arg %s\n", argv[i]);
+      return 2;
+    }
+  }
+
+  auto logger = std::make_shared<Logger>();
+  libusb_context *ctx = nullptr;
+  if (libusb_init(&ctx) < 0) {
+    std::fprintf(stderr, "libusb_init failed\n");
+    return 3;
+  }
+  devourer::DeviceSession session(logger);
+  session.adopt_context(ctx);
+  libusb_device_handle *handle = libusb_open_device_with_vid_pid(ctx, vid, pid);
+  if (!handle) {
+    std::fprintf(stderr, "no adapter %04x:%04x\n", vid, pid);
+    return 3;
+  }
+  std::shared_ptr<devourer::UsbDeviceLock> lock;
+  if (devourer::claim_interface_then_reset(
+          handle, devourer::find_wifi_interface(handle), logger, do_reset, lock) !=
+      0) {
+    session.adopt_handle(handle);
+    return 3;
+  }
+  session.adopt_handle(handle);
+  session.adopt_lock(lock);
+  devourer::DeviceConfig cfg;
+  WiFiDriver driver(logger);
+  std::unique_ptr<IRadio> owned = driver.CreateRadio(handle, ctx, lock, cfg);
+  if (!owned) {
+    std::fprintf(stderr, "CreateRadio failed\n");
+    return 3;
+  }
+  session.adopt_device(std::move(owned));
+  IRadio *const dev = session.device();
+  const SelectedChannel chan{.Channel = (uint8_t)channel,
+                             .ChannelOffset = 0,
+                             .ChannelWidth = CHANNEL_WIDTH_20};
+
+  std::atomic<long> frames{0};
+  auto on_pkt = [&frames](const Packet &) { frames++; };
+
+  auto fail_hung = [&](const char *what, long waited_ms) {
+    std::printf("RESULT mode=%s outcome=DEADLOCK stage=%s waited_ms=%ld "
+                "frames=%ld\n",
+                mode.c_str(), what, waited_ms, frames.load());
+    std::fflush(stdout);
+    /* The RX thread is stuck inside the library; destructors would run the
+     * teardown under it. Drop the USB lock by hand and leave. */
+    lock.reset();
+    session.release_lock();
+    std::_Exit(1);
+  };
+
+  if (mode == "stale")
+    dev->StopRxLoop(); /* the pre-Init stale request */
+
+  std::atomic<bool> init_done{false};
+  std::thread init_thread([&]() {
+    dev->Init(on_pkt, chan);
+    init_done = true;
+  });
+  const int first_wait = (mode == "initstop" || mode == "restart") ? stop_at_ms
+                                                                   : rx_ms;
+  std::this_thread::sleep_for(std::chrono::milliseconds(first_wait));
+  const long frames_at_stop = frames.load();
+  dev->StopRxLoop();
+  long waited = 0;
+  if (!join_within(init_thread, init_done, timeout_s, &waited))
+    fail_hung("init", waited);
+  const long init_return_ms = waited;
+
+  if (mode == "restart") {
+    frames = 0;
+    std::atomic<bool> rx_done{false};
+    std::thread rx_thread([&]() {
+      dev->StartRxLoop(on_pkt);
+      rx_done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(rx_ms));
+    const long f = frames.load();
+    const bool loop_still_running = !rx_done.load();
+    dev->StopRxLoop();
+    if (!join_within(rx_thread, rx_done, timeout_s, &waited))
+      fail_hung("restart", waited);
+    const bool ok = loop_still_running && f > 0;
+    std::printf("RESULT mode=restart outcome=%s init_return_ms=%ld "
+                "restart_loop_ran=%d restart_frames=%ld restart_return_ms=%ld\n",
+                ok ? "OK" : "RESTART_REFUSED", init_return_ms,
+                loop_still_running, f, waited);
+    return ok ? 0 : 1;
+  }
+  if (mode == "stale") {
+    const bool ok = frames_at_stop > 0;
+    std::printf("RESULT mode=stale outcome=%s frames_during_init=%ld "
+                "init_return_ms=%ld\n",
+                ok ? "OK" : "INIT_RX_REFUSED", frames_at_stop, init_return_ms);
+    return ok ? 0 : 1;
+  }
+  std::printf("RESULT mode=initstop outcome=OK stop_at_ms=%d init_return_ms=%ld "
+              "frames=%ld\n",
+              stop_at_ms, init_return_ms, frames.load());
+  return 0;
+}

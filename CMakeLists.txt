@@ -894,6 +894,16 @@ add_executable(BusyWindowProbe
 target_include_directories(BusyWindowProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(BusyWindowProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
 
+# Bench driver for the StopRxLoop contract on IRadio.h: a stop issued while
+# Init() is still bringing the chip up must end Init without a loop, and a
+# stale stop must not refuse the next loop. tests/stop_during_init.sh runs the
+# matrix; a hung Init is reported as DEADLOCK, never waited out.
+add_executable(StopDuringInitProbe
+    tests/stop_during_init_probe.cpp
+)
+target_include_directories(StopDuringInitProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+target_link_libraries(StopDuringInitProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the

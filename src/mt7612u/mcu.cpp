@@ -23,25 +23,47 @@ static uint32_t get_le32(const uint8_t *p)
 	       ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq)
+static int mcu_wait_resp(struct mt7612u_dev *d, uint8_t seq, int cmd, int len,
+                         uint32_t arg0)
 {
 	uint8_t buf[MCU_RESP_URB_SIZE];
-	int len, rc;
+	int got, rc;
+	int ep4_drained = 0;
 
 	/* Ten reads of 300 ms, not five.  Measured on 2-1 with a peer 20 cm
 	 * away saturating the channel: the MCU answered every command, but
 	 * seconds late - seven calibrations in a row timed out at 1.5 s and
 	 * their nine replies then arrived together.  mt76's own budget is the
-	 * same five reads; it is not enough for this part under RF load. */
+	 * same five reads; it is not enough for this part under RF load.
+	 * That signature matches the parked-EP-4 stall drained below, so it is
+	 * probably the same mechanism; the budget is left at ten reads because
+	 * five has not been re-measured with the drain in place. */
 	for (int i = 0; i < 10; i++) {
-		rc = mt_bulk(d, MT_EP_IN_CMD_RESP, buf, sizeof buf, &len, 300);
-		if (rc == LIBUSB_ERROR_TIMEOUT)
+		rc = mt_bulk(d, MT_EP_IN_CMD_RESP, buf, sizeof buf, &got, 300);
+		if (rc == LIBUSB_ERROR_TIMEOUT) {
+			/* Data parked in EP 4 holds back this EP 5 reply too
+			 * (src/mt7612u/CLAUDE.md, "MCU replies and EP 4"). Drain it
+			 * once per command, on the first timeout, and only while
+			 * nobody else reads EP 4 - an RX ring or a synchronous
+			 * drainer owns what arrives there. io_lock is held from
+			 * this check through the drain, and a ring claims EP 4
+			 * under it, so none can start in between. */
+			if (!ep4_drained &&
+			    d->ep4_owner.load(std::memory_order_acquire) == MT_EP4_NONE) {
+				size_t n = mt_rx_flush(d);
+
+				ep4_drained = 1;
+				if (n)
+					LOG("mcu wait: drained %zu B from EP 4 (cmd %d len %d "
+					    "arg0 0x%08x)", n, cmd, len, (unsigned)arg0);
+			}
 			continue;
+		}
 		if (rc) {
 			ERR("mcu resp bulk: %s", libusb_error_name(rc));
 			goto unanswered;
 		}
-		if (len < 4)
+		if (got < 4)
 			continue;
 
 		uint32_t rxfce = get_le32(buf);
@@ -173,7 +195,9 @@ int mt_mcu_send(struct mt7612u_dev *d, int cmd, const void *data, int len,
 		return -1;
 	}
 
-	mcu_rc = wait_resp ? mcu_wait_resp(d, seq) : 0;
+	mcu_rc = wait_resp ? mcu_wait_resp(d, seq, cmd, len,
+	                                   len >= 4 ? get_le32((const uint8_t *)data) : 0u)
+	                   : 0;
 	d->io_lock.unlock();
 	return mcu_rc;
 }

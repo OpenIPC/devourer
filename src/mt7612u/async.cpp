@@ -216,6 +216,12 @@ int mt_async_start(struct mt7612u_dev *d, mt7612u_rx_cb cb, void *user)
 	a->evt_started = 1;
 
 	if (cb) {
+		/* Under io_lock: an MCU wait holds it across its owner check and
+		 * drain, so the claim cannot land in between. */
+		d->io_lock.lock();
+		int none = MT_EP4_NONE;
+		d->ep4_owner.compare_exchange_strong(none, MT_EP4_RING);
+		d->io_lock.unlock();
 		a->lock.lock();
 		a->rx_active = 1;
 		a->lock.unlock();
@@ -313,6 +319,12 @@ void mt_async_stop(struct mt7612u_dev *d)
 		a->evt.join();
 
 	d->a = NULL;
+	/* EP 4 is free again only when no RX transfer is left on it; a stranded
+	 * one keeps the ring as owner for the rest of the device's life. */
+	if (!stuck_rx) {
+		int ring = MT_EP4_RING;
+		d->ep4_owner.compare_exchange_strong(ring, MT_EP4_NONE);
+	}
 	if (stuck_tx || stuck_rx) {
 		/* Leaking the ring is the safe half. The other half is that libusb
 		 * still owns those transfers while the event thread has just been
@@ -325,7 +337,8 @@ void mt_async_stop(struct mt7612u_dev *d)
 		d->transfers_stranded = 1;
 		ERR("async stop: %d TX and %d RX transfers still in flight after 2 s "
 		    "- leaking the ring, and the USB handle with it, rather than "
-		    "freeing memory libusb still owns", stuck_tx, stuck_rx);
+		    "freeing memory libusb still owns%s", stuck_tx, stuck_rx,
+		    stuck_rx ? " (EP 4 stays owned: no MCU-wait drain on this device)" : "");
 		return;
 	}
 

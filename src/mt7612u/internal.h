@@ -170,6 +170,10 @@ struct mt_async {
 	uint64_t rx_dropped;      /* parser rejects: length, and invalid PHY too */
 };
 
+#define MT_EP4_NONE 0        /* mt7612u_dev::ep4_owner values */
+#define MT_EP4_RING 1
+#define MT_EP4_SYNC 2
+
 struct mt7612u_dev {
 	libusb_context       *ctx;
 	libusb_device_handle *h;
@@ -190,6 +194,17 @@ struct mt7612u_dev {
 	 * then: an unconditional drain costs a guaranteed 5 ms bulk timeout on
 	 * every command, including the 3-6 inside each tune. */
 	uint8_t  mcu_stale_pending;
+	/* Who reads EP 4: MT_EP4_NONE, _RING or _SYNC. On the device rather than
+	 * the ring because it must outlive mt_async_stop()'s free of d->a:
+	 * mcu_wait_resp() reads it from the PHY tick, which can overlap a ring
+	 * teardown (Mt7612uRadio::StopRxLoop runs that without _mu). RING is
+	 * claimed under io_lock before the first RX transfer is submitted, so it
+	 * cannot land between that check and its drain, and released only once
+	 * no RX transfer is left in flight; SYNC is held from
+	 * mt_mac_start(MT_RX_DRAIN_SYNC) until the receiver is switched off. Every
+	 * transition is a compare-exchange from the expected owner, so one owner
+	 * never clears another's claim. */
+	std::atomic<int> ep4_owner{MT_EP4_NONE};
 	uint8_t  chan;
 	uint8_t  bw;
 	/* Recursive: the PHY tick holds this and then nests mt_vendor_req /
@@ -387,7 +402,7 @@ int mt_init_hardware(struct mt7612u_dev *d, const char *fw_dir);
 #define MT_RX_DRAIN_RING 1   /* the async ring is already draining - asserted */
 #define MT_RX_DRAIN_SYNC 2   /* caller drains with mt_rx_one() on this thread */
 int mt_mac_start(struct mt7612u_dev *d, int enable_rx);
-void mt_rx_flush(struct mt7612u_dev *d);
+size_t mt_rx_flush(struct mt7612u_dev *d);
 int mt_mac_stop(struct mt7612u_dev *d);
 /*
  * Silence the receiver while leaving TX up. Must run BEFORE the EP 4 ring is

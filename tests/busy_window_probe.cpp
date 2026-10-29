@@ -262,9 +262,8 @@ int main(int argc, char **argv) {
     /* Bring-up finishes asynchronously, and the arm refuses until the
      * receiver is actually running, so wait for it rather than guessing. */
     /* Bring-up finishes asynchronously and the arm refuses until the receiver
-     * is actually running, so wait for it rather than guessing. Note the
-     * MT7612U does not always get there while the channel is already
-     * saturated — bring it up before the interferer, not after. */
+     * is actually running, so wait for it rather than guessing. (An MT7612U
+     * bring-up under a running interferer: tests/mt7612u_busy_bringup.sh.) */
     for (int t = 0; t < 60; t++) {
       nap(250);
       if (dev->ArmChannelBusy(1000) != 0) {

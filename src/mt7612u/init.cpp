@@ -249,21 +249,30 @@ static void wcid_and_key_clear(struct mt7612u_dev *d)
 }
 
 /*
- * Drain and discard whatever is sitting in the RX bulk endpoint. The MAC will
- * happily fill its RX pool with ambient frames the moment RX is enabled, and
- * nothing else in this HAL reads EP 4 unless the caller asked for RX - a full
- * pool is the leading suspect for the chip wedging after repeated TX cycles
- * (see BRINGUP-RESULTS.md). Cheap insurance either way.
+ * Drain and discard whatever is sitting in the RX bulk endpoint, and return
+ * how many bytes that was. The MAC will happily fill its RX pool with ambient
+ * frames the moment RX is enabled, and nothing reads EP 4 unless the caller
+ * asked for RX - a full pool is the leading suspect for the chip wedging after
+ * repeated TX cycles (see BRINGUP-RESULTS.md). Cheap insurance either way.
+ * mcu_wait_resp() also calls it, but only while d->ep4_owner says nobody else
+ * reads EP 4.
  */
-void mt_rx_flush(struct mt7612u_dev *d)
+size_t mt_rx_flush(struct mt7612u_dev *d)
 {
 	uint8_t buf[4096];
-	int n;
+	size_t total = 0;
 
 	for (int i = 0; i < 64; i++) {
-		if (mt_bulk(d, MT_EP_IN_PKT_RX, buf, sizeof buf, &n, 10) || n == 0)
+		int n = 0;
+		int rc = mt_bulk(d, MT_EP_IN_PKT_RX, buf, sizeof buf, &n, 10);
+
+		/* A read that times out can still have moved bytes. */
+		if (n > 0)
+			total += (size_t)n;
+		if (rc || n == 0)
 			break;
 	}
+	return total;
 }
 
 /* The value every station cell measured; the named bits must spell it. */
@@ -292,6 +301,10 @@ int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 		return -1;
 	}
 	mt_wr(d, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_MANAGED);
+	if (enable_rx == MT_RX_DRAIN_SYNC) {
+		int none = MT_EP4_NONE;
+		d->ep4_owner.compare_exchange_strong(none, MT_EP4_SYNC);
+	}
 	/* Only turn the receiver on when the caller will actually drain EP 4.
 	 * mt76's mac_start always sets both bits, but mt76 also keeps RX URBs
 	 * permanently queued; a TX-only injector that never reads has no such
@@ -317,6 +330,8 @@ void mt_mac_rx_disable(struct mt7612u_dev *d)
 {
 	if (!d || !d->h) return;
 	mt_clear(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_RX);
+	int sync = MT_EP4_SYNC;	/* a ring stays the owner until mt_async_stop() */
+	d->ep4_owner.compare_exchange_strong(sync, MT_EP4_NONE);
 }
 
 int mt_mac_stop(struct mt7612u_dev *d)
@@ -345,6 +360,8 @@ int mt_mac_stop(struct mt7612u_dev *d)
 	}
 	if (!mt_poll(d, MT_MAC_STATUS, MT_MAC_STATUS_RX, 0, 200000))
 		WARN("MAC RX failed to stop");
+	int sync = MT_EP4_SYNC;	/* a ring stays the owner until mt_async_stop() */
+	d->ep4_owner.compare_exchange_strong(sync, MT_EP4_NONE);
 
 	mt_wr(d, MT_TX_RTS_CFG, rts_cfg);
 	return 0;

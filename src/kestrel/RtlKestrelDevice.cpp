@@ -295,6 +295,7 @@ void RtlKestrelDevice::EnableTxScheduler() {
 
 void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+  _rx_stop = false;
   if (!BringUpMonitor(channel)) {
     _logger->error("Kestrel: monitor bring-up failed");
     return;
@@ -318,7 +319,7 @@ void RtlKestrelDevice::Init(Action_ParsedRadioPacket packetProcessor,
       ClearAckResponder();
     });
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
 }
 
 void RtlKestrelDevice::InitWrite(SelectedChannel channel) {
@@ -437,10 +438,24 @@ void RtlKestrelDevice::InitWriteTail(SelectedChannel channel) {
 }
 
 void RtlKestrelDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
+  if (clear_stale) {
+    _rx_stop = false;
+  } else if (_rx_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
+  }
+
   /* Take the bulk-IN over from the TX WP-release drain (this loop also consumes
    * rpkt_type=7 releases) so the two never read the endpoint concurrently. */
   stop_wp_drain();
-  _rx_stop = false;
+
   _logger->info("Kestrel: starting RX loop on ch{}", _channel.Channel);
   /* Async bulk-IN ring; walk each aggregate with the 11ax rxd parser. The
    * buffer must hold a full RXAGG aggregate (the 8852C LEN_TH is ~20 KB), or

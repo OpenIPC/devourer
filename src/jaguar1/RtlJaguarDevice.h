@@ -477,6 +477,8 @@ private:
     return true;
   }
 
+  void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
+
   /* Programs 0x520[14]/[15] and, for the EDCCA gate only, the BB thresholds
    * at 0x8a4. SetCcaMode is apply_cca(d, d) and writes exactly what it
    * wrote before the split existed. */

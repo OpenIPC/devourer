@@ -1667,6 +1667,8 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
 
 void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
                           SelectedChannel channel) {
+  should_stop = false;
+
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
    * GetChannelBusy() take the armed branch and report a stale period. */
@@ -1798,14 +1800,26 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
     std::lock_guard<std::recursive_mutex> lock(_port0_mu);
     _station_ready = true; /* every port-0 write of this bring-up is done */
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
   rollback.release();
 }
 
 void RtlJaguarDevice::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void RtlJaguarDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
   _packetProcessor = std::move(packetProcessor);
-  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
-  should_stop = false;
+
+  if (clear_stale) {
+    should_stop = false;
+  } else if (should_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
+  }
 
   /* DEVOURER_RX_PATHS=0xNN restricts which RX chains the chip enables/combines,
    * by masking the RX-path-enable register (0x808 byte 0: bits 0/4 = path A

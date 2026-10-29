@@ -418,6 +418,8 @@ private:
    * signal-flag pattern used across the library (g_devourer_should_stop). */
   volatile bool _rx_stop = false;
 
+  void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
+
   /* Shared cold bring-up (power-on -> DLFW -> MAC/BB/RF -> channel -> LCK ->
    * IQK -> coex -> enable RX/TX engine). Used by both Init (RX) and InitWrite
    * (TX). Leaves the chip fully calibrated on `channel`. */

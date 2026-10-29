@@ -533,6 +533,9 @@ private:
   int64_t _tbtt_off_us = 0;
   /* StartRxLoop stop request (StopRxLoop). */
   volatile bool _rx_stop = false;
+
+  void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
+
   /* True while StartRxLoop owns bulk-IN (gates the coex thread's drain). */
   std::atomic<bool> _rx_loop_active{false};
   /* Set when InitWrite zeroes the RX filters (0x6A0-0x6A4) for TX-only

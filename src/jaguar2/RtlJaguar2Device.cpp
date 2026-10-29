@@ -510,6 +510,8 @@ void RtlJaguar2Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+  _rx_stop = false;
+
   /* A window armed before a (re-)bring-up describes a chip state that no
    * longer exists; leaving it armed would make the next unrelated
    * GetChannelBusy() take the armed branch and report a stale period. */
@@ -590,13 +592,26 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
     std::lock_guard<std::mutex> lk(_reg_mu);
     _station_ready = true; /* every port-0 write of this bring-up is done */
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
 }
 
 void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void RtlJaguar2Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
   _packetProcessor = std::move(packetProcessor);
-  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
-  _rx_stop = false;
+
+  if (clear_stale) {
+    _rx_stop = false;
+  } else if (_rx_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
+  }
+
   /* Start the DIG thread: track IGI to the false-alarm rate so weak signals are
    * caught without an FA storm (a fixed IGI can't span the range). */
   _dig_stop = false;

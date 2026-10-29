@@ -83,6 +83,8 @@ struct WriteBatchScope {
 
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+  _rx_stop = false;
+
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
    * previous session's wide-TX IGI floor (_wide_tx_seen). */
   _wide_tx_seen.store(false, std::memory_order_relaxed);
@@ -205,13 +207,26 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
     std::lock_guard<std::mutex> lk(_reg_mu);
     _station_ready = true; /* every port-0 write of this bring-up is done */
   }
-  StartRxLoop(std::move(packetProcessor));
+  start_rx_loop(std::move(packetProcessor), false);
 }
 
 void RtlJaguar3Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
+  start_rx_loop(std::move(packetProcessor), true);
+}
+
+void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale) {
+  if (g_devourer_should_stop)
+    return;
+
   _packetProcessor = std::move(packetProcessor);
-  /* Restartable: clear any stop request left by a prior StopRxLoop(). */
-  _rx_stop = false;
+
+  if (clear_stale) {
+    _rx_stop = false;
+  } else if (_rx_stop) {
+    /* Stop requested during Init must prevent its receive loop from starting */
+    return;
+  }
+
   /* Take over bulk-IN from the coex thread's C2H drain up front — also during
    * the register restore below, so its 200 ms bulk reads don't interleave with
    * the RX-path enable sequence. */

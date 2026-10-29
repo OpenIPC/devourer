@@ -90,7 +90,10 @@ public:
   virtual void StartRxLoop(Action_ParsedRadioPacket packetProcessor) = 0;
 
   /* Ask a running StartRxLoop to exit (sets a flag; the caller then joins
-   * whatever thread runs StartRxLoop). Default no-op. */
+   * whatever thread runs StartRxLoop). Default no-op.
+   * Note: Covers the Init + StartRxLoop race window; the InitWrite +
+   * StartRxLoop-on-a-thread shape (DEVOURER_TX_WITH_RX=thread) operates outside
+   * this window and is out of scope. */
   virtual void StopRxLoop() {}
   virtual void SetMonitorChannel(SelectedChannel channel) = 0;
 

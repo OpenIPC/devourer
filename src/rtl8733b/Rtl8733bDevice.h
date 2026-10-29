@@ -146,6 +146,7 @@ private:
     return true;
   }
 
+  void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
   void bring_up_to_phy();
   bool configure_tx_power(SelectedChannel channel);
   /* Fill one [txdesc][frame] block at `out`. `agg_num` is the USB TX

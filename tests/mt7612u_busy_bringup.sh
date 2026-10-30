@@ -69,6 +69,18 @@ grep -q '^DEVOURER_MT7612U:BOOL=ON' "$BUILD/CMakeCache.txt" 2>/dev/null || {
   echo "INCONCLUSIVE: $BUILD was not configured with -DDEVOURER_MT7612U=ON"; exit 2; }
 # shellcheck source=tests/mt7612u_sta_lib.sh
 . "$ROOT/tests/mt7612u_sta_lib.sh"
+# The firmware the library will load: the first of FW_DIR,
+# /lib/firmware/mediatek and ./firmware that holds both blobs - the order and
+# the test of resolve_fw_dir (src/mt7612u/Mt7612uRadio.cpp), as
+# sta_client_onair.sh does. It must be readable: a host with compressed
+# firmware only would otherwise read as a DUT that "did not come up".
+fw_pick=""
+for d in "$FW_DIR" /lib/firmware/mediatek firmware; do
+  if [ -e "$d/mt7662_rom_patch.bin" ] && [ -e "$d/mt7662.bin" ]; then
+    fw_pick="$d"; break
+  fi
+done
+sta_fw_readable "${fw_pick:-$FW_DIR}" || exit 2
 sta_out_prepare || exit 2
 sta_lock_take || exit 2
 sta_pid_init dut peer

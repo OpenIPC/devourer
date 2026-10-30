@@ -660,7 +660,7 @@ A Realtek peer under `txdemo` floods the channel at zero gap, then the MT7612U
 is brought up `REPS` times under it with `rxdemo` and each bring-up is timed to
 its RX ring starting; one bring-up before the peer starts is the control. It
 guards the RXDCOC / EP 4 stall (`src/mt7612u/CLAUDE.md`, "MCU replies and
-EP 4"): on master a loaded bring-up took ~27 s instead of ~1 s. Needs a build
+EP 4"): without the drain a loaded bring-up took ~27 s instead of ~1 s. Needs a build
 with `-DDEVOURER_MT7612U=ON` and runs as root under `mt7612u_sta_lib.sh`'s rules
 (private `OUT`, one run per `OUT`, recorded-PID kills, both adapters handed
 back). A lighter peer makes a pass meaningless - the stall's odds fall with the

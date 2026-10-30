@@ -389,9 +389,10 @@ fi
 
 if [ "$realtek_sensor" != "1" ]; then
   echo "== SKIPPING the loaded arms: they were written for a MediaTek sensor"
-  echo "   brought up BEFORE the interferer and have not been re-run with it"
-  echo "   started second (its bring-up stall is fixed: src/mt7612u/CLAUDE.md,"
-  echo "   \"MCU replies and EP 4\"). Run those arms by hand:"
+  echo "   brought up BEFORE the interferer. It can start second (a busy channel"
+  echo "   no longer stalls its bring-up: src/mt7612u/CLAUDE.md, \"MCU replies"
+  echo "   and EP 4\"), but these arms have not been re-run that way. Run them"
+  echo "   by hand:"
   echo "     build/BusyWindowProbe --vid $SENSOR_VID --pid $SENSOR_PID \\"
   echo "       --channel $CHANNEL --mode window --reps 45 --rx &"
   echo "     # then start the flooder once it prints its first sample"

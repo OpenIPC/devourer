@@ -295,6 +295,7 @@ void RtlJaguar2Device::start_pwrtrack() {
     /* ~2 s cadence via steady_clock, polled in short slices so the dtor join
      * returns promptly on shutdown. */
     auto next = std::chrono::steady_clock::now();
+    uint64_t skipped = 0;
     while (!_pwrtrack_stop && !g_devourer_should_stop) {
       std::this_thread::sleep_for(std::chrono::milliseconds(200));
       if (std::chrono::steady_clock::now() < next)
@@ -308,11 +309,14 @@ void RtlJaguar2Device::start_pwrtrack() {
       int cck = -1, ofdm = -1, mcs7 = -1;
       _hal.txagc_shadow(cck, ofdm, mcs7);
       /* Same hazard as the DIG thread: a register read that throws under RX
-       * load must skip this tick, not terminate the process. */
+       * load must skip this tick, not terminate the process. Counted and
+       * rate-limited the same way. */
       try {
         _cal->pwr_track(ofdm);
       } catch (const std::exception &e) {
-        _logger->warn("Jaguar2 thermal track: tick skipped ({})", e.what());
+        if (skipped++ % 100 == 0)
+          _logger->warn("Jaguar2 thermal track: tick skipped after a failed "
+                        "register access ({}), {} so far", e.what(), skipped);
       }
     }
   });

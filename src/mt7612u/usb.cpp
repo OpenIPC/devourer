@@ -217,6 +217,14 @@ struct sync_xfer *sync_xfer_new(struct mt7612u_dev *d, size_t len)
 		delete x;
 		return nullptr;
 	}
+	/* A pooled transfer keeps its last actual_length, and libusb writes the
+	 * field only when a transfer completes - not when libusb_submit_transfer()
+	 * fails, as it does once the device has left the bus. sync_bulk() reads
+	 * it on every return but an abandon, so after a failed submit an IN read
+	 * reported the previous transfer's length and copied that many bytes from
+	 * its len-byte bounce buffer into the caller's: a 1428 B TX, the adapter
+	 * deauthorized, then a 64 B read wrote 1364 B past the end. */
+	x->t->actual_length = 0;
 	return x;
 }
 

@@ -72,9 +72,14 @@ budget, so a ~1 s bring-up took 27-34 s.
 why it lives on the device, not the ring). It drains again on a later timeout
 only if the previous drain moved data; all of one command's drains share one
 64-read budget (10 ms reads), so a command still costs at most its 3 s of
-reply reads plus 0.64 s. A drain ends on an empty read, a hard error or that
-budget — not on a timed-out read that moved bytes, since more may be queued
-behind them. A reply on time costs nothing; the measured late ones cost one
+reply reads plus 0.64 s. A drain ends on any error (a timeout included), an
+empty read or that budget. Bytes moved is not a reason to go on: on one host
+(libusb 1.0.30, kernel 6.18, xhci) a timed-out read of an idle EP 4 reports a
+full buffer with no data, and a drain that continued past it read its whole
+budget on every flush, ~2 s per bring-up; such a full-buffer timeout is not
+counted as data either. In `mcu_wait_resp()`, a drain that ended on a timeout
+with data is re-run on the next reply timeout, which covers a read cut short.
+A reply on time costs nothing; the measured late ones cost one
 drain each, during RXDCOC: 8.6–10.1 kB at 20 MHz, 15.8–17.3 kB at 40 MHz,
 with the same ~0.3 s on the bring-up either way (`docs/mt7612u.md`). The RX
 ring and the synchronous drain claim EP 4 under `io_lock`, the lock the

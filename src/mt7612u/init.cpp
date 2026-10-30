@@ -269,12 +269,19 @@ size_t mt_rx_flush(struct mt7612u_dev *d, int *reads_left)
 		int rc = mt_bulk(d, MT_EP_IN_PKT_RX, buf, sizeof buf, &n, 10);
 
 		(*left)--;
-		/* A read that times out can still have moved bytes, and then
-		 * more may be queued behind them: an empty read, a hard error or
-		 * the read budget ends the drain. */
-		if (n > 0)
+		/* Any error ends the drain, a timeout included: on one host a
+		 * timed-out read of an idle EP 4 reports n == len with no data,
+		 * so bytes moved is no reason to go on - continuing ran the whole
+		 * 64-read budget, 0.64 s, on every flush. Nor is such a read
+		 * counted: a read that really filled the buffer completes, so a
+		 * timeout reporting a full one is that artefact, and counting it
+		 * would make every mcu_wait_resp() drain look like data and
+		 * re-drain on each later reply timeout. A drain that ended on a
+		 * timeout with real data is re-run by mcu_wait_resp() on its next
+		 * reply timeout (ep4_last > 0), which covers a partial read. */
+		if (n > 0 && !(rc == LIBUSB_ERROR_TIMEOUT && n == (int)sizeof buf))
 			total += (size_t)n;
-		if (n == 0 || (rc && rc != LIBUSB_ERROR_TIMEOUT))
+		if (rc || n == 0)
 			break;
 	}
 	return total;

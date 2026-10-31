@@ -33,6 +33,7 @@
 #include "tsf_linfit.h"
 #include "TriggerParse.h"
 #include "caps_event.h"
+#include "poll_skip.h"
 #include "station_arm_env.h"
 #if defined(DEVOURER_HAVE_JAGUAR1)
 #include "jaguar1/RtlJaguarDevice.h"
@@ -1784,8 +1785,19 @@ int main(int argc, char **argv) {
            s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
       bool waited_on_gate = false;
+      devourer::PollSkips skips("DEVOURER_RX_BUSY_MS");
       while (!busy_emitter_stop.load()) {
-        const uint32_t armed = dev->ArmChannelBusy(g_rx_busy_ms * 1000u);
+        /* A failed arm is retried after a short nap and emits nothing (no
+         * window existed); a failed read is one window with no reading. */
+        uint32_t armed = 0;
+        try {
+          armed = dev->ArmChannelBusy(g_rx_busy_ms * 1000u);
+        } catch (const std::exception &e) {
+          skips.note(*logger, e);
+          for (uint32_t s = 0; s < 200 && !busy_emitter_stop.load(); s += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          continue;
+        }
         if (armed == 0) {
           if (!waited_on_gate)
             logger->info("DEVOURER_RX_BUSY_MS: arm refused (not brought up "
@@ -1806,7 +1818,14 @@ int main(int argc, char **argv) {
         }
         if (busy_emitter_stop.load())
           break;
-        const devourer::ChannelBusy b = dev->GetChannelBusy();
+        devourer::ChannelBusy b;
+        bool read_failed = false;
+        try {
+          b = dev->GetChannelBusy();
+        } catch (const std::exception &e) {
+          skips.note(*logger, e);
+          read_failed = true;
+        }
         devourer::Ev ev(*g_ev, "rx.busy");
         ev.t().f("armed_us", armed).f("valid", b.valid);
         if (b.valid_busy)
@@ -1820,6 +1839,8 @@ int main(int argc, char **argv) {
         ev.f("window_us", b.window_us)
             .f("own_tx", b.own_tx_in_window)
             .f("spoil", static_cast<int>(b.spoil));
+        if (read_failed)
+          ev.f("read_failed", 1);
       }
     });
   }
@@ -1837,6 +1858,7 @@ int main(int argc, char **argv) {
     IRadio *dev = rtlDevice;
     therm_emitter = std::thread([&therm_emitter_stop, dev, logger]() {
       bool warned = false;
+      devourer::PollSkips skips("DEVOURER_THERMAL_POLL_MS");
       while (!therm_emitter_stop.load()) {
         for (uint32_t slept = 0;
              slept < g_thermal_poll_ms && !therm_emitter_stop.load();
@@ -1844,7 +1866,13 @@ int main(int argc, char **argv) {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
         if (therm_emitter_stop.load())
           break;
-        const auto t = dev->GetThermalStatus();
+        devourer::ThermalStatus t;
+        try {
+          t = dev->GetThermalStatus();
+        } catch (const std::exception &e) {
+          skips.note(*logger, e);
+          continue;
+        }
         if (t.raw == 0 && !t.valid)
           continue; // backend not initialized yet, or no live meter
         devourer::Ev ev(*g_ev, "thermal");
@@ -1883,14 +1911,28 @@ int main(int argc, char **argv) {
     logger->info("DEVOURER_RX_ENERGY_MS={} — starting RX energy telemetry",
                  g_rx_energy_ms);
     IRtlRadio *dev = energy_dev;
-    energy_emitter = std::thread([&energy_emitter_stop, dev]() {
+    energy_emitter = std::thread([&energy_emitter_stop, dev, logger]() {
       auto nap = [&](uint32_t ms) {
         for (uint32_t s = 0; s < ms && !energy_emitter_stop.load(); s += 50)
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
       };
+      devourer::PollSkips skips("DEVOURER_RX_ENERGY_MS");
       nap(g_rx_energy_ms); /* let bring-up finish before the first read */
       while (!energy_emitter_stop.load()) {
-        RxEnergy e = dev->GetRxEnergy(true);
+        /* A failed read skips this interval's event; its frame aggregate is
+         * dropped with it, so the next event still covers one interval. */
+        RxEnergy e;
+        try {
+          e = dev->GetRxEnergy(true);
+        } catch (const std::exception &ex) {
+          skips.note(*logger, ex);
+          {
+            std::lock_guard<std::mutex> lk(g_rxagg_mu);
+            g_rxagg = RxAgg{};
+          }
+          nap(g_rx_energy_ms);
+          continue;
+        }
         RxAgg agg;
         {
           std::lock_guard<std::mutex> lk(g_rxagg_mu);
@@ -1990,7 +2032,14 @@ int main(int argc, char **argv) {
          * rx.energy/link.health events above (which use the
          * demo's own g_rxagg). */
         if (g_rxquality) {
-          devourer::RxQuality q = dev->GetRxQuality();
+          devourer::RxQuality q;
+          try {
+            q = dev->GetRxQuality();
+          } catch (const std::exception &ex) {
+            skips.note(*logger, ex);
+            nap(g_rx_energy_ms);
+            continue;
+          }
           devourer::Ev ev(*g_ev, "rx.quality");
           ev.f("verdict", q.label)
               .f("frames", q.frames)

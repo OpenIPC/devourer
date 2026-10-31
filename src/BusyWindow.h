@@ -90,6 +90,11 @@ public:
      * a period they never chose. Nothing is armed and nothing is disturbed. */
     if (window_us == 0)
       return 0;
+    /* Disarmed BEFORE the writes: each is a read-modify-write, and a read
+     * that throws part-way leaves the engine half-programmed. A window armed
+     * earlier must not survive that with this call's period: read() then
+     * returns no reading. */
+    armed_ = false;
     period_ = clm_period_for_us(window_us);
     arm_clm_only(regs, period_, set_bb);
     armed_ = true;

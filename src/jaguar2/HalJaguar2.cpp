@@ -692,6 +692,19 @@ void HalJaguar2::kfree_apply(uint8_t channel) {
   }
 }
 
+/* phydm_spur_calibration_8822b entry disables + dsde_init: clear the CSI mask
+ * bank and both notch enables. The full path runs it on every 8822B set;
+ * fast_retune runs it only when something is armed. */
+void HalJaguar2::notch_reset() {
+  _device.phy_set_bb_reg(0x087c, (1u << 13), 0x0);
+  _device.phy_set_bb_reg(0x0c20, (1u << 28), 0x0);
+  _device.phy_set_bb_reg(0x0e20, (1u << 28), 0x0);
+  for (uint16_t a = 0x880; a <= 0x89c; a += 4)
+    _device.rtw_write32(a, 0);
+  _device.phy_set_bb_reg(0x0874, 0x1, 0x0);
+  _notch_armed = false;
+}
+
 void HalJaguar2::spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw) {
   /* phydm_spur_calibration_8822b + phydm_dynamic_spur_det_eliminate port
    * (8822B only; CONFIG_8822B_SPUR_CALIBRATION is on in the CE vendor
@@ -704,14 +717,7 @@ void HalJaguar2::spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw) {
     return;
   const bool r2t2r = _ver.rf_2t2r != 0;
 
-  /* Entry disables + dsde_init: clear the CSI mask bank and both notch
-   * enables. */
-  _device.phy_set_bb_reg(0x087c, (1u << 13), 0x0);
-  _device.phy_set_bb_reg(0x0c20, (1u << 28), 0x0);
-  _device.phy_set_bb_reg(0x0e20, (1u << 28), 0x0);
-  for (uint16_t a = 0x880; a <= 0x89c; a += 4)
-    _device.rtw_write32(a, 0);
-  _device.phy_set_bb_reg(0x0874, 0x1, 0x0);
+  notch_reset();
 
   /* phydm_dsde_ch_idx: the spur-channel table. idx 16 = no spur here. */
   const bool g2 = channel <= 14;
@@ -801,7 +807,10 @@ void HalJaguar2::spur_calibration(uint8_t channel, uint8_t cch, uint8_t bw) {
   }
 
   /* phydm_dsde_nbi: CCA tweak + notch at the spur frequency (MHz). The spur
-   * frequency per channel/BW, from the vendor tables. */
+   * frequency per channel/BW, from the vendor tables. The CCA tweak lands
+   * even where no notch follows (f_int 0), so it alone marks the state armed
+   * for fast_retune to clear. */
+  _notch_armed = true;
   _device.phy_set_bb_reg(0x082c, 0xff000, 0x97);
   _device.phy_set_bb_reg(0x082c, 0xf000, 0x7);
   uint32_t f_int = 0;
@@ -896,6 +905,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   _last_rf_be = -1;
   _last_df18 = -1;
   _last_cck_key = -1;
+  _last_838_nib = -1;
   _fw_sw_pending = 0; /* the full set supersedes any in-flight fw switch */
 
   const uint8_t cch = central_ch(channel, bw, primary_ch_idx);
@@ -1111,35 +1121,18 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
     _device.phy_set_bb_reg(0x0e20, (1u << 31), n20);
   }
 
-  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds) --- col: 2G/5G x 1R/2R.
-   * RFE types 3/5/12/15/16/17/19 (external-FEM boards, incl. the T3U's
-   * rfe_type 3) take the cca_ifem_ccut_rfe table — devourer previously
-   * hardcoded the plain iFEM C-cut column for every board, leaving eFEM
-   * boards with mis-set carrier-sense thresholds (kernel-parity write-
-   * sequence diff). */
-  {
-    const int col = g2 ? (r2t2r ? 1 : 0) : (r2t2r ? 3 : 2);
-    static const uint32_t cca_ifem[3][4] = {
-        {0x75C97010, 0x75C97010, 0x75C97010, 0x75C97010}, /* 0x82c */
-        {0x79a0eaaa, 0x79A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
-        {0x87765541, 0x87746341, 0x87765541, 0x87746341}, /* 0x838 */
-    };
-    static const uint32_t cca_ifem_rfe[3][4] = {
-        {0x75da8010, 0x75da8010, 0x75da8010, 0x75da8010}, /* 0x82c */
-        {0x79a0eaaa, 0x97A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
-        {0x87765541, 0x86666341, 0x87765561, 0x86666361}, /* 0x838 */
-    };
-    const bool rfe_tab = rfe_type == 3 || rfe_type == 5 || rfe_type == 12 ||
-                         rfe_type == 15 || rfe_type == 16 || rfe_type == 17 ||
-                         rfe_type == 19;
-    const auto &cca = rfe_tab ? cca_ifem_rfe : cca_ifem;
-    _device.phy_set_bb_reg(0x082c, 0xffffffff, cca[0][col]);
-    _device.phy_set_bb_reg(0x0830, 0xffffffff, cca[1][col]);
-    _device.phy_set_bb_reg(0x0838, 0xffffffff, cca[2][col]);
-    /* 20 MHz DFS-channel CCA adjust (vendor tail). */
-    if (bw == 0 && !g2 && ((cch >= 52 && cch <= 64) || (cch >= 100 && cch <= 144)))
-      _device.phy_set_bb_reg(0x0838, 0xf0, 0x5);
-  }
+  /* --- phydm_ccapar_by_rfe_8822b (CCA thresholds) --- RFE types
+   * 3/5/12/15/16/17/19 (external-FEM boards, incl. the T3U's rfe_type 3) take
+   * the cca_ifem_ccut_rfe table, the rest the plain iFEM C-cut one (see
+   * cca_word). 0x838[7:4] carries the vendor's 20 MHz DFS-channel adjust
+   * (cca_838_nib), which fast_retune keeps in step. */
+  _cca_rfe_tab = rfe_type == 3 || rfe_type == 5 || rfe_type == 12 ||
+                 rfe_type == 15 || rfe_type == 16 || rfe_type == 17 ||
+                 rfe_type == 19;
+  _device.phy_set_bb_reg(0x082c, 0xffffffff, cca_word(0, g2));
+  _device.phy_set_bb_reg(0x0830, 0xffffffff, cca_word(1, g2));
+  _device.phy_set_bb_reg(0x0838, 0xffffffff,
+                         (cca_word(2, g2) & ~0xf0u) | (cca_838_nib(cch, bw) << 4));
 
   /* RX-path toggle (0x808 MASKBYTE0) to leave RX dead-zone, then IGI. rx_ant
    * = A+B (0x3) for 2T2R => 0x33 (CCK+OFDM both paths). */
@@ -1192,13 +1185,15 @@ void HalJaguar2::DumpCanary() {
    * 0x8c8[31] is narrowband ADC-buffer state, set on 5/10 MHz), RX DFIR
    * (0x948/0x94c/0xc20/0xe20), AGC index (0x958 8822B / 0xc1c 8821C), CCK pri
    * (0xa00), spur / CCK filter (0xa24/0xa28/0xaac), 8821C band block
-   * (0xa80/0xa84/0x814), RFE pins (0xcb0/0xcb4/0xcb8/0xca0/0xeb0/0xeb4/0xea0).
+   * (0xa80/0xa84/0x814), RFE pins (0xcb0/0xcb4/0xcb8/0xca0/0xeb0/0xeb4/0xea0),
+   * NBI notch / CSI mask (0x87c, 0x874, bank 0x880..0x89c).
    * MAC: CCK check (0x454). RF via the direct read window: 0x18 channel,
    * 0xbe VCO band, 0xdf, 0xb8. IGI (0xc50/0xe50) excluded — live. */
   static const uint16_t bb_canary[] = {
       0x808, 0x814, 0x82c, 0x830, 0x838, 0x860, 0x8ac, 0x8c4, 0x8c8, 0x8f0,
       0x948, 0x94c, 0x958, 0xa00, 0xa24, 0xa28, 0xaac, 0xa80, 0xa84,
-      0xc1c, 0xc20, 0xe20, 0xca0, 0xcb0, 0xcb4, 0xcb8, 0xea0, 0xeb0, 0xeb4};
+      0xc1c, 0xc20, 0xe20, 0xca0, 0xcb0, 0xcb4, 0xcb8, 0xea0, 0xeb0, 0xeb4,
+      0x874, 0x87c, 0x880, 0x884, 0x888, 0x88c, 0x890, 0x894, 0x898, 0x89c};
   static const uint16_t mac_canary[] = {0x454};
   static const uint8_t rf_canary[] = {0x18, 0xb8, 0xbe, 0xdf};
   const bool r2t2r = _ver.rf_2t2r != 0;
@@ -1264,6 +1259,33 @@ uint32_t HalJaguar2::cfo_fc_5g(uint8_t cch) {
   if (cch <= 117)
     return 0x452;
   return 0x412;
+}
+
+/* phydm_ccapar_by_rfe_8822b threshold word: row 0/1/2 = 0x82c/0x830/0x838,
+ * column 2G/5G x 1R/2R, table by RFE type (_cca_rfe_tab, set by the full
+ * path). */
+uint32_t HalJaguar2::cca_word(int row, bool g2) const {
+  static const uint32_t cca_ifem[3][4] = {
+      {0x75C97010, 0x75C97010, 0x75C97010, 0x75C97010}, /* 0x82c */
+      {0x79a0eaaa, 0x79A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
+      {0x87765541, 0x87746341, 0x87765541, 0x87746341}, /* 0x838 */
+  };
+  static const uint32_t cca_ifem_rfe[3][4] = {
+      {0x75da8010, 0x75da8010, 0x75da8010, 0x75da8010}, /* 0x82c */
+      {0x79a0eaaa, 0x97A0EAAC, 0x79a0eaaa, 0x79a0eaaa}, /* 0x830 */
+      {0x87765541, 0x86666341, 0x87765561, 0x86666361}, /* 0x838 */
+  };
+  const bool r2t2r = _ver.rf_2t2r != 0;
+  const int col = g2 ? (r2t2r ? 1 : 0) : (r2t2r ? 3 : 2);
+  return (_cca_rfe_tab ? cca_ifem_rfe : cca_ifem)[row][col];
+}
+
+/* 0x838[7:4]: the table value, or 0x5 at 20 MHz on a DFS channel (the
+ * vendor's phydm_ccapar_by_rfe_8822b tail). */
+uint32_t HalJaguar2::cca_838_nib(uint8_t cch, uint8_t bw) const {
+  if (bw == 0 && ((cch >= 52 && cch <= 64) || (cch >= 100 && cch <= 144)))
+    return 0x5;
+  return (cca_word(2, cch <= 14) >> 4) & 0xf;
 }
 
 bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
@@ -1437,8 +1459,35 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     uint8_t pri = 0;
     if (bw == 1)
       pri = (primary_ch_idx == 2 /*HAL_PRIME_CHNL_OFFSET_UPPER*/) ? 1 : 2;
+    /* A notch / CSI mask / dsde CCA tweak belongs to the channel it was
+     * armed on; clear it before the switch, while the BB is still on the
+     * source channel and the RF bus is idle (the sw path does the same on
+     * its hop). The firmware never arms one. */
+    if (_notch_armed) {
+      notch_reset();
+      _device.rtw_write32(0x082c, cca_word(0, cch <= 14));
+    }
     fw_channel_switch(cch, pri, bw);
     prof.mark("fw");
+    /* The firmware writes its own 0x838 CCA word during the switch — on a
+     * DFS channel at 20 MHz that is 0x86666341 where the vendor driver
+     * (and the full path) land 0x86666351 — so the DFS nibble is re-applied
+     * after it. Written straight after the H2C the host's word loses to
+     * the firmware's; 1 ms later it holds (8822BU, 36 -> 52, 3/3 at 1, 2
+     * and 3 ms). Host-side cost only: the switch itself is the firmware's,
+     * dead air is unchanged. 0x82c / 0x830 the firmware leaves alone.
+     * 8822B only: the CCA table is that die's, the 8821C's 0x838 is its
+     * PHY-table value and its fw hop is unmeasured. */
+    if (_variant == ChipVariant::C8822B) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      const int nib = static_cast<int>(cca_838_nib(cch, bw));
+      const uint32_t w838 = (cca_word(2, cch <= 14) & ~0xf0u) |
+                            (static_cast<uint32_t>(nib) << 4);
+      _device.rtw_write32(0x0838, w838);
+      _cw_838 = w838;
+      _last_838_nib = nib;
+      prof.mark("cca");
+    }
     /* The firmware rewrote the channel-keyed state (AGC table, fc, RF 0xBE,
      * band) under the sw caches, on a same-band hop too — invalidate them
      * all, or a later sw hop that maps to a cached value skips its write and
@@ -1476,8 +1525,10 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     _rf18_cache = rf_read(0, 0x18);
     _cw_agc = _device.rtw_read32(c8821 ? 0x0c1c : 0x0958);
     _cw_fc = _device.rtw_read32(0x0860);
-    if (!c8821)
+    if (!c8821) {
       _cw_rfbe = rf_read(0, 0xbe);
+      _cw_838 = _device.rtw_read32(0x0838);
+    }
     _cw_primed = true;
   }
   prof.mark("prime");
@@ -1518,6 +1569,23 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
                  (static_cast<uint32_t>(rf_be) << 15);
       rf_write(0, 0xbe, _cw_rfbe);
       _last_rf_be = rf_be;
+    }
+    /* 0x838[7:4]: the 20 MHz DFS-channel CCA adjust the full path applies
+     * after its CCA table — on a same-band hop only this nibble moves. */
+    const int nib838 = static_cast<int>(cca_838_nib(cch, bw));
+    if (nib838 != _last_838_nib) {
+      _cw_838 = (_cw_838 & ~0xf0u) | (static_cast<uint32_t>(nib838) << 4);
+      _device.rtw_write32(0x0838, _cw_838);
+      _last_838_nib = nib838;
+    }
+    /* A notch / CSI mask belongs to the channel it was armed on: the full
+     * path's spur_calibration resets it on every set, so a hop clears it
+     * (and the dsde 0x82c CCA tweak). A hop never arms one — the PSD scan
+     * costs tens of ms — so a spur channel reached by a fast hop runs
+     * un-notched until the next full set. */
+    if (_notch_armed) {
+      notch_reset();
+      _device.rtw_write32(0x082c, cca_word(0, g2));
     }
     const int df18 = (cch == 144) ? 1 : 0;
     if (df18 != _last_df18) {

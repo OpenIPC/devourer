@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <stdexcept>
 #include <vector>
 
 using devourer::BusySource;
@@ -53,13 +54,24 @@ struct MockBb {
   bool clm_ready = true;
   /* The register map under test, so the JGR3 addresses can be exercised too. */
   NhmRegs map = nhm_regs_11ac();
+  /* A failed control transfer, the way the transport reports one: a read
+   * throws. `fail_set_bb_at` is the index of the set_bb call whose
+   * read-modify-write throws on its read (-1 = none); `fail_reads` makes
+   * every report read throw. */
+  long fail_set_bb_at = -1;
+  bool fail_reads = false;
 
   uint32_t read32(uint16_t addr) {
+    if (fail_reads)
+      throw std::runtime_error("read failed");
     if (addr == map.clm)
       return (clm_ready ? (1u << 16) : 0u) | clm_ticks;
     return regs[addr];
   }
   void set_bb(uint16_t addr, uint32_t mask, uint32_t value) {
+    if (fail_set_bb_at >= 0 &&
+        static_cast<long>(writes.size()) == fail_set_bb_at)
+      throw std::runtime_error("set_bb read failed");
     int shift = 0;
     while (shift < 32 && !((mask >> shift) & 1u))
       shift++;
@@ -448,6 +460,52 @@ int main() {
     bb.clm_ready = true;
     const ChannelBusy b = w.read(jgr3, 0, bb.rd());
     check("jgr3: reading", b.busy_pct, 25);
+  }
+
+  /* --- a failed register access: the caller catches and polls on, so the
+   * window it leaves behind must still answer honestly. --- */
+  {
+    /* A re-arm that throws part-way over a still-running window leaves
+     * NOTHING armed: the engine is half-programmed, and the earlier window
+     * must not survive with this call's period. */
+    MockBb bb;
+    ClmWindow w;
+    w.arm(regs, 240000, 0, bb.wr());
+    bb.fail_set_bb_at = static_cast<long>(bb.writes.size()) + 2;
+    bool threw = false;
+    try {
+      w.arm(regs, 1000, 0, bb.wr());
+    } catch (const std::exception &) {
+      threw = true;
+    }
+    check("failed arm: the throw reaches the caller", threw, 1);
+    check("failed arm: nothing left armed", w.armed(), 0);
+    bb.fail_set_bb_at = -1;
+    bb.clm_ticks = 30000;
+    bb.clm_ready = true;
+    const ChannelBusy b = w.read(regs, 0, bb.rd());
+    check("failed arm: no reading", b.valid, 0);
+  }
+  {
+    /* A read that throws changes nothing: the window is still armed, and
+     * the next read gets it. */
+    MockBb bb;
+    ClmWindow w;
+    w.arm(regs, 240000, 0, bb.wr());
+    bb.clm_ticks = 30000;
+    bb.clm_ready = true;
+    bb.fail_reads = true;
+    bool threw = false;
+    try {
+      (void)w.read(regs, 0, bb.rd());
+    } catch (const std::exception &) {
+      threw = true;
+    }
+    check("failed read: the throw reaches the caller", threw, 1);
+    check("failed read: still armed", w.armed(), 1);
+    bb.fail_reads = false;
+    const ChannelBusy b = w.read(regs, 0, bb.rd());
+    check("failed read: the retry reads the window", b.busy_pct, 50);
   }
 
   if (g_fail == 0)

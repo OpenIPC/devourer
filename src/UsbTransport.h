@@ -295,12 +295,16 @@ template <typename T> T UsbTransport::ctrl_read(uint16_t reg_num) {
                    reg_num);
   }
   _ctrl_xfers.fetch_add(1, std::memory_order_relaxed);
-  if (libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ, 5, reg_num,
-                              0, (uint8_t *)&data, sizeof(T),
-                              USB_TIMEOUT) == sizeof(T)) {
+  const int rc = libusb_control_transfer(_dev_handle, REALTEK_USB_VENQT_READ,
+                                         5, reg_num, 0, (uint8_t *)&data,
+                                         sizeof(T), USB_TIMEOUT);
+  if (rc == static_cast<int>(sizeof(T)))
     return data;
-  }
-  _logger->error("rtw_read({:04x}), sizeof(T) = {}", reg_num, sizeof(T));
+  /* The rc is the diagnosis: LIBUSB_ERROR_PIPE is the device stalling the
+   * request (it answers at once), LIBUSB_ERROR_TIMEOUT a request it never
+   * answered, a non-negative rc a short read. */
+  _logger->error("rtw_read({:04x}), sizeof(T) = {}, rc = {} ({})", reg_num,
+                 sizeof(T), rc, rc < 0 ? libusb_error_name(rc) : "short read");
   throw std::ios_base::failure("rtw_read");
   return 0;
 }

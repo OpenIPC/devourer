@@ -45,10 +45,26 @@ Jaguar1 (shared `PhyTableLoader`).
   8812BU-class unit the full path's canary registers at four filled
   targets (20/40 MHz) match across two predecessors each. Full-vs-fast
   canary parity (RX-only) holds across the gap at 20/40 MHz on both units
-  and at 80 MHz on the second, except the 20 MHz DFS CCA tweak in
-  `0x838[7:4]`, which `fast_retune` never rewrites. A firmware hop
-  invalidates these write-on-change caches, same-band hops included; that,
-  the firmware hop itself and the 8821C are untested.
+  and at 80 MHz on the second. `fast_retune` keeps the 20 MHz DFS CCA
+  tweak in `0x838[7:4]` in step (write-on-change, same cache family) and
+  clears a notch / CSI mask / dsde CCA tweak that a full set's
+  `spur_calibration` or the `DEVOURER_RX_NBI` / `_CSI_MASK` knobs armed —
+  it never arms one, so a spur channel reached by a fast hop runs
+  un-notched until the next full set (8822BU: 83 dwells at 20 MHz over
+  36..165 incl. 52/64/100/117/144 and 66 at 40 MHz with zero fast-vs-full
+  differences; the knob-armed registers 0x874/0x87c/0x880 and 0xc20/0xe20
+  [28] read clear on the hop target; on a day the PSD at 5760 MHz crossed
+  threshold, the full path armed the dsde CCA tweak in `0x82c` on every
+  40 MHz set at ch153 and a fast hop onto 153 carried none, 10/10 dwells —
+  the asymmetry above, measured). A firmware hop
+  invalidates these write-on-change caches, same-band hops included. The
+  firmware also writes its own `0x838` CCA word during the switch (on ch52
+  at 20 MHz `0x86666341`, where the vendor driver and the full path land
+  `0x86666351`), so the fw hop re-applies the DFS nibble 1 ms after the
+  H2C: written straight after it the host's word loses to the firmware's,
+  at 1 ms it holds (8822BU, 36 -> 52, 3/3 at 1, 2 and 3 ms; `0x82c` /
+  `0x830` the firmware leaves alone). Host-side cost only, dead air is
+  the firmware's. The 8821C is untested.
 - **Firmware channel switch** (H2C 0x1D `SINGLE_CHANNELSWITCH_V2`,
   `fw_channel_switch` + the `fastretune_fw` knob; both Jaguar2 dies — the
   path is variant-generic, 8822B on-air-validated, 8821C code-covered
@@ -78,6 +94,24 @@ Jaguar1 (shared `PhyTableLoader`).
   one control read a minute failed while the chip worked on, and an unguarded
   `GetTxDmaStatus` poll killed that AP at minute 9. The poller contract is at
   `IRtlRadio::GetTxDmaStatus`.
+- **Under co-channel saturation, a failed 8812BU register read is the device
+  stalling the request.** One 8812BU at USB 3, ch 149 HT40+, an 8812EU 50 cm
+  away injecting MCS1/40 at saturation (-10 dB offset, ~1.8k frames/s, CLM
+  busy ~83%): every failure is `LIBUSB_ERROR_PIPE` in ~100 µs - no
+  timeouts, no reads slower than 5 ms - on every address sampled (MAC
+  0x0100, BB config 0x9a4/0xa2c/0xb58/0xc50, BB report 0xf08/0xf48, the RF
+  window 0x2908). With DIG plus a 1 s busy window and thermal poll that is
+  1-6 failures per 90 s run; adding a 5 ms busy window and 50 ms thermal
+  poll, 23-26 per 60 s. An immediate re-read, from a throwaway probe patch that is
+  not in the tree, succeeded 6/6 in one 90 s run. Nothing retries: neither
+  `UsbTransport::ctrl_read` nor, by default, the vendor driver
+  (`MAX_USBCTRL_VENDORREQ_TIMES` is 1 without `CONFIG_VENDOR_REQ_RETRY`).
+  Counterparts: zero failures in 45 s with the injector off (ambient, busy
+  ~2%); one in 60 s at MCS5/40 (busy ~68%); zero in 60 s each at MCS1/20
+  and 6M/20 - but the 40 MHz witness's CLM read those at only 6% / 29% busy,
+  so 20 vs 40 MHz and airtime are not separated. The vendor's 0x4E0 write
+  after an always-on-section access (`usbctrl_vendorreq`, rtw88
+  `rtw_usb_reg_sec`) is not ported and was not tested as a cause.
 
 ## TX power
 

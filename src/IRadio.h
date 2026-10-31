@@ -772,7 +772,17 @@ public:
    * A spoiled or completed window is consumed by
    * the read; a not-yet-elapsed one stays armed, so the caller reads again
    * at the end of its dwell instead of re-arming. Single control thread, like
-   * every other control-plane entry point. */
+   * every other control-plane entry point.
+   *
+   * On the Realtek USB backends a failed register read throws
+   * std::ios_base::failure out of either call. A read that fails inside the
+   * arm leaves nothing armed, so the caller re-arms rather than reads: with
+   * nothing armed, GetChannelBusy falls back to its sampled path (a ~2 ms
+   * reading, or none where that path is not ported). A
+   * failed read of the window leaves it as it was. A failed write is not
+   * reported at all, so an arm can succeed over an engine it did not fully
+   * program. A poller catches, skips that window and carries on - rxdemo's
+   * DEVOURER_RX_BUSY_MS thread is the reference (examples/common/poll_skip.h). */
   virtual uint32_t ArmChannelBusy(uint32_t window_us) {
     (void)window_us;
     return 0;

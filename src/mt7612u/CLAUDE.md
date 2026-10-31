@@ -26,10 +26,8 @@ Two facts that measurement added. First, the reading **requires a running
 receiver**: with RX down the idle timer still advances, so busy+idle is
 non-zero and the ratio is a perfectly plausible 0% — a fabricated zero that a
 channel ranker reads as "emptiest". `GetChannelBusy` and `ArmChannelBusy` both
-refuse unless `_rx_active`. Second, bring-up does not reliably complete while
-the channel is already saturated (the arm then never becomes available, and the
-MCU times out), so in a two-adapter test bring this one up BEFORE the
-interferer.
+refuse unless `_rx_active`. Second, the adapter can be brought up while an
+interferer already runs (one peer measured): "MCU replies and EP 4" below.
 
 `ArmChannelBusy` here resets the timers and the interval mark through
 `mt7612u_ch_time_arm` — NOT `mt7612u_link_stats_start`, which would also clear
@@ -55,6 +53,44 @@ frames in 10 s) was never entered, and whether the poll disturbs gain tracking
 submits 3500 fps host-side while an independent witness decodes none of it.
 `DEVOURER_MT7612U_PHY_TICK=0` is the control arm's switch; harness shape in
 the `mt7612u_phy_tick` doc comment.
+
+## MCU replies and EP 4
+
+Data parked in the RX bulk endpoint (EP 4) holds back the MCU's replies on
+EP 5: with EP 4 undrained a command's reply does not arrive, and every reply of
+the burst then appears within ~7 ms of the first EP 4 read. This is reachable
+before any RX ring exists. During the RXDCOC calibration of a channel set
+(`CMD_CALIBRATION_OP`, `MCU_CAL_RXDCOC`), received data reaches EP 4 while
+`MT_MAC_SYS_CTRL` reads 0 (MAC RX and TX off) and the USB RX bulk enable
+(`MT_USB_U3DMA_CFG` bit 22) is set; the one read decoded was a data frame from
+the peer's address. What in the calibration lets it through is not
+established. Undrained, RXDCOC and every command after it ran out the 3 s reply
+budget, so a ~1 s bring-up took 27-34 s.
+
+`mcu_wait_resp()` therefore drains EP 4 on a 300 ms timeout, and only while
+`mt7612u_dev::ep4_owner` says nobody else reads it (the field's comment says
+why it lives on the device, not the ring). It drains again on a later timeout
+only if the previous drain moved data; all of one command's drains share one
+64-read budget (10 ms reads), so a command still costs at most its 3 s of
+reply reads plus 0.64 s. A drain ends on any error (a timeout included), an
+empty read or that budget. Bytes moved is not a reason to go on: on one host
+(libusb 1.0.30, kernel 6.18, xhci) a timed-out read of an idle EP 4 reports a
+full buffer with no data, and a drain that continued past it read its whole
+budget on every flush, ~2 s per bring-up; such a full-buffer timeout is not
+counted as data either. In `mcu_wait_resp()`, a drain that ended on a timeout
+with data is re-run on the next reply timeout, which covers a read cut short.
+A reply on time costs nothing; the measured late ones cost one
+drain each, during RXDCOC: 8.6–10.1 kB at 20 MHz, 15.8–17.3 kB at 40 MHz,
+with the same ~0.3 s on the bring-up either way (`docs/mt7612u.md`). The RX
+ring and the synchronous drain claim EP 4 under `io_lock`, the lock the
+drain's owner check runs under, and a failed claim refuses to start either
+one (before `mt_mac_start` writes a register), so the MCU-wait drain never
+shares EP 4 with them. The teardown and recovery flushes (`mt_mac_stop`,
+`mt_init_hardware`, `mt_recover_usb`) do not consult the owner; their
+callers order them after the ring is reaped. The ten-read reply budget
+above it predates this and is probably the same symptom; it was not re-measured.
+Measurements and their limits: `docs/mt7612u.md`, "Bring-up on a busy channel";
+reproducer `tests/mt7612u_busy_bringup.sh`.
 
 ## TX retries
 

@@ -249,21 +249,42 @@ static void wcid_and_key_clear(struct mt7612u_dev *d)
 }
 
 /*
- * Drain and discard whatever is sitting in the RX bulk endpoint. The MAC will
- * happily fill its RX pool with ambient frames the moment RX is enabled, and
- * nothing else in this HAL reads EP 4 unless the caller asked for RX - a full
- * pool is the leading suspect for the chip wedging after repeated TX cycles
- * (see BRINGUP-RESULTS.md). Cheap insurance either way.
+ * Drain and discard whatever is sitting in the RX bulk endpoint, and return
+ * how many bytes that was. The MAC will happily fill its RX pool with ambient
+ * frames the moment RX is enabled, and nothing reads EP 4 unless the caller
+ * asked for RX - a full pool is the leading suspect for the chip wedging after
+ * repeated TX cycles (see BRINGUP-RESULTS.md). Cheap insurance either way.
+ * mcu_wait_resp() also calls it, but only while d->ep4_owner says nobody else
+ * reads EP 4.
  */
-void mt_rx_flush(struct mt7612u_dev *d)
+size_t mt_rx_flush(struct mt7612u_dev *d, int *reads_left)
 {
 	uint8_t buf[4096];
-	int n;
+	size_t total = 0;
+	int own = 64;
+	int *left = reads_left ? reads_left : &own;
 
-	for (int i = 0; i < 64; i++) {
-		if (mt_bulk(d, MT_EP_IN_PKT_RX, buf, sizeof buf, &n, 10) || n == 0)
+	while (*left > 0) {
+		int n = 0;
+		int rc = mt_bulk(d, MT_EP_IN_PKT_RX, buf, sizeof buf, &n, 10);
+
+		(*left)--;
+		/* Any error ends the drain, a timeout included: on one host a
+		 * timed-out read of an idle EP 4 reports n == len with no data,
+		 * so bytes moved is no reason to go on - continuing ran the whole
+		 * 64-read budget, 0.64 s, on every flush. Nor is such a read
+		 * counted: a read that really filled the buffer completes, so a
+		 * timeout reporting a full one is that artefact, and counting it
+		 * would make every mcu_wait_resp() drain look like data and
+		 * re-drain on each later reply timeout. A drain that ended on a
+		 * timeout with real data is re-run by mcu_wait_resp() on its next
+		 * reply timeout (ep4_last > 0), which covers a partial read. */
+		if (n > 0 && !(rc == LIBUSB_ERROR_TIMEOUT && n == (int)sizeof buf))
+			total += (size_t)n;
+		if (rc || n == 0)
 			break;
 	}
+	return total;
 }
 
 /* The value every station cell measured; the named bits must spell it. */
@@ -284,11 +305,31 @@ int mt_mac_start(struct mt7612u_dev *d, int enable_rx)
 		    "mt7612u_rx_start() first, or pass MT_RX_DRAIN_SYNC");
 		return -1;
 	}
+	/* SYNC claims EP 4 before any register is touched: a ring already
+	 * reading it would share it with this thread's mt_rx_one(), and a
+	 * refusal must leave that ring's receiver and filter as they are. SYNC
+	 * is already ours on a repeated start. Under io_lock, as the ring's
+	 * claim is: mcu_wait_resp() holds it from its owner check through its
+	 * drain, so the claim cannot land in between. */
+	bool claimed_now = false;
+	if (enable_rx == MT_RX_DRAIN_SYNC) {
+		std::lock_guard<std::recursive_mutex> lk(d->io_lock);
+		int owner = MT_EP4_NONE;
+		claimed_now = d->ep4_owner.compare_exchange_strong(owner, MT_EP4_SYNC);
+		if (!claimed_now && owner != MT_EP4_SYNC) {
+			ERR("mac_start(MT_RX_DRAIN_SYNC) while an RX ring owns EP 4");
+			return -1;
+		}
+	}
 	mt_wr(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_TX);
 	if (!mt_poll(d, MT_WPDMA_GLO_CFG,
 	             MT_WPDMA_GLO_CFG_TX_DMA_BUSY | MT_WPDMA_GLO_CFG_RX_DMA_BUSY,
 	             0, 200000)) {
 		ERR("mac_start: WPDMA stayed busy");
+		if (claimed_now) {	/* the receiver never came on: nothing to own */
+			int sync = MT_EP4_SYNC;
+			d->ep4_owner.compare_exchange_strong(sync, MT_EP4_NONE);
+		}
 		return -1;
 	}
 	mt_wr(d, MT_RX_FILTR_CFG, MT_RX_FILTR_CFG_MANAGED);
@@ -317,6 +358,8 @@ void mt_mac_rx_disable(struct mt7612u_dev *d)
 {
 	if (!d || !d->h) return;
 	mt_clear(d, MT_MAC_SYS_CTRL, MT_MAC_SYS_CTRL_ENABLE_RX);
+	int sync = MT_EP4_SYNC;	/* a ring stays the owner until mt_async_stop() */
+	d->ep4_owner.compare_exchange_strong(sync, MT_EP4_NONE);
 }
 
 int mt_mac_stop(struct mt7612u_dev *d)
@@ -345,6 +388,8 @@ int mt_mac_stop(struct mt7612u_dev *d)
 	}
 	if (!mt_poll(d, MT_MAC_STATUS, MT_MAC_STATUS_RX, 0, 200000))
 		WARN("MAC RX failed to stop");
+	int sync = MT_EP4_SYNC;	/* a ring stays the owner until mt_async_stop() */
+	d->ep4_owner.compare_exchange_strong(sync, MT_EP4_NONE);
 
 	mt_wr(d, MT_TX_RTS_CFG, rts_cfg);
 	return 0;

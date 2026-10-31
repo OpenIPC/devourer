@@ -654,6 +654,18 @@ One adapter is enough to verify the claim; the second only buys another unit
 and the wall-clock. A run can end with no verdict (rc 3) when the wrap lands in
 the other gap — that is a re-run, which the script does once, not a defect.
 
+### `mt7612u_busy_bringup.sh`: MT7612U bring-up on a channel already in use
+
+A Realtek peer under `txdemo` floods the channel at zero gap, then the MT7612U
+is brought up `REPS` times under it with `rxdemo` and each bring-up is timed to
+its RX ring starting; one bring-up before the peer starts is the control. It
+guards the RXDCOC / EP 4 stall (`src/mt7612u/CLAUDE.md`, "MCU replies and
+EP 4"): without the drain a loaded bring-up took ~27 s instead of ~1 s. Needs a build
+with `-DDEVOURER_MT7612U=ON` and runs as root under `mt7612u_sta_lib.sh`'s rules
+(private `OUT`, one run per `OUT`, recorded-PID kills, both adapters handed
+back). A lighter peer makes a pass meaningless - the stall's odds fall with the
+peer's load; numbers in `docs/mt7612u.md`, "Bring-up on a busy channel".
+
 ## Supported DUTs
 
 Listed in `SUPPORTED_DUTS` at the top of `regress.py`. Extend the dict

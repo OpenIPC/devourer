@@ -476,6 +476,13 @@ struct AdapterCaps {
   bool hw_injected_mgmt_txtsf = false;
   bool tsf_write_ok = false;
   bool tbtt_follows_tsf = false;
+  /* beacon_backoff_ctl: IRadio::SetBeaconBackoff can turn the hardware
+   * beacon's EDCA random backoff off, so a beacon leaves a fixed AIFS after
+   * its TBTT instead of AIFS + 0..CW random slots. Kestrel: the vendor/default
+   * beacon queue is ecw_min 2 / ecw_max 3, AIFS 25 us, measured on an
+   * RTL8852CE as departures at exactly 22/30/39/48 us after TBTT (~equal
+   * shares); with the backoff off, 568/569 beacons left at 22 us. */
+  bool beacon_backoff_ctl = false;
   /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
    * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
    * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT

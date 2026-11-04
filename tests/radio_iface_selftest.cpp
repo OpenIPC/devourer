@@ -99,6 +99,8 @@ int main() {
   {
     uint64_t t = 0, f = 0;
     check(!r->ReadTsfAndFreeRun(t, f), "ReadTsfAndFreeRun default reports unsupported");
+    check(!r->SetBeaconBackoff(false), "SetBeaconBackoff default refuses");
+    check(!r->GetAdapterCaps().beacon_backoff_ctl, "beacon_backoff_ctl default is false");
   }
   check(!r->GetAdapterCaps().tsf_write_ok, "tsf_write_ok default is false");
 

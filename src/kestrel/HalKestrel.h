@@ -639,6 +639,11 @@ private:
   uint8_t _cur_band_type = 1; /* band of the last set_channel (for FastRetune) */
 
 public:
+  /* Beacon-queue EDCA: random = the vendor CW 3..7 (ecw 2/3) + AIFS 25 us;
+   * !random = CW 0, same AIFS. Writes now and is re-applied by every
+   * scheduler_init, so it survives a re-init. */
+  bool set_beacon_backoff(bool random); /* false: write failed, setting unchanged */
+
   /* RF calibration at bring-up: the vendored halrf DACK + RX-DCK (both chips;
    * MSBK/DADCK/biasK included). On the 8852B the RF 0x0/0x1/0x5 registers are
    * saved/restored around the cal so the operational radio state survives
@@ -679,6 +684,7 @@ public:
   RtlAdapter _device;
   Logger_t _logger;
   ChipVariant _variant;
+  bool _bcn_backoff_random = true; /* set_beacon_backoff, re-applied by scheduler_init */
   KestrelFw _fw; /* persistent: owns the CH12 H2C transport + IO-offload */
   bool _pcie = false; /* !_device.is_usb(); declared after _device on purpose:
                        * the mem-initializer reads it */

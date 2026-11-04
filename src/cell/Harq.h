@@ -16,17 +16,19 @@
  * Sender rules (HarqSender):
  *   ACK   — a seq < feedback.base, or one whose bitmap bit is set.
  *   NACK  — an in-flight seq below the highest seq the feedback shows
- *           received: a later frame got through, this one did not. Only an
- *           attempt at least `nack_min_age_sf` superframes older than the
- *           report counts (the report may predate a retransmission still in
- *           flight: a UE beacon update lands 1-2 beacons late).
+ *           received: a later frame got through, this one did not. Judged by
+ *           when the UE GENERATED the report (HarqFeedback::gen_sf), not when
+ *           it arrived: only an attempt at least `nack_min_age_sf`
+ *           superframes older than the report counts, so a delayed report
+ *           that predates a retransmission never NACKs it.
  *   timeout — no ACK within `timeout_sf` superframes of its last attempt.
  *   A NACKed or timed-out seq is due for retransmission; due retransmissions
  *   go before new data, oldest first. After `max_attempts` it is dropped
  *   (counted) and `low` moves past it.
- *   The in-flight seq span (newest - oldest unresolved) stays below 32, the
- *   feedback bitmap, so a report always covers every in-flight seq; when the
- *   span is full only retransmissions are sent.
+ *   The in-flight seq span (newest - oldest unresolved) stays <= max_span
+ *   (at most 31: the newest is then bit 30 of a report based at the oldest),
+ *   so a report always covers every in-flight seq; when the span is full only
+ *   retransmissions are sent.
  * Receiver rules (HarqReceiver): duplicate suppression (a seq below base or
  * already in the bitmap is not delivered again), and `low` advances base past
  * abandoned gaps.
@@ -45,10 +47,12 @@ constexpr uint32_t kHarqProcesses = 8;
 constexpr uint32_t kHarqWindow = 32; /* bitmap width = max in-flight span */
 
 /* What a UE reports: all seq < base received (or abandoned); bit i of bitmap
- * = seq base + 1 + i received (seq == base is, by definition, missing). */
+ * = seq base + 1 + i received (seq == base is, by definition, missing).
+ * gen_sf: the (DU) superframe the UE generated the report in. */
 struct HarqFeedback {
   uint32_t base = 0;
   uint32_t bitmap = 0;
+  uint64_t gen_sf = 0;
   bool operator==(const HarqFeedback &) const = default;
 };
 
@@ -84,7 +88,8 @@ public:
     bitmap_ |= bit;
     return true;
   }
-  HarqFeedback feedback() const { return {base_, bitmap_}; }
+  /* The report as of superframe `sf` (the UE's view of the DU grid). */
+  HarqFeedback feedback(uint64_t sf) const { return {base_, bitmap_, sf}; }
   bool started() const { return init_; }
 
 private:
@@ -110,8 +115,8 @@ private:
 struct HarqConfig {
   int max_attempts = 4;   /* first transmission + 3 retransmissions */
   int timeout_sf = 3;     /* superframes without an ACK before a retransmission */
-  int nack_min_age_sf = 2; /* a NACK applies to attempts this much older than the report */
-  uint32_t max_span = kHarqWindow - 1; /* newest - oldest unresolved seq, < 32 */
+  int nack_min_age_sf = 1; /* a NACK applies to attempts this much older than the report */
+  uint32_t max_span = kHarqWindow - 1; /* max newest - oldest unresolved seq (<= 31) */
 };
 
 struct HarqTx {
@@ -152,7 +157,8 @@ public:
         return HarqTx{e.seq, e.seq % kHarqProcesses, low(), e.attempts, true};
       }
     }
-    if (!have_new || next_seq_ - low() >= cfg_.max_span)
+    /* max_span is the largest permitted newest - oldest difference */
+    if (!have_new || next_seq_ - low() > cfg_.max_span)
       return std::nullopt;
     Entry e;
     e.seq = next_seq_++;
@@ -163,8 +169,8 @@ public:
     return HarqTx{e.seq, e.seq % kHarqProcesses, low(), 1, false};
   }
 
-  /* Apply a UE report received in superframe `sf`. */
-  void on_feedback(const HarqFeedback &fb, uint64_t sf) {
+  /* Apply a UE report (its gen_sf says when the UE observed it). */
+  void on_feedback(const HarqFeedback &fb) {
     /* the highest seq the feedback shows received, if any above base */
     std::optional<uint32_t> top;
     for (int i = static_cast<int>(kHarqWindow) - 1; i >= 0; --i)
@@ -185,7 +191,7 @@ public:
         continue;
       }
       if (top && seq_lt(s, *top) && !it->due &&
-          it->last_sf + static_cast<uint64_t>(cfg_.nack_min_age_sf) <= sf) {
+          it->last_sf + static_cast<uint64_t>(cfg_.nack_min_age_sf) <= fb.gen_sf) {
         it->due = true; /* a later frame arrived, this one did not */
         ++st_.nacks;
       }

@@ -18,7 +18,7 @@
  * The SNR thresholds are the 802.11a minimum-SNR order of magnitude for a ~10%
  * PER at 1000 bytes; they are starting points, tunable per deployment (the
  * loss rule corrects them on air). A window with no first transmissions only
- * applies the SNR rule.
+ * applies the SNR rule, and breaks a clean streak.
  * Pure header; cell_m2 ctest covers it. */
 #ifndef DEVOURER_CELL_LINKADAPT_H
 #define DEVOURER_CELL_LINKADAPT_H
@@ -78,8 +78,11 @@ public:
         ++idx_;
         clean_ = 0;
       }
-    } else if (have_tx) {
-      clean_ = 0; /* lossy but not bad enough to step down: no credit */
+    } else {
+      /* lossy but not bad enough to step down, or idle (no transmissions):
+       * either way no clean credit, so an upgrade needs consecutive clean
+       * TRANSMITTING windows */
+      clean_ = 0;
     }
     return idx_ != before;
   }

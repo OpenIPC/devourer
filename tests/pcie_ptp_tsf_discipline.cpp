@@ -63,6 +63,12 @@ int main(int argc, char **argv) {
   const double comp = envd("STEP_COMP_US", 2.0);
   const size_t window = (size_t)envd("FIT_WINDOW", 64);
   const long settle = (long)envd("SETTLE", 40);
+  // Multi-node runs: PHASE_US puts this node's TBTT at ref % interval ==
+  // PHASE_US (stagger nodes so their beacons don't collide on one channel);
+  // NODE_ID is the last octet of the beacon SA/BSSID so an observer can tell
+  // the nodes apart (tests/beacon_phase_observer.cpp).
+  const double phase = envd("PHASE_US", 0);
+  const uint8_t node_id = (uint8_t)envd("NODE_ID", 0);
 
   int fd = open(ref, O_RDONLY);
   if (fd < 0) { fprintf(stderr, "open %s failed\n", ref); return 1; }
@@ -89,7 +95,7 @@ int main(int argc, char **argv) {
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   std::vector<uint8_t> bcn = {
       0x80,0x00,0x00,0x00, 0xff,0xff,0xff,0xff,0xff,0xff,
-      0x57,0x42,0x75,0x05,0xd6,0x00, 0x57,0x42,0x75,0x05,0xd6,0x00, 0x00,0x00,
+      0x57,0x42,0x75,0x05,0xd6,node_id, 0x57,0x42,0x75,0x05,0xd6,node_id, 0x00,0x00,
       0,0,0,0,0,0,0,0,
       (uint8_t)(interval_tu & 0xff), (uint8_t)(interval_tu >> 8), 0x00,0x00,
       0x00,0x03,'P','T','P', 0x01,0x01,0x82};
@@ -124,7 +130,7 @@ int main(int argc, char **argv) {
       // The TBTT sits on the (real) TSF grid: next grid point after now.
       const int64_t next_tbtt = (tsf / interval + 1) * interval;
       const double tbtt_ref = y0 + a * ((double)next_tbtt - S - x0) + b;
-      double e = std::fmod(tbtt_ref, (double)interval);
+      double e = std::fmod(tbtt_ref - phase, (double)interval);
       if (e > interval / 2.0) e -= interval; else if (e < -interval / 2.0) e += interval;
       if (std::fabs(e) < capture) {
         integ = std::clamp(integ + e, -1500.0, 1500.0);

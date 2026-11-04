@@ -50,18 +50,22 @@ int main() {
 
   /* UE beacon round trip and rejects. */
   {
-    auto b = build_ue_beacon(5, 3, 100, 42);
+    auto b = build_ue_beacon(5, 3, 100, 42, devourer::cell::HarqFeedback{0x01020304u, 0xA0000005u}, 61);
     auto u = parse_ue_beacon(b.data(), b.size(), 5);
     CHECK(u && u->ue == 3 && u->epoch == 42);
+    CHECK(u && u->fb.base == 0x01020304u && u->fb.bitmap == 0xA0000005u && u->dl_snr_half_db == 61);
+    auto plain = build_ue_beacon(5, 3, 100, 7); /* defaults: no feedback, no SNR */
+    auto up = parse_ue_beacon(plain.data(), plain.size(), 5);
+    CHECK(up && up->fb == devourer::cell::HarqFeedback{} && up->dl_snr_half_db == 0);
     CHECK(!parse_ue_beacon(b.data(), b.size(), 6));      /* other cell */
     auto du = build_ue_beacon(5, 3, 100, 42);
     du[15] = 0;                                            /* SA = the DU */
     CHECK(!parse_ue_beacon(du.data(), du.size(), 5));
     auto bad = b;
-    bad[bad.size() - 6] = 4;                               /* body ue != SA */
+    bad[bad.size() - 15] = 4;                              /* body ue != SA */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     bad = b;
-    bad[bad.size() - 5] = 1;                               /* ue high byte: 0x0103 != 3 */
+    bad[bad.size() - 14] = 1;                              /* ue high byte: 0x0103 != 3 */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     CHECK(!parse_ue_beacon(b.data(), b.size() - 1, 5));   /* torn IE */
     CHECK(!parse_ue_beacon(nullptr, 0, 5));
@@ -69,11 +73,12 @@ int main() {
 
   /* DL frame round trip and rejects. */
   {
-    auto f = build_dl_frame(5, 2, 0x0102030405ull, 77, 10);
-    CHECK(f.size() == 26 + 16 + 10);
+    auto f = build_dl_frame(5, 2, 0x0102030405ull, 77, 10, DlHarq{70, 5, 3});
+    CHECK(f.size() == 26 + kDlBodyLen + 10);
     CHECK(f[24] == 0x00); /* QoS: TID 0, normal ACK (the UE ACKs in hardware) */
     auto d = parse_dl_frame(f.data(), f.size(), 5);
     CHECK(d && d->ue == 2 && d->sf == 0x0102030405ull && d->seq == 77);
+    CHECK(d && d->harq.low == 70 && d->harq.pid == 5 && d->harq.attempt == 3);
     CHECK(!parse_dl_frame(f.data(), f.size(), 4));
     auto g = f;
     g[29] = 1; /* body ue != RA */
@@ -81,7 +86,15 @@ int main() {
     g = f;
     g[10 + 5] = 3; /* TA is not the DU */
     CHECK(!parse_dl_frame(g.data(), g.size(), 5));
-    CHECK(!parse_dl_frame(f.data(), 41, 5));
+    CHECK(!parse_dl_frame(f.data(), 26 + kDlBodyLen - 1, 5));
+  }
+
+  /* DL radiotap: RATE (500 kb/s units) + signed DBM_TX_POWER, no TX_FLAGS. */
+  {
+    const auto rt = build_dl_radiotap(24, -12);
+    CHECK(rt.size() == 10 && rt[2] == 10 && rt[3] == 0);
+    CHECK(rt[4] == 0x04 && rt[5] == 0x04 && rt[6] == 0 && rt[7] == 0);
+    CHECK(rt[8] == 48 && static_cast<int8_t>(rt[9]) == -12);
   }
 
   /* Counter extension. */

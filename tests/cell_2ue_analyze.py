@@ -22,6 +22,10 @@ Reported as distributions, per the EPIC #254 KPI rule:
      Judged from --settle-s after the first UE uplink to the last one (while
      no UE runs, the DU's ACKed DL is retried and the retries leave the slot),
      on first copies; DL retransmissions in that window count separately.
+  harq (M2, when the streams carry it): per UE, distinct DL frames the DU
+     originated (attempt 1) in the UE's listening window vs those the UE
+     received as new (its HARQ duplicate suppression), retransmissions, the
+     DU's HARQ counters and the DL rate over time (cell.la).
 The verdict line (ev cell.verdict) is in_slot == 1.0 in both directions and
 zero witness overlaps. A witness log that was supplied but cannot be mapped
 (fewer than 8 DU beacons) is an error and fails the verdict.
@@ -145,7 +149,7 @@ def analyze(du, ues, witness, settle_s):
 
     # DL, from the UEs; sent = DU submissions within the UE's listening span.
     dl_sent = [e for e in du if e.get("ev") == "cell.dl" and e.get("ok")]
-    late_sub = [e["late_us"] for e in du if e.get("ev") == "cell.dl"]
+    late_sub = [e["late_us"] for e in du if e.get("ev") == "cell.dl" and "late_us" in e]
     rep["dl_submit_late_us"] = {"p50": pct(late_sub, 0.5), "p99": pct(late_sub, 0.99),
                                "max": max(late_sub, default=float("nan"))}
     expected = sorted({s["ue"] for s in slots if s["kind"] == 1})
@@ -174,6 +178,35 @@ def analyze(du, ues, witness, settle_s):
             "in_slot": round(sum(e["in_slot"] for e in got) / len(got), 4) if got else 0.0,
             "phase_p50_us": pct([e["phase_us"] for e in got], 0.5),
         }
+
+    # HARQ / delivery (M2).
+    dl_all = [e for e in du if e.get("ev") == "cell.dl" and "attempt" in e]
+    if dl_all:
+        rep["harq"] = {}
+        for ue in expected:
+            stream = by_ue.get(ue, [])
+            done = next((e for e in stream if e.get("ev") == "cell.ue.done"), None)
+            if done and done.get("listen_from_sf", -1) >= 0:
+                lo, hi = done["listen_from_sf"], done["listen_to_sf"]
+            else:
+                lo, hi = 0, -1
+            orig = {e["seq"] for e in dl_all if e["ue"] == ue and e["attempt"] == 1
+                    and lo <= e["sf"] <= hi}
+            got = {e["seq"] for e in stream if e.get("ev") == "cell.dl.rx" and e.get("new")}
+            dups = sum(1 for e in stream if e.get("ev") == "cell.dl.rx" and e.get("new") == 0)
+            retx = sum(1 for e in dl_all if e["ue"] == ue and e["attempt"] > 1
+                       and lo <= e["sf"] <= hi)
+            st = next((e for e in du if e.get("ev") == "cell.harq" and e["ue"] == ue), {})
+            rates = [(e["rate"]) for e in du if e.get("ev") == "cell.la" and e["ue"] == ue]
+            rep["harq"][str(ue)] = {
+                "originated": len(orig), "delivered": len(orig & got),
+                "delivery": round(len(orig & got) / len(orig), 4) if orig else 0.0,
+                "retx": retx, "dup_rx": dups,
+                "dropped": st.get("dropped"), "harq_on": st.get("harq"),
+                "rate_first": dl_all[0]["rate"] if dl_all else None,
+                "rate_last": st.get("rate"),
+                "rate_steps": [r for i, r in enumerate(rates) if i == 0 or r != rates[i - 1]],
+            }
 
     # Witness: onto the DU clock via the DU beacons.
     if witness:
@@ -310,6 +343,28 @@ def selftest():
     s1 = ue_streams[0][:-1] + [{"ev": "cell.ue.done", "ue": 1, "listen_from_sf": 0,
                                 "listen_to_sf": 199}]
     r4 = analyze(du, [s1, ue_streams[1]], w, settle_s=1)
+    # HARQ section: 10 originated frames, the UE got 8 as new (one twice).
+    du_h = [e for e in du if e.get("ev") != "cell.dl"]
+    ue_h = []
+    for sq in range(10):
+        du_h.append({"ev": "cell.dl", "ue": 1, "sf": sq, "seq": sq, "attempt": 1, "rate": 54, "ok": 1})
+        if sq in (3, 7):
+            du_h.append({"ev": "cell.dl", "ue": 1, "sf": sq + 1, "seq": sq, "attempt": 2,
+                         "rate": 54, "ok": 1})
+        if sq not in (3, 7):
+            ue_h.append({"ev": "cell.dl.rx", "ue": 1, "sf": sq, "seq": sq, "new": 1,
+                         "phase_us": 1600, "in_slot": 1})
+    ue_h.append({"ev": "cell.dl.rx", "ue": 1, "sf": 5, "seq": 5, "new": 0, "phase_us": 1600,
+                 "in_slot": 1})
+    ue_h.append({"ev": "cell.ue.done", "ue": 1, "listen_from_sf": 0, "listen_to_sf": 20})
+    du_h.append({"ev": "cell.harq", "ue": 1, "harq": 1, "dropped": 2, "rate": 24})
+    du_h.append({"ev": "cell.la", "ue": 1, "rate": 54})
+    du_h.append({"ev": "cell.la", "ue": 1, "rate": 36})
+    du_h.append({"ev": "cell.la", "ue": 1, "rate": 36})
+    du_h.append({"ev": "cell.la", "ue": 1, "rate": 24})
+    rh = analyze(du_h, [ue_h, ue_streams[1]], None, settle_s=1)["harq"]["1"]
+    assert rh["originated"] == 10 and rh["delivered"] == 8 and rh["delivery"] == 0.8, rh
+    assert rh["retx"] == 2 and rh["dup_rx"] == 1 and rh["rate_steps"] == [54, 36, 24], rh
     assert r4["dl"]["1"]["sent"] == 200 and r4["dl"]["1"]["received"] == 199, r4["dl"]
     # A UE the grid schedules but whose stream is missing fails the DL verdict.
     r5 = analyze(du, [ue_streams[0]], w, settle_s=1)

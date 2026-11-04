@@ -39,6 +39,15 @@
 // plus the uplink beacon's airtime inside a UL slot.
 //   CELL_TA [1] CELL_TA_GAIN [0.5] CELL_TA_EVERY_S [2]   DU TA loop
 //   CELL_DL_PAD [64]          DL payload padding bytes
+//   CELL_HARQ [1]             DL HARQ from the UE feedback (src/cell/Harq.h);
+//                             0 = one attempt per frame (the baseline)
+//   CELL_HARQ_ATTEMPTS [4] CELL_HARQ_TIMEOUT_SF [3]
+//   CELL_LA [1]               DL link adaptation (src/cell/LinkAdapt.h, needs
+//                             HARQ's loss counts), rate published in the grant
+//   CELL_DL_RATE [24]         the starting DL rate, Mb/s (legacy OFDM)
+//   CELL_ATTEN_UE [0] CELL_ATTEN_DB [0]   send that UE's DL N dB below the
+//                             session power (a per-packet radiotap delta): a
+//                             path-loss stand-in for the reliability test
 //   CELL_SECS [60]            run time
 //   DEVOURER_CHANNEL [149]
 // Output: JSONL on stdout ("ev":"cell.*").
@@ -61,6 +70,8 @@
 #include "TsfSync.h"
 #include "cell.h"
 #include "cell/GrantMap.h"
+#include "cell/Harq.h"
+#include "cell/LinkAdapt.h"
 #include "cell/SlotGrid.h"
 #include "logger.h"
 #include "radio_open.h"
@@ -69,6 +80,11 @@ using namespace cellnode;
 using devourer::cell::build_fixed_grid;
 using devourer::cell::Grant;
 using devourer::cell::GrantMapReceiver;
+using devourer::cell::HarqConfig;
+using devourer::cell::HarqReceiver;
+using devourer::cell::HarqSender;
+using devourer::cell::HarqStats;
+using devourer::cell::LinkAdapt;
 
 namespace {
 
@@ -231,6 +247,14 @@ int run_du(IRadio *dev, const Cfg &c) {
   const double ta_gain = envf("CELL_TA_GAIN", 0.5, 0.0, 1.0);
   const int ta_every_s = static_cast<int>(envl("CELL_TA_EVERY_S", 2, 1, 60));
   const size_t pad = static_cast<size_t>(envl("CELL_DL_PAD", 64, 0, 1400));
+  const bool harq_on = envl("CELL_HARQ", 1, 0, 1) != 0;
+  const bool la_on = harq_on && envl("CELL_LA", 1, 0, 1) != 0;
+  HarqConfig hc;
+  hc.max_attempts = static_cast<int>(envl("CELL_HARQ_ATTEMPTS", 4, 1, 16));
+  hc.timeout_sf = static_cast<int>(envl("CELL_HARQ_TIMEOUT_SF", 3, 1, 50));
+  const int dl_rate0 = static_cast<int>(envl("CELL_DL_RATE", 24, 6, 54));
+  const uint16_t atten_ue = static_cast<uint16_t>(envl("CELL_ATTEN_UE", 0, 0, 254));
+  const int8_t atten_db = static_cast<int8_t>(envl("CELL_ATTEN_DB", 0, -40, 0));
   const int64_t P = grid->period_us();
 
   dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
@@ -250,6 +274,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     g.ue = ue;
     g.dl_slot = static_cast<uint8_t>(*grid->find(SlotKind::Downlink, ue));
     g.ul_slot = static_cast<uint8_t>(*grid->find(SlotKind::Uplink, ue));
+    g.rate_mbps = static_cast<uint8_t>(LinkAdapt({}, dl_rate0).rate_mbps());
     map.grants.push_back(g);
   }
   auto bcn = build_du_beacon(map);
@@ -272,6 +297,22 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::map<uint16_t, uint32_t> ue_epoch;
   for (uint16_t ue : ues)
     ta.emplace(ue, TaLoop(ta_gain, P / 4));
+  /* Per-UE DL reliability state (guarded by mu): HARQ sender, link
+   * adaptation, the UE-reported DL SNR over the current window, and the
+   * HARQ counts at the last adaptation window. */
+  struct DlUe {
+    HarqSender harq;
+    LinkAdapt la;
+    double snr_sum = 0;
+    uint64_t snr_n = 0;
+    HarqStats at_window;
+    uint64_t ul_in_window = 0; /* uplinks heard from this UE since the last window */
+    bool prev_full = false;    /* the previous window was fully present too */
+    uint32_t plain_seq = 0; /* CELL_HARQ=0: one attempt per frame */
+  };
+  std::map<uint16_t, DlUe> dlue;
+  for (uint16_t ue : ues)
+    dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
 
   char line[384];
   snprintf(line, sizeof line,
@@ -312,6 +353,16 @@ int run_du(IRadio *dev, const Cfg &c) {
           ta_now = it->second.ta();
         }
         ue_epoch[ub->ue] = ub->epoch;
+        auto d = dlue.find(ub->ue);
+        if (d != dlue.end()) {
+          ++d->second.ul_in_window;
+          if (harq_on)
+            d->second.harq.on_feedback(ub->fb, static_cast<uint64_t>(pos.superframe));
+          if (ub->dl_snr_half_db) {
+            d->second.snr_sum += ub->dl_snr_half_db / 2.0;
+            ++d->second.snr_n;
+          }
+        }
       }
       char l[256];
       snprintf(l, sizeof l,
@@ -325,26 +376,48 @@ int run_du(IRadio *dev, const Cfg &c) {
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
   auto next_ta = std::chrono::steady_clock::now() + std::chrono::seconds(ta_every_s);
-  const auto rt = devourer::build_stream_radiotap(devourer::parse_tx_mode_str("6M"), false);
-  uint32_t seq = 0;
   int64_t sf = grid->at(static_cast<int64_t>(dev->ReadTsf())).superframe + 1;
   while (std::chrono::steady_clock::now() < deadline) {
     for (uint16_t ue : ues) {
       const size_t idx = *grid->find(SlotKind::Downlink, ue);
       const int64_t start = grid->slot_start_tsf(sf, idx);
+      /* What to send: a due HARQ retransmission, else new data (or, with
+       * HARQ off, a new frame every superframe). */
+      std::optional<devourer::cell::HarqTx> tx;
+      {
+        std::lock_guard<std::mutex> lk(mu);
+        DlUe &d = dlue.at(ue);
+        if (harq_on) {
+          tx = d.harq.next(static_cast<uint64_t>(sf), true);
+        } else {
+          const uint32_t s = d.plain_seq++;
+          tx = devourer::cell::HarqTx{s, s % devourer::cell::kHarqProcesses, s, 1, false};
+        }
+      }
+      if (!tx) {
+        char l[120];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.dl.idle\",\"ue\":%u,\"sf\":%lld}", ue,
+                 (long long)sf);
+        emit(l);
+        continue; /* window full, nothing due */
+      }
+      const Grant *gr = map.find(ue);
+      const int rate = gr ? gr->rate_mbps : 6;
       /* The frame is built before the wait; the reading that ends the wait
        * is the submit stamp (no extra register reads on the send path). */
-      auto f = build_dl_frame(c.cell, static_cast<uint8_t>(ue), static_cast<uint64_t>(sf), seq, pad);
-      std::vector<uint8_t> pkt(rt);
+      auto f = build_dl_frame(c.cell, static_cast<uint8_t>(ue), static_cast<uint64_t>(sf), tx->seq,
+                              pad, DlHarq{tx->low, static_cast<uint8_t>(tx->pid),
+                                          static_cast<uint8_t>(tx->attempt)});
+      std::vector<uint8_t> pkt = build_dl_radiotap(rate, ue == atten_ue ? atten_db : 0);
       pkt.insert(pkt.end(), f.begin(), f.end());
       const int64_t sub = sleep_until_tsf(dev, start);
       const bool ok = dev->send_packet(pkt.data(), pkt.size());
-      char l[200];
+      char l[220];
       snprintf(l, sizeof l,
-               "{\"ev\":\"cell.dl\",\"ue\":%u,\"sf\":%lld,\"seq\":%u,\"late_us\":%lld,\"ok\":%d}",
-               ue, (long long)sf, seq, (long long)(sub - start), ok ? 1 : 0);
+               "{\"ev\":\"cell.dl\",\"ue\":%u,\"sf\":%lld,\"seq\":%u,\"attempt\":%d,"
+               "\"rate\":%d,\"late_us\":%lld,\"ok\":%d}",
+               ue, (long long)sf, tx->seq, tx->attempt, rate, (long long)(sub - start), ok ? 1 : 0);
       emit(l);
-      ++seq;
     }
     // Idle part of the superframe: refresh the freerun reference, run the TA
     // loop, republish the map when a TA moved.
@@ -367,6 +440,43 @@ int run_du(IRadio *dev, const Cfg &c) {
           else if (l.update(3)) {
             g.ta_us = static_cast<int16_t>(l.ta());
             changed = true;
+          }
+          if (la_on) {
+            DlUe &d = dlue.at(g.ue);
+            const HarqStats &st = d.harq.stats();
+            const uint64_t first = st.new_tx - d.at_window.new_tx;
+            const uint64_t lost = (st.retx - d.at_window.retx) + (st.dropped - d.at_window.dropped);
+            const bool snr_ok = d.snr_n > 0;
+            const double snr = snr_ok ? d.snr_sum / static_cast<double>(d.snr_n) : 0.0;
+            /* Judge only windows the UE was present for throughout (>= 75% of
+             * the superframes carried its uplink), after an equally present
+             * one: at the edges of a UE's presence the HARQ timeouts and
+             * drops are of frames sent while it was not listening, and say
+             * nothing about the channel. */
+            const uint64_t sf_per_window =
+                static_cast<uint64_t>(ta_every_s) * 1000000ull / static_cast<uint64_t>(P);
+            const bool full = d.ul_in_window * 4 >= sf_per_window * 3;
+            const bool present = full && d.prev_full;
+            d.prev_full = full;
+            if (present)
+              d.la.window(snr, snr_ok, first, lost);
+            d.at_window = st;
+            d.snr_sum = 0;
+            d.snr_n = 0;
+            d.ul_in_window = 0;
+            char la_l[220];
+            snprintf(la_l, sizeof la_l,
+                     "{\"ev\":\"cell.la\",\"ue\":%u,\"rate\":%d,\"snr_db\":%.1f,"
+                     "\"first_tx\":%llu,\"lost\":%llu,\"present\":%d}",
+                     g.ue, d.la.rate_mbps(), snr, (unsigned long long)first,
+                     (unsigned long long)lost, present ? 1 : 0);
+            emit(la_l);
+            /* Compare with the live grant, not "did it change now": a rate
+             * whose map failed to publish is retried on the next pass. */
+            if (d.la.rate_mbps() != g.rate_mbps) {
+              g.rate_mbps = static_cast<uint8_t>(d.la.rate_mbps());
+              changed = true;
+            }
           }
         }
       }
@@ -391,8 +501,8 @@ int run_du(IRadio *dev, const Cfg &c) {
                                       "\"ok\":%d,\"ta\":{",
                          shown.epoch, (unsigned long long)shown.effective_sf, ok ? 1 : 0);
         for (size_t i = 0; i < shown.grants.size() && n > 0 && n < (int)sizeof l; ++i)
-          n += snprintf(l + n, sizeof l - n, "%s\"%u\":%d", i ? "," : "", shown.grants[i].ue,
-                        shown.grants[i].ta_us);
+          n += snprintf(l + n, sizeof l - n, "%s\"%u\":[%d,%u]", i ? "," : "", shown.grants[i].ue,
+                        shown.grants[i].ta_us, shown.grants[i].rate_mbps);
         if (n > 0 && n < (int)sizeof l)
           snprintf(l + n, sizeof l - n, "}}");
         emit(l);
@@ -403,6 +513,18 @@ int run_du(IRadio *dev, const Cfg &c) {
   dev->StopBeacon();
   dev->StopRxLoop();
   rx.join();
+  for (auto &kv : dlue) {
+    const HarqStats &st = kv.second.harq.stats();
+    char l[240];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.harq\",\"ue\":%u,\"harq\":%d,\"new_tx\":%llu,\"retx\":%llu,"
+             "\"acked\":%llu,\"dropped\":%llu,\"nacks\":%llu,\"timeouts\":%llu,\"rate\":%d}",
+             kv.first, harq_on ? 1 : 0, (unsigned long long)st.new_tx, (unsigned long long)st.retx,
+             (unsigned long long)st.acked, (unsigned long long)st.dropped,
+             (unsigned long long)st.nacks, (unsigned long long)st.timeouts,
+             kv.second.la.rate_mbps());
+    emit(l);
+  }
   emit("{\"ev\":\"cell.du.done\"}");
   return 0;
 }
@@ -428,6 +550,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
   devourer::TsfSync sync;
   Wrap32 wrap;
   GrantMapReceiver rxr(c.cell);
+  /* DL HARQ receiver + the DL SNR since the last feedback publish (mu). */
+  HarqReceiver hrx;
+  double dl_snr_sum = 0;
+  uint64_t dl_snr_n = 0;
+  uint64_t dl_new = 0, dl_dup = 0;
   const int64_t P = static_cast<int64_t>(c.tu) * devourer::cell::kTuUs;
   std::optional<SlotGrid> grid;  // rebuilt from the map's UE list
   std::vector<uint16_t> grid_ues;
@@ -454,8 +581,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
         return;
       std::optional<size_t> want;
       SlotGrid::At pos;
+      bool fresh = false;
       {
         std::lock_guard<std::mutex> lk(mu);
+        /* HARQ first: the feedback must count every frame that arrived. */
+        fresh = hrx.on_frame(d->seq, d->harq.low);
+        if (fresh)
+          ++dl_new;
+        else
+          ++dl_dup;
+        if (p.RxAtrib.snr[0] > 0) { /* raw = 0.5 dB units; 0 = no measurement */
+          dl_snr_sum += p.RxAtrib.snr[0] / 2.0;
+          ++dl_snr_n;
+        }
         if (!sync.Ready() || !grid)
           return;
         const int64_t du_at =
@@ -465,13 +603,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
       }
       if (!want)
         return;
-      char l[220];
+      char l[260];
       snprintf(l, sizeof l,
-               "{\"ev\":\"cell.dl.rx\",\"ue\":%u,\"sf\":%llu,\"seq\":%u,\"rx_sf\":%lld,"
-               "\"phase_us\":%lld,\"in_slot\":%d,\"rssi\":%d}",
-               me, (unsigned long long)d->sf, d->seq, (long long)pos.superframe,
-               (long long)pos.into_us, pos.slot && *pos.slot == *want ? 1 : 0,
-               p.RxAtrib.rssi[0] - 110);
+               "{\"ev\":\"cell.dl.rx\",\"ue\":%u,\"sf\":%llu,\"seq\":%u,\"attempt\":%u,"
+               "\"new\":%d,\"rx_sf\":%lld,\"phase_us\":%lld,\"in_slot\":%d,\"rssi\":%d,"
+               "\"snr_half_db\":%d}",
+               me, (unsigned long long)d->sf, d->seq, d->harq.attempt, fresh ? 1 : 0,
+               (long long)pos.superframe, (long long)pos.into_us,
+               pos.slot && *pos.slot == *want ? 1 : 0, p.RxAtrib.rssi[0] - 110, p.RxAtrib.snr[0]);
       emit(l);
     });
   });
@@ -479,6 +618,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
   bool beaconing = false;
   uint32_t running_epoch = 0;
+  devourer::cell::HarqFeedback last_fb{};
+  uint8_t last_snr_half = 0;
   long steps = 0;
   /* TSF-write compensation: a read-add-write lands a few us late (the MMIO
    * round trip between ReadTsf and the write). Each step is checked against
@@ -529,8 +670,24 @@ int run_ue(IRadio *dev, const Cfg &c) {
         listen_from = sfn + 1; /* this superframe's DL may already be past */
       listen_to = sfn - 1; /* the last superframe fully listened */
     }
-    if (!beaconing || running_epoch != mcopy.epoch) {
-      const auto b = build_ue_beacon(c.cell, me, c.tu, mcopy.epoch);
+    /* The uplink beacon carries the grant epoch in force, the HARQ
+     * feedback and the DL SNR: republish whenever any of them moved (the
+     * DU reads them at its next UL slot; a beacon update lands 1-2 beacons
+     * later, which Harq's nack_min_age_sf allows for). */
+    devourer::cell::HarqFeedback fb{};
+    uint8_t snr_half = last_snr_half;
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      fb = hrx.feedback();
+      if (dl_snr_n > 0) {
+        const double m = dl_snr_sum / static_cast<double>(dl_snr_n);
+        snr_half = static_cast<uint8_t>(m * 2 < 1 ? 1 : (m * 2 > 255 ? 255 : std::lround(m * 2)));
+        dl_snr_sum = 0;
+        dl_snr_n = 0;
+      }
+    }
+    if (!beaconing || running_epoch != mcopy.epoch || !(fb == last_fb) || snr_half != last_snr_half) {
+      const auto b = build_ue_beacon(c.cell, me, c.tu, mcopy.epoch, fb, snr_half);
       const bool ok = beaconing ? dev->UpdateBeaconPayload(b.data(), b.size())
                                 : dev->StartBeacon(b.data(), b.size(), c.tu);
       if (!ok) {
@@ -538,11 +695,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
         continue;
       }
       beaconing = true;
+      const bool epoch_moved = running_epoch != mcopy.epoch;
       running_epoch = mcopy.epoch;
-      char l[160];
-      snprintf(l, sizeof l, "{\"ev\":\"cell.ue.epoch\",\"ue\":%u,\"epoch\":%u,\"ta_us\":%d}",
-               me, mcopy.epoch, g->ta_us);
-      emit(l);
+      last_fb = fb;
+      last_snr_half = snr_half;
+      if (epoch_moved) { /* a feedback-only refresh logs nothing */
+        char l[160];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.ue.epoch\",\"ue\":%u,\"epoch\":%u,\"ta_us\":%d}",
+                 me, mcopy.epoch, g->ta_us);
+        emit(l);
+      }
     }
     const int64_t step = ue_tsf_step(static_cast<int64_t>(t), du_now, ul_off, g->ta_us, P, 2);
     if (step != 0) {
@@ -592,8 +754,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
   char l[200];
   snprintf(l, sizeof l,
            "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
-           "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld}",
-           me, steps, step_fails, (long long)listen_from, (long long)listen_to);
+           "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu}",
+           me, steps, step_fails, (long long)listen_from, (long long)listen_to,
+           (unsigned long long)dl_new, (unsigned long long)dl_dup);
   emit(l);
   return 0;
 }

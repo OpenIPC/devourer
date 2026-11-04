@@ -12,10 +12,14 @@
 //                 path, so an unACKed unicast counts as a failure and escalates
 //                 the queue's contention window to CWmax — the next frame then
 //                 waits a uniform 0..1023 slots (0-9.2 ms; measured on the
-//                 8852CE). Body = 'C' 'D' ue(2) sf(8) seq(4).
+//                 8852CE). Body = 'C' 'D' ue(2) sf(8) seq(4) low(4) pid(1)
+//                 attempt(1): the HARQ seq, the sender's window low edge and
+//                 process id, and the transmission attempt (src/cell/Harq.h).
 //   UE uplink   — the UE's own hardware beacon, SA = ue_mac(ue), placed in its
 //                 UL slot by stepping the UE's TSF; body IE 'C' 'U' ue(2)
-//                 epoch(4) (the grant epoch the UE runs). A hardware beacon
+//                 epoch(4) fb_base(4) fb_bitmap(4) dl_snr(1): the grant epoch
+//                 the UE runs, its HARQ feedback (src/cell/Harq.h) and its mean
+//                 DL SNR in 0.5 dB units (0 = no DL frame measured). A hardware beacon
 //                 because send_packet has no sub-slot departure control
 //                 (docs/scheduled-mac.md); with SetBeaconBackoff(false) it
 //                 leaves a fixed 22 us after its TBTT.
@@ -36,6 +40,7 @@
 #include <vector>
 
 #include "cell/GrantMap.h"
+#include "cell/Harq.h"
 #include "cell/SlotGrid.h"
 
 namespace cellnode {
@@ -95,22 +100,32 @@ inline std::vector<uint8_t> build_du_beacon(const GrantMap &m) {
   return f;
 }
 
-// The UE uplink beacon: header + vendor IE 'C' 'U' ue(2) epoch(4).
+constexpr uint8_t kUeIeLen = 3 + 2 + 2 + 4 + 4 + 4 + 1; /* OUI 'CU' ue epoch base bitmap snr */
+
+// The UE uplink beacon: header + vendor IE 'C' 'U' ue(2) epoch(4) fb_base(4)
+// fb_bitmap(4) dl_snr_half_db(1).
 inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int interval_tu,
-                                            uint32_t epoch) {
+                                            uint32_t epoch,
+                                            devourer::cell::HarqFeedback fb = {},
+                                            uint8_t dl_snr_half_db = 0) {
   uint8_t sa[6];
   cell_mac(sa, cell, ue);
   auto f = detail::beacon_head(sa, interval_tu);
-  f.insert(f.end(), {221, 3 + 8, devourer::cell::kGrantOui[0], devourer::cell::kGrantOui[1],
+  f.insert(f.end(), {221, kUeIeLen, devourer::cell::kGrantOui[0], devourer::cell::kGrantOui[1],
                      devourer::cell::kGrantOui[2], 'C', 'U'});
   detail::put(f, ue, 2);
   detail::put(f, epoch, 4);
+  detail::put(f, fb.base, 4);
+  detail::put(f, fb.bitmap, 4);
+  f.push_back(dl_snr_half_db);
   return f;
 }
 
 struct UeBeacon {
   uint8_t ue = 0;
   uint32_t epoch = 0;
+  devourer::cell::HarqFeedback fb;
+  uint8_t dl_snr_half_db = 0; /* 0 = none */
 };
 // Parse a UE uplink beacon of `cell` (MPDU, radiotap stripped).
 inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uint16_t cell) {
@@ -124,7 +139,7 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
     if (off + 2 + l > len)
       break;
     const uint8_t *v = p + off + 2;
-    if (p[off] == 221 && l == 3 + 8 && v[0] == devourer::cell::kGrantOui[0] &&
+    if (p[off] == 221 && l == kUeIeLen && v[0] == devourer::cell::kGrantOui[0] &&
         v[1] == devourer::cell::kGrantOui[1] && v[2] == devourer::cell::kGrantOui[2] &&
         v[3] == 'C' && v[4] == 'U') {
       const uint64_t ue = detail::get(v + 5, 2);  // 16 bits on air
@@ -133,6 +148,9 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
       UeBeacon b;
       b.ue = static_cast<uint8_t>(ue);
       b.epoch = static_cast<uint32_t>(detail::get(v + 7, 4));
+      b.fb.base = static_cast<uint32_t>(detail::get(v + 11, 4));
+      b.fb.bitmap = static_cast<uint32_t>(detail::get(v + 15, 4));
+      b.dl_snr_half_db = v[19];
       return b;
     }
     off += 2 + l;
@@ -140,9 +158,18 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
   return std::nullopt;
 }
 
+// HARQ fields of a DL frame (src/cell/Harq.h HarqTx).
+struct DlHarq {
+  uint32_t low = 0;    /* the sender's window low edge */
+  uint8_t pid = 0;
+  uint8_t attempt = 1; /* 1 = first transmission */
+};
+
+constexpr size_t kDlBodyLen = 2 + 2 + 8 + 4 + 4 + 1 + 1; /* 'CD' ue sf seq low pid attempt */
+
 // The DL frame MPDU (no FCS): QoS-Data, RA = UE, TA = BSSID = DU.
 inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf, uint32_t seq,
-                                           size_t pad) {
+                                           size_t pad, DlHarq h = {}) {
   uint8_t ra[6], ta[6];
   cell_mac(ra, cell, ue);
   cell_mac(ta, cell, 0);
@@ -156,6 +183,9 @@ inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t s
   detail::put(f, ue, 2);
   detail::put(f, sf, 8);
   detail::put(f, seq, 4);
+  detail::put(f, h.low, 4);
+  f.push_back(h.pid);
+  f.push_back(h.attempt);
   f.insert(f.end(), pad, 0x5a);
   return f;
 }
@@ -164,9 +194,10 @@ struct DlFrame {
   uint8_t ue = 0;
   uint64_t sf = 0;
   uint32_t seq = 0;
+  DlHarq harq;
 };
 inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint16_t cell) {
-  if (p == nullptr || len < 26 + 16 || p[0] != 0x88)
+  if (p == nullptr || len < 26 + kDlBodyLen || p[0] != 0x88)
     return std::nullopt;
   const int ra = cell_station(p + 4, cell), ta = cell_station(p + 10, cell);
   if (ra <= 0 || ta != 0 || p[26] != 'C' || p[27] != 'D')
@@ -178,7 +209,19 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
   d.ue = static_cast<uint8_t>(ue);
   d.sf = detail::get(p + 30, 8);
   d.seq = static_cast<uint32_t>(detail::get(p + 38, 4));
+  d.harq.low = static_cast<uint32_t>(detail::get(p + 42, 4));
+  d.harq.pid = p[46];
+  d.harq.attempt = p[47];
   return d;
+}
+
+// Radiotap for one DL frame: legacy rate (Mb/s) + a DBM_TX_POWER dB delta
+// vs the session base (Kestrel rewrites its BB TX target between frames on a
+// value change). Present = RATE (bit 2) | DBM_TX_POWER (bit 10); no TX_FLAGS,
+// so the frame keeps normal-ACK semantics.
+inline std::vector<uint8_t> build_dl_radiotap(int rate_mbps, int8_t pwr_db) {
+  return {0x00, 0x00, 0x0a, 0x00, 0x04, 0x04, 0x00, 0x00,
+          static_cast<uint8_t>(rate_mbps * 2), static_cast<uint8_t>(pwr_db)};
 }
 
 // --- Clocks --------------------------------------------------------------------

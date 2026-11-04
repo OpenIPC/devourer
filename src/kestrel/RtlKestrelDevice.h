@@ -173,6 +173,10 @@ public:
    * beacon's TBTT with it, the Jaguar1 model. PCIe-measured only. */
   bool WriteTsf(uint64_t tsf) override;
 
+  /* Port-0 TSF, then R_AX_FREERUN_CNT (never moved by WriteTsf), each with a
+   * hi/lo/hi wrap guard. */
+  bool ReadTsfAndFreeRun(uint64_t &tsf, uint64_t &freerun) override;
+
   /* Jaguar1 semantics (see IRadio): the AX TBTT already sits on the TSF grid,
    * so offset 0 holds natively and a nonzero TSF-preserving pin is physically
    * unavailable — refused with a one-time warning. Discipline the TSF itself

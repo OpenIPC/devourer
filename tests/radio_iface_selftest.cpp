@@ -96,6 +96,10 @@ int main() {
   check(!r->SetAckResponder(devourer::MacAddr{}), "SetAckResponder default refuses");
   check(r->ReadTsf() == 0, "ReadTsf default is 0");
   check(!r->WriteTsf(123456789ull), "WriteTsf default refuses and reports false");
+  {
+    uint64_t t = 0, f = 0;
+    check(!r->ReadTsfAndFreeRun(t, f), "ReadTsfAndFreeRun default reports unsupported");
+  }
   check(!r->GetAdapterCaps().tsf_write_ok, "tsf_write_ok default is false");
 
   r->FastRetune(6);

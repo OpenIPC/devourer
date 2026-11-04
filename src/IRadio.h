@@ -503,6 +503,19 @@ public:
    * docs/time-distribution.md. */
   virtual bool WriteTsf(uint64_t tsf) { (void)tsf; return false; }
 
+  /* Read the port TSF and a free-running µs counter that WriteTsf never
+   * moves, back to back (Kestrel: R_AX_FREERUN_CNT). tsf - freerun is then the
+   * TSF's exact offset, including every step ever applied, so a controller
+   * that steps the TSF can fit its reference against the free-running counter
+   * instead of booking the steps it believes it applied (a read-add-write lands
+   * a few µs off, varying with host scheduling). The two reads are a few MMIO
+   * reads apart, which is a constant bias. False where unsupported (default). */
+  virtual bool ReadTsfAndFreeRun(uint64_t &tsf, uint64_t &freerun) {
+    (void)tsf;
+    (void)freerun;
+    return false;
+  }
+
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
    * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and
    * hardware-TSF-stamped (the MAC inserts the live 64-bit TSF into the beacon

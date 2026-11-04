@@ -24,6 +24,12 @@
 // sender's TSF at egress, and the TBTT sits at TSF % period == 0, so
 // egress % period is how late that beacon left — leaving the TBTT-to-TBTT
 // alignment, i.e. the network sync error, plus receiver noise.
+//
+// DUMP=<path> also writes every matched beacon as "node rx_tsfl egress_phase"
+// (one line each, arrival order) for offline analysis, plus one
+// "-1 <second_start_tsfl> <count>" line per second with the number of OTHER
+// frames heard (foreign traffic on the channel), to correlate with beacons
+// that left late.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -64,14 +70,20 @@ int main(int argc, char **argv) {
   struct Rx { int node; uint32_t tsfl; int64_t egress; };  // egress = TSF % period
   std::mutex mu;
   std::vector<Rx> rx;
+  std::map<uint32_t, long> foreign;  // rx_tsfl / 1e6 -> frames that aren't ours
   std::atomic<bool> done{false};
   std::thread th([&] {
     dev->Init([&](const Packet &p) {
       if (p.RxAtrib.crc_err) return;
-      if (p.Data.size() < 24 || p.Data[0] != 0x80) return;  // beacons
-      if (std::memcmp(p.Data.data() + 10, prefix, 5) != 0) return;
+      const bool ours = p.Data.size() >= 24 && p.Data[0] == 0x80 &&
+                        std::memcmp(p.Data.data() + 10, prefix, 5) == 0 &&
+                        p.Data[15] < nodes;
+      if (!ours) {
+        std::lock_guard<std::mutex> lk(mu);
+        foreign[p.RxAtrib.tsfl / 1000000u]++;
+        return;
+      }
       const int node = p.Data[15];
-      if (node >= nodes) return;
       const auto eg = p.TxEgressTsf();
       std::lock_guard<std::mutex> lk(mu);
       rx.push_back({node, p.RxAtrib.tsfl, eg ? (int64_t)(*eg % (uint64_t)period) : -1});
@@ -87,6 +99,14 @@ int main(int argc, char **argv) {
   { std::lock_guard<std::mutex> lk(mu); v = rx; }
   std::map<int, long> count;
   for (auto &e : v) count[e.node]++;
+  if (const char *dump = std::getenv("DUMP")) {
+    if (FILE *f = fopen(dump, "w")) {
+      for (auto &e : v) fprintf(f, "%d %u %lld\n", e.node, e.tsfl, (long long)e.egress);
+      std::lock_guard<std::mutex> lk(mu);
+      for (auto &kv : foreign) fprintf(f, "-1 %u %ld\n", kv.first * 1000000u, kv.second);
+      fclose(f);
+    }
+  }
   printf("{\"ev\":\"bcnobs.counts\"");
   for (int k = 0; k < nodes; ++k) printf(",\"node%d\":%ld", k, count[k]);
   printf("}\n");

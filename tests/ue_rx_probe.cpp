@@ -30,6 +30,7 @@
 #include "WiFiDriver.h"
 #include "cell/UeRxAttribution.h"
 #include "env_config.h"
+#include "radio_open.h"
 #include "logger.h"
 
 static devourer::cell::UeRxAttribution g_attr;
@@ -38,23 +39,12 @@ static std::atomic<uint64_t> g_frames{0};
 int main(int argc, char** argv) {
   int secs = argc > 1 ? atoi(argv[1]) : 15;
   auto logger = std::make_shared<Logger>();
-  libusb_context* ctx = nullptr;
-  libusb_init(&ctx);
-  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
-
-  uint16_t vid = 0x0bda, pid = 0x012d;
-  if (const char* p = std::getenv("DEVOURER_PID")) pid = (uint16_t)strtoul(p, 0, 0);
-  if (const char* v = std::getenv("DEVOURER_VID")) vid = (uint16_t)strtoul(v, 0, 0);
   uint8_t ch = 6;
   if (const char* c = std::getenv("DEVOURER_CHANNEL")) ch = atoi(c);
 
-  auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
-  if (!h) { fprintf(stderr, "open fail %04x:%04x\n", vid, pid); return 1; }
-  std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
-  WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
-  if (!dev) return 1;
+  OpenedRadio radio = open_radio_from_env(logger, 0x0bda, 0x012d);
+  if (!radio.dev) return 1;
+  IRadio* dev = radio.dev.get();
 
   auto cb = [](const Packet& p) {
     if (p.RxAtrib.crc_err || p.RxAtrib.icv_err) return;

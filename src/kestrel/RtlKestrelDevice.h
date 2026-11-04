@@ -215,6 +215,10 @@ public:
    * prior InitWrite. `beacon` is a full 802.11 beacon; the MAC airs it every
    * `interval_tu` TU with the live TSF inserted. */
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
+  /* New content for the armed beacon (BCN_UPD H2C; port/TBTT untouched). */
+  bool UpdateBeaconPayload(const uint8_t *beacon, size_t len) override;
+  /* BCNTX_EN off; returns false when no beacon is armed. */
+  bool StopBeacon() override;
   int _bcn_interval_tu = 0; /* >0 while a HW beacon is armed (StartBeacon) */
 
   /* 802.11ax scheduled UL: air an HE Basic Trigger (UL-OFDMA grant), program
@@ -391,11 +395,6 @@ private:
    *     (a fixed-rate stream pays once and then nothing). */
   std::atomic<bool> _rate_diffs_on{false};
   std::atomic<int8_t> _rate_diff_qdb[10]{};
-  /* Per-path RSSI/SNR/EVM (rx_pkt_attrib raw conventions) parsed from the last
-   * PPDU-status physts blob (kestrel::parse_physts_8852), attached to the
-   * following WIFI frame(s) in the aggregate. snr_avg (raw dB*2, IE01) feeds
-   * the passive noise floor (rssi_dbm - snr_db). 0 = not measured. */
-  kestrel::KestrelPhySts _last_physts{};
   /* Windowed RX link-quality accumulator (passive noise floor + LinkHealth),
    * fed per decoded frame from the RX loop; drained by GetRxQuality. */
   devourer::RxQualityAccumulator _rxq;

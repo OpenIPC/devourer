@@ -29,6 +29,7 @@ zero witness overlaps. A witness log that was supplied but cannot be mapped
 --selftest runs the analysis on a synthetic run (no files).
 """
 import argparse
+import heapq
 import json
 import math
 import sys
@@ -82,6 +83,19 @@ def robust_line(xs, ys):
     if len(keep) >= 8:
         a, b = fit([k[0] for k in keep], [k[1] for k in keep])
     return a, b
+
+
+def count_overlaps(intervals):
+    """Number of intersecting PAIRS among (start, duration) intervals: a sweep
+    keeping every earlier interval still on air, so one long frame that
+    overlaps several later ones counts each pair."""
+    active, n = [], 0  # min-heap of end times
+    for t, d in sorted(intervals):
+        while active and active[0] <= t:
+            heapq.heappop(active)
+        n += len(active)
+        heapq.heappush(active, t + d)
+    return n
 
 
 def unwrap32(vals):
@@ -218,7 +232,7 @@ def analyze(du, ues, witness, settle_s):
                             late -= P
                         dl_late.setdefault(e["st"], []).append(late)
             frames.sort()
-            overlaps = sum(1 for (t0, d0, *_), (t1, *_r) in zip(frames, frames[1:]) if t1 < t0 + d0)
+            overlaps = count_overlaps([(f[0], f[1]) for f in frames])
             by = {}
             for _, _, k, st, ok in frames:
                 key = f"{k}{st if k != 'bcn' else ''}"
@@ -246,6 +260,10 @@ def analyze(du, ues, witness, settle_s):
 
 
 def selftest():
+    # One long frame over two later ones that do not overlap each other: 2 pairs.
+    assert count_overlaps([(0, 100), (10, 20), (50, 20)]) == 2
+    assert count_overlaps([(0, 10), (10, 10)]) == 0  # touching is not overlapping
+    assert count_overlaps([(0, 30), (5, 30), (10, 30)]) == 3
     P = 102400
     slots = [(0, 0, 0, 1500), (1, 1, 1, 4000), (2, 1, 2, 4000), (3, 2, 0, 1000),
              (4, 3, 1, 2000), (5, 3, 2, 2000)]

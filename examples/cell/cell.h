@@ -17,9 +17,11 @@
 //                 process id, and the transmission attempt (src/cell/Harq.h).
 //   UE uplink   — the UE's own hardware beacon, SA = ue_mac(ue), placed in its
 //                 UL slot by stepping the UE's TSF; body IE 'C' 'U' ue(2)
-//                 epoch(4) fb_base(4) fb_bitmap(4) dl_snr(1): the grant epoch
-//                 the UE runs, its HARQ feedback (src/cell/Harq.h) and its mean
-//                 DL SNR in 0.5 dB units (0 = no DL frame measured). A hardware beacon
+//                 epoch(4) fb_base(4) fb_bitmap(4) fb_gen_sf(4) dl_snr(1): the
+//                 grant epoch the UE runs, its HARQ feedback (src/cell/Harq.h;
+//                 gen_sf = low 32 bits of the DU superframe it was generated
+//                 in, extended by the DU around its own count) and its mean DL
+//                 SNR in 0.5 dB units (0 = no DL frame measured). A hardware beacon
 //                 because send_packet has no sub-slot departure control
 //                 (docs/scheduled-mac.md); with SetBeaconBackoff(false) it
 //                 leaves a fixed 22 us after its TBTT.
@@ -100,10 +102,10 @@ inline std::vector<uint8_t> build_du_beacon(const GrantMap &m) {
   return f;
 }
 
-constexpr uint8_t kUeIeLen = 3 + 2 + 2 + 4 + 4 + 4 + 1; /* OUI 'CU' ue epoch base bitmap snr */
+constexpr uint8_t kUeIeLen = 3 + 2 + 2 + 4 + 4 + 4 + 4 + 1; /* OUI 'CU' ue epoch base bitmap gen snr */
 
 // The UE uplink beacon: header + vendor IE 'C' 'U' ue(2) epoch(4) fb_base(4)
-// fb_bitmap(4) dl_snr_half_db(1).
+// fb_bitmap(4) fb_gen_sf(4, low 32 bits) dl_snr_half_db(1).
 inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int interval_tu,
                                             uint32_t epoch,
                                             devourer::cell::HarqFeedback fb = {},
@@ -117,6 +119,7 @@ inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int inter
   detail::put(f, epoch, 4);
   detail::put(f, fb.base, 4);
   detail::put(f, fb.bitmap, 4);
+  detail::put(f, fb.gen_sf & 0xFFFFFFFFull, 4);
   f.push_back(dl_snr_half_db);
   return f;
 }
@@ -150,7 +153,8 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
       b.epoch = static_cast<uint32_t>(detail::get(v + 7, 4));
       b.fb.base = static_cast<uint32_t>(detail::get(v + 11, 4));
       b.fb.bitmap = static_cast<uint32_t>(detail::get(v + 15, 4));
-      b.dl_snr_half_db = v[19];
+      b.fb.gen_sf = detail::get(v + 19, 4); /* low 32 bits: extend at the DU */
+      b.dl_snr_half_db = v[23];
       return b;
     }
     off += 2 + l;

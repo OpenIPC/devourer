@@ -357,7 +357,12 @@ int run_du(IRadio *dev, const Cfg &c) {
         if (d != dlue.end()) {
           ++d->second.ul_in_window;
           if (harq_on)
-            d->second.harq.on_feedback(ub->fb, static_cast<uint64_t>(pos.superframe));
+          {
+            devourer::cell::HarqFeedback fb = ub->fb; /* gen_sf: low 32 bits on air */
+            fb.gen_sf = static_cast<uint64_t>(
+                extend32_near(static_cast<uint32_t>(fb.gen_sf), pos.superframe));
+            d->second.harq.on_feedback(fb);
+          }
           if (ub->dl_snr_half_db) {
             d->second.snr_sum += ub->dl_snr_half_db / 2.0;
             ++d->second.snr_n;
@@ -678,7 +683,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
     uint8_t snr_half = last_snr_half;
     {
       std::lock_guard<std::mutex> lk(mu);
-      fb = hrx.feedback();
+      fb = hrx.feedback(static_cast<uint64_t>(du_now / P)); /* the UE's view of the DU sf */
       if (dl_snr_n > 0) {
         const double m = dl_snr_sum / static_cast<double>(dl_snr_n);
         snr_half = static_cast<uint8_t>(m * 2 < 1 ? 1 : (m * 2 > 255 ? 255 : std::lround(m * 2)));

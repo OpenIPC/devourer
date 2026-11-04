@@ -50,10 +50,13 @@ int main() {
 
   /* UE beacon round trip and rejects. */
   {
-    auto b = build_ue_beacon(5, 3, 100, 42, devourer::cell::HarqFeedback{0x01020304u, 0xA0000005u}, 61);
+    auto b = build_ue_beacon(5, 3, 100, 42,
+                             devourer::cell::HarqFeedback{0x01020304u, 0xA0000005u, 0x1'2345'6789ull}, 61);
     auto u = parse_ue_beacon(b.data(), b.size(), 5);
     CHECK(u && u->ue == 3 && u->epoch == 42);
     CHECK(u && u->fb.base == 0x01020304u && u->fb.bitmap == 0xA0000005u && u->dl_snr_half_db == 61);
+    CHECK(u && u->fb.gen_sf == 0x2345'6789ull); /* low 32 bits on air */
+    CHECK(extend32_near(0x2345'6789u, 0x1'2345'6000ll) == 0x1'2345'6789ll);
     auto plain = build_ue_beacon(5, 3, 100, 7); /* defaults: no feedback, no SNR */
     auto up = parse_ue_beacon(plain.data(), plain.size(), 5);
     CHECK(up && up->fb == devourer::cell::HarqFeedback{} && up->dl_snr_half_db == 0);
@@ -62,10 +65,10 @@ int main() {
     du[15] = 0;                                            /* SA = the DU */
     CHECK(!parse_ue_beacon(du.data(), du.size(), 5));
     auto bad = b;
-    bad[bad.size() - 15] = 4;                              /* body ue != SA */
+    bad[bad.size() - 19] = 4;                              /* body ue != SA */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     bad = b;
-    bad[bad.size() - 14] = 1;                              /* ue high byte: 0x0103 != 3 */
+    bad[bad.size() - 18] = 1;                              /* ue high byte: 0x0103 != 3 */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     CHECK(!parse_ue_beacon(b.data(), b.size() - 1, 5));   /* torn IE */
     CHECK(!parse_ue_beacon(nullptr, 0, 5));

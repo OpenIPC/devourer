@@ -24,9 +24,10 @@ only that the frame aired. So delivery is what the UE says it received:
   whenever it changes, at most once per 100 ms pass.
 - **DU sender rules:**
   - ACK: the seq is below `base`, or its bitmap bit is set.
-  - NACK: a later seq was received. Only attempts at least two superframes
-    older than the report count, because a UE beacon update lands 1–2 beacons
-    late, so a fresh retransmission isn't NACKed by a stale report.
+  - NACK: a later seq was received. It is judged by when the UE *generated*
+    the report (`gen_sf`, carried in the IE), not by when it arrived. Only an
+    attempt older than the report counts, so a delayed report that predates
+    a retransmission never NACKs it.
   - Timeout after 3 superframes, and up to 4 attempts.
   - Retransmissions go before new data.
   - The in-flight seq span stays below 32, so every report covers every
@@ -62,15 +63,18 @@ as a path-loss stand-in. UE2 is the control. Run via testrig
 
 | arm | UE1 delivered / originated | UE1 rate | UE2 delivered | UE2 rate |
 |---|---|---|---|---|
-| baseline (`CELL_HARQ=0`) | 632 / 1156 (54.7 %) | 54 | 1155 / 1155 | 54 |
-| HARQ (`CELL_LA=0`) | 620 / 650 (95.4 %), 506 retx | 54 | 1154 / 1154 | 54 |
-| HARQ + LA | **1133 / 1134 (99.9 %)**, 21 retx | 54 → 6 | **1155 / 1155** | **54** |
+| baseline (`CELL_HARQ=0`) | 560 / 1156 (48.4 %) | 54 | 1155 / 1155 | 54 |
+| HARQ (`CELL_LA=0`) | 481 / 547 (87.9 %), 608 retx | 54 | 1156 / 1156 | 54 |
+| HARQ + LA | **1136 / 1136 (100 %)**, 19 retx | 54 → 9 → 6 | **1154 / 1154** | **54** |
 
-The UL stayed 100 % in slot in every arm (1.5–2.0 µs rms).
+The UL stayed 100 % in slot in every arm (1.5–2.0 µs rms). An earlier run of the
+same three arms, before the NACK rule judged report age, read 632/1156,
+620/650 and 1133/1134 for UE1. The control UE was untouched in both runs.
 
 - **HARQ alone** makes delivery reliable but costs throughput. UE1 has one DL
   slot per superframe, and retransmissions take it, so UE1 originated only
-  650 new frames against 1156.
+  547 new frames against 1156. At ~50 % loss, four attempts still fail about
+  6 % of the time.
 - **Link adaptation** moves UE1 to a rate that link can carry. Delivery and
   throughput both recover, and the control UE is untouched.
 
@@ -87,8 +91,8 @@ The UL stayed 100 % in slot in every arm (1.5–2.0 µs rms).
 - **The power delta is not linear.** The UE-reported SNR fell from 32 dB at
   −6 dB to 10 dB at −10 dB. That is not explained here.
 - **The SNR thresholds are starting points.** At −10 dB, UE1 reported a DL
-  SNR of 4.5 dB in its first judged window, below even the 6 Mb/s threshold,
-  so LA went straight to 6 Mb/s. Whether 9 or 12 Mb/s would have held is not
+  SNR of 4.5 dB in a judged window, below even the 6 Mb/s threshold, so LA
+  went to 6 Mb/s. Whether 9 or 12 Mb/s would have held is not
   measured.
 
 ## Open

@@ -1672,6 +1672,15 @@ add_executable(CellM2Selftest
 target_link_libraries(CellM2Selftest PRIVATE devourer)
 add_test(NAME cell_m2 COMMAND CellM2Selftest)
 
+# Headless guard for the M3 cell core (src/cell/Rach.h, UeRegistry.h): the
+# pool, the msgA/msgB formats and their auth/freshness rejects, duplicates,
+# exhaustion, the client's backoff rules, and a multi-UE contention run.
+add_executable(CellM3Selftest
+    tests/cell_m3_selftest.cpp
+)
+target_link_libraries(CellM3Selftest PRIVATE devourer)
+add_test(NAME cell_m3 COMMAND CellM3Selftest)
+
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
 # translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.

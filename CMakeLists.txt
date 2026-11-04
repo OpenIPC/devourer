@@ -654,6 +654,8 @@ if(DEVOURER_PCIE)
 endif()
 # M0 contract probes (docs/scheduled-mac.md), USB or PCIe through
 # examples/common/radio_open.h (DEVOURER_PCIE_BDF selects the vfio radio).
+# POSIX bench tools (unistd.h / _exit), so not on Windows.
+if(NOT WIN32)
 foreach(m0probe dl_departure_tx txegress_witness beacon_update_probe ue_rx_probe)
     add_executable(${m0probe}
         tests/${m0probe}.cpp
@@ -664,6 +666,7 @@ foreach(m0probe dl_departure_tx txegress_witness beacon_update_probe ue_rx_probe
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/tdma)
     target_link_libraries(${m0probe} PUBLIC devourer)
 endforeach()
+endif()
 
 # kestrelprobe — staged USB bring-up prober for the Kestrel (RTL8852B/C):
 # AX identity (die-id/cut) -> power-on + EFUSE -> firmware download, the

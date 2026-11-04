@@ -252,6 +252,48 @@ int main() {
     CHECK(p2.rssi[0] == 0 && p2.snr_avg == 0);
   }
 
+  /* beacon_radiotap_len: the StartBeacon / UpdateBeaconPayload strip. */
+  {
+    std::vector<uint8_t> raw = {0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff};
+    CHECK(beacon_radiotap_len(raw.data(), raw.size()) == 0); /* bare MPDU */
+    std::vector<uint8_t> rt(10 + 24, 0);
+    rt[2] = 10; /* it_len 10, LE */
+    rt[10] = 0x80;
+    CHECK(beacon_radiotap_len(rt.data(), rt.size()) == 10);
+    rt[2] = 0x0a; rt[3] = 0x01; /* it_len 0x010a: little-endian high byte */
+    CHECK(beacon_radiotap_len(rt.data(), rt.size()) == 0); /* > len */
+    rt[3] = 0;
+    CHECK(beacon_radiotap_len(rt.data(), 10) == 0); /* it_len == len: no MPDU */
+    CHECK(beacon_radiotap_len(rt.data(), 11) == 10);
+    rt[2] = 4; /* it_len below the 8-byte radiotap minimum */
+    CHECK(beacon_radiotap_len(rt.data(), rt.size()) == 0);
+    rt[2] = 10; rt[0] = 1; /* version != 0 */
+    CHECK(beacon_radiotap_len(rt.data(), rt.size()) == 0);
+    CHECK(beacon_radiotap_len(rt.data(), 7) == 0);
+    CHECK(beacon_radiotap_len(nullptr, 34) == 0);
+  }
+
+  /* same_ppdu: count AND descriptor fields (the 3-bit count wraps). */
+  {
+    KestrelRxFrame a, b;
+    a.ppdu_cnt = b.ppdu_cnt = 3;
+    a.rx_rate = b.rx_rate = 0x4;
+    a.bw = b.bw = 0;
+    a.gi_ltf = b.gi_ltf = 0;
+    a.ppdu_type = b.ppdu_type = 2;
+    CHECK(same_ppdu(a, b));
+    b.ppdu_cnt = 4;
+    CHECK(!same_ppdu(a, b));
+    b.ppdu_cnt = 3; b.rx_rate = 0x83; /* same count, another PPDU */
+    CHECK(!same_ppdu(a, b));
+    b.rx_rate = 0x4; b.ppdu_type = 3;
+    CHECK(!same_ppdu(a, b));
+    b.ppdu_type = 2; b.bw = 1;
+    CHECK(!same_ppdu(a, b));
+    b.bw = 0; b.gi_ltf = 1;
+    CHECK(!same_ppdu(a, b));
+  }
+
   if (failures == 0)
     std::printf("kestrel_rxparse_selftest: all checks passed\n");
   return failures == 0 ? 0 : 1;

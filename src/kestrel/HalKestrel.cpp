@@ -1757,8 +1757,14 @@ bool HalKestrel::update_beacon(const uint8_t *body, uint32_t len,
 
 bool HalKestrel::stop_beacon() {
   namespace r = kestrel::reg;
-  const uint32_t p = _device.rtw_read32(r::R_AX_PORT_CFG_P0);
-  return _device.rtw_write32(r::R_AX_PORT_CFG_P0, p & ~r::B_AX_BCNTX_EN_P0);
+  /* Beacon TX off, and the port back to the NO_LINK injection identity
+   * start_beacon moved it from (IRadio StopBeacon contract). The port stays
+   * FUNC-enabled, as the injection setup leaves it. */
+  uint32_t p = _device.rtw_read32(r::R_AX_PORT_CFG_P0);
+  p = r::set_clr_word(p, r::MAC_AX_NET_TYPE_NO_LINK, r::B_AX_NET_TYPE_P0_MSK,
+                      r::B_AX_NET_TYPE_P0_SH);
+  p &= ~r::B_AX_BCNTX_EN_P0;
+  return _device.rtw_write32(r::R_AX_PORT_CFG_P0, p);
 }
 
 void HalKestrel::mac_enable_imr() {

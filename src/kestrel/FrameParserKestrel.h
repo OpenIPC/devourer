@@ -115,6 +115,26 @@ inline bool parse_rx_8852b(const uint8_t *buf, size_t buflen,
   return true;
 }
 
+/* Do two sub-packet descriptors describe the same PPDU? The vendor pairing
+ * check (phl_rx.c): the 3-bit ppdu_cnt wraps every 8 PPDUs, so rate, bw,
+ * GI/LTF and PPDU type must match too. Used both to grow a held batch of WIFI
+ * frames and to pair a PPDU-status report with it. */
+inline bool same_ppdu(const KestrelRxFrame &a, const KestrelRxFrame &b) {
+  return a.ppdu_cnt == b.ppdu_cnt && a.rx_rate == b.rx_rate && a.bw == b.bw &&
+         a.gi_ltf == b.gi_ltf && a.ppdu_type == b.ppdu_type;
+}
+
+/* Length of a leading radiotap header on a beacon buffer, or 0 (IRadio beacon
+ * contract: StartBeacon / UpdateBeaconPayload strip one). A beacon MPDU starts
+ * with FC byte 0x80; radiotap starts with version 0 and its little-endian
+ * it_len at bytes 2..3, which must leave at least one byte of MPDU. */
+inline size_t beacon_radiotap_len(const uint8_t *b, size_t len) {
+  if (b == nullptr || len < 8 || b[0] != 0)
+    return 0;
+  const size_t rt = static_cast<size_t>(b[2] | (b[3] << 8));
+  return (rt >= 8 && rt < len) ? rt : 0;
+}
+
 /* --- PPDU-status (halbb physts) parse: per-path RSSI / SNR / EVM ---
  *
  * A PPDU-status payload is the bare halbb physts blob (HalKestrel clears the

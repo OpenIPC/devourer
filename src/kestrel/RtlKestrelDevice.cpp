@@ -1097,7 +1097,10 @@ bool RtlKestrelDevice::SetBeaconBackoff(bool random) {
     _logger->error("Kestrel: SetBeaconBackoff before InitWrite");
     return false;
   }
-  _hal.set_beacon_backoff(random);
+  if (!_hal.set_beacon_backoff(random)) {
+    _logger->error("Kestrel: SetBeaconBackoff({}) register write failed", random);
+    return false;
+  }
   _logger->info("Kestrel: beacon backoff {}", random
                     ? "random (EDCA CW 3..7, AIFS 25 us)"
                     : "OFF (fixed AIFS 25 us after TBTT)");

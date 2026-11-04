@@ -103,6 +103,9 @@ int main(int argc, char **argv) {
   const uint8_t node_id = (uint8_t)envi("NODE_ID", 0, 0, 255);
   const double bracket_max = envd("BRACKET_MAX_US", 0);   // 0 = adaptive
   const double bracket_slack = envd("BRACKET_SLACK_US", 5);
+  // BCN_BACKOFF=0: deterministic departure (fixed AIFS after the TBTT) — only
+  // with co-channel cells staggered, as the multi-cell tests do via PHASE_US.
+  const bool bcn_backoff = envi("BCN_BACKOFF", 1, 0, 1) != 0;
   std::deque<double> brackets;  // recent accepted+rejected bracket widths
 
   int fd = open(ref, O_RDONLY);
@@ -128,6 +131,12 @@ int main(int argc, char **argv) {
     }
   }
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
+  // Before StartBeacon: a refusal must not leave a beacon airing.
+  if (!bcn_backoff && !dev->SetBeaconBackoff(false)) {
+    fprintf(stderr, "BCN_BACKOFF=0 refused (beacon_backoff_ctl=%d)\n",
+            dev->GetAdapterCaps().beacon_backoff_ctl ? 1 : 0);
+    return 1;
+  }
   std::vector<uint8_t> bcn = {
       0x80,0x00,0x00,0x00, 0xff,0xff,0xff,0xff,0xff,0xff,
       0x57,0x42,0x75,0x05,0xd6,node_id, 0x57,0x42,0x75,0x05,0xd6,node_id, 0x00,0x00,
@@ -138,12 +147,6 @@ int main(int argc, char **argv) {
     fprintf(stderr, "StartBeacon UNSUPPORTED\n"); return 1;
   }
   dev->SetCcaMode(true);
-  // BCN_BACKOFF=0: deterministic departure (fixed AIFS after the TBTT) — only
-  // with co-channel cells staggered, as the multi-cell tests do via PHASE_US.
-  if (envi("BCN_BACKOFF", 1, 0, 1) == 0 && !dev->SetBeaconBackoff(false)) {
-    fprintf(stderr, "BCN_BACKOFF=0 but this part has no beacon backoff control\n");
-    return 1;
-  }
   std::this_thread::sleep_for(std::chrono::seconds(2));
   uint64_t probe_t = 0, probe_f = 0;
   const bool use_fr = envd("LEDGER", 0) == 0 && dev->ReadTsfAndFreeRun(probe_t, probe_f);

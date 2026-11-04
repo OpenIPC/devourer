@@ -642,7 +642,7 @@ public:
   /* Beacon-queue EDCA: random = the vendor CW 3..7 (ecw 2/3) + AIFS 25 us;
    * !random = CW 0, same AIFS. Writes now and is re-applied by every
    * scheduler_init, so it survives a re-init. */
-  void set_beacon_backoff(bool random);
+  bool set_beacon_backoff(bool random); /* false: write failed, setting unchanged */
 
   /* RF calibration at bring-up: the vendored halrf DACK + RX-DCK (both chips;
    * MSBK/DADCK/biasK included). On the 8852B the RF 0x0/0x1/0x5 registers are

@@ -1636,6 +1636,27 @@ add_executable(CellSelftest
 target_link_libraries(CellSelftest PRIVATE devourer)
 add_test(NAME cell_core COMMAND CellSelftest)
 
+# Headless guard for the M1 cell node's pure logic (examples/cell/cell.h).
+add_executable(CellNodeSelftest
+    tests/cell_node_selftest.cpp
+)
+target_link_libraries(CellNodeSelftest PRIVATE devourer)
+target_include_directories(CellNodeSelftest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/cell)
+add_test(NAME cell_node COMMAND CellNodeSelftest)
+
+# cell — the M1 (#255) reference DU / UE / witness node (examples/cell/main.cpp).
+# POSIX bench tool like the M0 probes (radio_open.h), so not on Windows.
+if(NOT WIN32)
+    add_executable(cell
+        examples/cell/main.cpp
+        examples/common/env_config.cpp
+    )
+    target_link_libraries(cell PUBLIC devourer)
+    target_include_directories(cell PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/cell)
+endif()
+
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
 # translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.
@@ -1822,6 +1843,15 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/la_csi.py --selftest
     )
     set_tests_properties(la_csi_math PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Headless guard for the M1 cell KPI analysis (tests/cell_2ue_analyze.py):
+    # a synthetic in-slot run passes; a UE uplink moved into the other UE's
+    # slot is flagged out-of-slot and as an overlap; a missed uplink counts.
+    add_test(
+        NAME cell_2ue_analyze
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/cell_2ue_analyze.py --selftest
+    )
 
     # Headless guard for the 2.4 GHz-VHT waterfall's decode + crossing math
     # (tests/nitroqam_waterfall.py). The DESC_RATE decode is what proves which

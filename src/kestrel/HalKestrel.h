@@ -138,6 +138,13 @@ public:
    * datarate for the beacon (e.g. MAC_AX_OFDM6). */
   bool start_beacon(const uint8_t *body, uint32_t len, uint16_t interval_tu,
                     uint8_t bss_color, uint16_t rate_ax);
+  /* Replace the armed beacon's content: the same BCN_UPD_V1 H2C as
+   * start_beacon, without touching the port or the TBTT timing. */
+  bool update_beacon(const uint8_t *body, uint32_t len, uint16_t rate_ax);
+  /* Stop the HW beacon: clear BCNTX_EN in PORT_CFG_P0 (mac_port_cfg
+   * MAC_AX_PCFG_TX_SW = 0, the vendor rtw_hal_beacon_stop path) and return
+   * NET_TYPE to NO_LINK. The port stays enabled and the TSF keeps running. */
+  bool stop_beacon();
 
   /* PHY bring-up: apply the halbb BB register + gain tables and the
    * halrf radio-A/B tables (via the vendored halbb/halrf loaders). `rfe_type`

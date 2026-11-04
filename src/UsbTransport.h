@@ -113,6 +113,7 @@ public:
                const std::function<void(const uint8_t *, int)> &on_data,
                const std::function<bool()> &should_stop) override;
   int rx_raw(uint8_t *buf, int len, int timeout_ms) override;
+  void set_rx_max_wait_us(unsigned us) override { _rx_max_wait_us = us; }
   void clear_halt(uint8_t ep) override { libusb_clear_halt(_dev_handle, ep); }
   void quiesce_tx() override;
 
@@ -272,6 +273,7 @@ private:
   RxMode _rx_mode = RxMode::Async;
   int _pool_spare = 0;
   int _ring_ms = 0;
+  std::atomic<unsigned> _rx_max_wait_us{0}; /* set_rx_max_wait_us; 0 = default */
   PoolExhaust _pool_exhaust = PoolExhaust::Backpressure;
 
   /* rx_loop helpers for the servicing strategies dispatched off _rx_mode. */

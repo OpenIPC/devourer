@@ -90,6 +90,7 @@ public:
   void hci_setup() { _transport->hci_setup(); }
   /* PCIe LTR permission (ITransport::ltr_allowed); true on USB. */
   bool ltr_allowed() { return _transport->ltr_allowed(); }
+  void set_rx_max_wait_us(unsigned us) { _transport->set_rx_max_wait_us(us); }
   /* Pipelined register writes — see ITransport::write_batch_begin. */
   void write_batch_begin() { _transport->write_batch_begin(); }
   bool write_batch_end() { return _transport->write_batch_end(); }

@@ -468,6 +468,61 @@ void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
   const uint16_t drv_info_unit =
       _variant == kestrel::ChipVariant::C8852C ? 16 : 8;
   long long parse_aborts = 0;
+
+  /* PPDU-status pairing (vendor phl_rx.c, the psts_info sts_ent queues): the
+   * MAC delivers a PPDU's WIFI frame(s) FIRST and its PPDU-status report
+   * after them, in a later RX buffer (measured on an RTL8852CE: ~140 us
+   * later). The frames of the PPDU in flight are held (copied — the DMA
+   * buffer is recycled) until the status with the same ppdu_cnt arrives, then
+   * delivered carrying it. The vendor's sanity match (rate/bw/gi_ltf/ppdu_type)
+   * guards against a lost status pairing with a later PPDU of the same 3-bit
+   * count. Held frames go out WITHOUT a status (rssi/snr/evm 0 = no
+   * measurement, the convention every consumer already skips) when a frame of
+   * another PPDU or a non-matching status arrives, after kHoldMax of RX idle,
+   * and when the loop exits — so no frame is ever dropped or reordered.
+   * held_mu: on USB's spsc RX mode on_data runs on a consumer thread while the
+   * stop predicate (the idle flush) runs on the event thread. */
+  struct HeldRx {
+    std::vector<uint8_t> bytes;
+    Packet p{}; /* value-initialized: rx_pkt_attrib's plain fields read 0 */
+  };
+  std::mutex held_mu;
+  std::vector<HeldRx> held;
+  kestrel::KestrelRxFrame held_hdr; /* the held PPDU's descriptor fields */
+  std::chrono::steady_clock::time_point held_since{};
+  constexpr auto kHoldMax = std::chrono::milliseconds(2);
+  auto deliver_held = [&](const kestrel::KestrelPhySts *ps) {
+    for (HeldRx &h : held) {
+      Packet &p = h.p;
+      for (int i = 0; i < 4; i++) {
+        p.RxAtrib.rssi[i] = ps ? ps->rssi[i] : 0;
+        p.RxAtrib.snr[i] = ps ? ps->snr[i] : 0;
+        p.RxAtrib.evm[i] = ps ? ps->evm[i] : 0;
+      }
+      /* Window aggregates fold CRC-clean frames only (the Jaguar
+       * convention): a garbled frame's status would bias the means and the
+       * active-chain classification.
+       *
+       * _rxq: passive rssi-snr floor + LinkHealth, fed path-A RSSI +
+       * the IE01 average SNR (the all-paths quantity the passive floor
+       * was validated against; per-path SNR goes to _rxpaths instead).
+       * A frame with no IE_01 SNR (snr_avg=0) still counts toward RSSI.
+       * _rxpaths: per-antenna window means (GetActiveRxPaths). Both
+       * dies are 2 RX chains; C/D read 0 and are excluded by n_chains. */
+      if (ps && !p.RxAtrib.crc_err) {
+        if (ps->rssi[0] > 0)
+          _rxq.add(ps->rssi[0], ps->snr_avg, 0);
+        _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm, 2);
+      }
+      p.Data = std::span<uint8_t>(h.bytes.data(), h.bytes.size());
+      if (packetProcessor)
+        packetProcessor(p);
+    }
+    held.clear();
+  };
+  /* The idle flush rides the stop predicate: have USB poll it at least every
+   * 1 ms (its default event wait is 100 ms), so kHoldMax holds on both buses. */
+  _device.set_rx_max_wait_us(1000);
   _rx_running = true;
   struct RunningGuard {
     std::atomic<bool> &f;
@@ -476,6 +531,7 @@ void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
   _device.bulk_read_async_loop(
       32768, 8,
       [&, drv_info_unit](const uint8_t *data, int n) {
+        std::lock_guard<std::mutex> held_lk(held_mu);
         uint32_t off = 0;
         while (off + 16 <= static_cast<uint32_t>(n)) {
           kestrel::KestrelRxFrame f;
@@ -498,10 +554,12 @@ void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
              * kestrel_halbb_rx_bringup + the R_AX_PPDU_STAT no-APP-prepend
              * config in bb_reset_all) — same header, same IE walk. */
             kestrel::KestrelPhySts ps;
-            if (kestrel::parse_physts_8852(
-                    f.payload, f.payload_len,
-                    _variant == kestrel::ChipVariant::C8852C, ps))
-              _last_physts = ps;
+            const bool ps_ok = kestrel::parse_physts_8852(
+                f.payload, f.payload_len,
+                _variant == kestrel::ChipVariant::C8852C, ps);
+            if (!held.empty())
+              deliver_held(kestrel::same_ppdu(f, held_hdr) && ps_ok ? &ps
+                                                                     : nullptr);
             /* Trace: raw physts blobs (first few) — the IE-page ground truth
              * when a per-path metric reads 0 (is the page absent, or zero?). */
             static int physts_dumped = 0;
@@ -518,7 +576,10 @@ void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
               _logger->trace("Kestrel physts[{}B]: {}", f.payload_len, hex);
             }
           } else if (f.rpkt_type == kestrel::RPKT_TYPE_WIFI && packetProcessor) {
-            Packet p{};
+            if (!held.empty() && !kestrel::same_ppdu(f, held_hdr))
+              deliver_held(nullptr); /* that PPDU's status never came */
+            HeldRx h{};
+            Packet &p = h.p;
             p.RxAtrib.pkt_len = static_cast<uint16_t>(f.payload_len);
             p.RxAtrib.crc_err = f.crc_err;
             p.RxAtrib.icv_err = f.icv_err;
@@ -527,29 +588,12 @@ void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
             p.RxAtrib.ppdu_type = f.ppdu_type; /* 7=HE_SU 8=HE_ERSU */
             p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
             p.RxAtrib.tsfl = f.freerun_cnt;
-            for (int i = 0; i < 4; i++) {
-              p.RxAtrib.rssi[i] = _last_physts.rssi[i];
-              p.RxAtrib.snr[i] = _last_physts.snr[i];
-              p.RxAtrib.evm[i] = _last_physts.evm[i];
+            h.bytes.assign(f.payload, f.payload + f.payload_len);
+            if (held.empty()) {
+              held_hdr = f;
+              held_since = std::chrono::steady_clock::now();
             }
-            /* Window aggregates fold CRC-clean frames only (the Jaguar
-             * convention): a garbled frame's cached physts would bias the
-             * means and the active-chain classification.
-             *
-             * _rxq: passive rssi-snr floor + LinkHealth, fed path-A RSSI +
-             * the IE01 average SNR (the all-paths quantity the passive floor
-             * was validated against; per-path SNR goes to _rxpaths instead).
-             * A frame with no IE_01 SNR (snr_avg=0) still counts toward RSSI.
-             * _rxpaths: per-antenna window means (GetActiveRxPaths). Both
-             * dies are 2 RX chains; C/D read 0 and are excluded by n_chains. */
-            if (!f.crc_err) {
-              if (_last_physts.rssi[0] > 0)
-                _rxq.add(_last_physts.rssi[0], _last_physts.snr_avg, 0);
-              _rxpaths.add(p.RxAtrib.rssi, p.RxAtrib.snr, p.RxAtrib.evm, 2);
-            }
-            p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.payload),
-                                        f.payload_len);
-            packetProcessor(p);
+            held.push_back(std::move(h));
           } else if (f.rpkt_type == kestrel::RPKT_TYPE_C2H) {
             handle_c2h(f.payload, f.payload_len);
           }
@@ -561,7 +605,21 @@ void RtlKestrelDevice::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
       /* Stop on StopRxLoop() or the demos' SIGINT/SIGTERM flag — the same
        * signal-flag pattern every generation's RX loop honours (without it the
        * harness's `timeout` SIGTERM never unblocks the loop). */
-      [this]() -> bool { return _rx_stop || g_devourer_should_stop; });
+      [&]() -> bool {
+        /* Polled every loop pass on the RX thread (PCIe: each idle poll;
+         * USB: each <=100 ms event wait) — bounds a held frame's wait when
+         * its status never arrives and nothing else is received. */
+        {
+          std::lock_guard<std::mutex> held_lk(held_mu);
+          if (!held.empty() &&
+              std::chrono::steady_clock::now() - held_since > kHoldMax)
+            deliver_held(nullptr);
+        }
+        return _rx_stop || g_devourer_should_stop;
+      });
+  _device.set_rx_max_wait_us(0);
+  std::lock_guard<std::mutex> held_lk(held_mu);
+  deliver_held(nullptr);
 }
 
 void RtlKestrelDevice::SetMonitorChannel(SelectedChannel channel) {
@@ -1081,6 +1139,9 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
     _logger->error("Kestrel: StartBeacon empty beacon");
     return false;
   }
+  const size_t rt = kestrel::beacon_radiotap_len(beacon, len);
+  beacon += rt;
+  len -= rt;
   const uint16_t iv = interval_tu > 0 ? static_cast<uint16_t>(interval_tu) : 100;
   /* OFDM 6M beacon (MAC_AX_OFDM6). bss_color 0 (no HE-BSS coloring). */
   const bool ok = _hal.start_beacon(beacon, static_cast<uint32_t>(len), iv,
@@ -1090,6 +1151,30 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
   if (ok)
     _bcn_interval_tu = iv;
   return ok;
+}
+
+bool RtlKestrelDevice::UpdateBeaconPayload(const uint8_t *beacon, size_t len) {
+  if (_bcn_interval_tu <= 0) {
+    _logger->error("Kestrel: UpdateBeaconPayload without an active beacon");
+    return false;
+  }
+  if (beacon == nullptr || len == 0)
+    return false;
+  const size_t rt = kestrel::beacon_radiotap_len(beacon, len);
+  return _hal.update_beacon(beacon + rt, static_cast<uint32_t>(len - rt),
+                            kestrel::reg::MAC_AX_OFDM6);
+}
+
+bool RtlKestrelDevice::StopBeacon() {
+  if (_bcn_interval_tu <= 0)
+    return false;
+  if (!_hal.stop_beacon()) {
+    _logger->error("Kestrel: StopBeacon register write failed");
+    return false;
+  }
+  _bcn_interval_tu = 0;
+  _logger->info("Kestrel: HW beacon stopped (BCNTX_EN off)");
+  return true;
 }
 
 bool RtlKestrelDevice::SetBeaconBackoff(bool random) {

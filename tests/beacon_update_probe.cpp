@@ -39,6 +39,7 @@
 #include "UsbOpen.h"
 #include "WiFiDriver.h"
 #include "env_config.h"
+#include "radio_open.h"
 #include "logger.h"
 
 static const uint8_t kSa[6] = {0x57, 0x42, 0x75, 0x05, 0xd6, 0x00};
@@ -128,20 +129,9 @@ int main(int argc, char** argv) {
 
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger);
-  libusb_context* ctx = nullptr;
-  if (libusb_init(&ctx) < 0) return 1;
-  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
-  uint16_t vid = 0x0bda, pid = 0;
-  if (const char* v = std::getenv("DEVOURER_VID")) vid = (uint16_t)strtoul(v, 0, 0);
-  if (const char* p = std::getenv("DEVOURER_PID")) pid = (uint16_t)strtoul(p, 0, 0);
-  auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
-  if (!h) { fprintf(stderr, "open %04x:%04x failed\n", vid, pid); return 1; }
-  std::shared_ptr<devourer::UsbDeviceLock> lock;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lock) != 0)
-    return 1;
-  WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRadio(h, ctx, lock, devourer_config_from_env());
-  if (!dev) { fprintf(stderr, "no driver\n"); return 1; }
+  OpenedRadio radio = open_radio_from_env(logger, 0x0bda, 0);
+  if (!radio.dev) return 1;
+  IRadio* dev = radio.dev.get();
 
   if (rx_mode) {
     int secs = argc > 1 ? atoi(argv[1]) : 60;

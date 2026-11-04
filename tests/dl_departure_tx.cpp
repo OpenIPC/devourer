@@ -1,5 +1,5 @@
 // dl_departure_tx.cpp — DL-departure probe transmitter (M0 contract 1): airs TD
-// v2 data frames over ANY USB adapter, each carrying BOTH submit-time stamps —
+// v2 data frames over ANY USB or PCIe adapter (radio_open.h), each carrying BOTH submit-time stamps —
 //   * tx_tsf  — ReadTsf() near the send call (the TX hardware clock), and
 //   * host_ns — steady_clock immediately before send_packet (the HOST clock a
 //     slot scheduler actually controls).
@@ -13,6 +13,8 @@
 //   tests/dl_departure_tx.cpp examples/common/env_config.cpp build/libdevourer.a \
 //   $(pkg-config --cflags --libs libusb-1.0) -lpthread -o build/dl_departure_tx
 // Run: sudo DEVOURER_PID=0x8812 DEVOURER_CHANNEL=6 build/dl_departure_tx [secs]
+//      sudo DEVOURER_PCIE_BDF=0000:05:00.0 DEVOURER_CHANNEL=36 build/dl_departure_tx
+// DL_CSMA=1 keeps the MAC's carrier sense (default: SetCcaMode(true), off).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -21,14 +23,10 @@
 #include <memory>
 #include <thread>
 
-#include <libusb.h>
-
 #include "RadiotapBuilder.h"
 #include "SelectedChannel.h"
-#include "UsbOpen.h"
-#include "WiFiDriver.h"
-#include "env_config.h"
 #include "logger.h"
+#include "radio_open.h"
 #include "tdma.h"
 
 static uint64_t host_ns() {
@@ -41,27 +39,19 @@ int main(int argc, char** argv) {
   int secs = argc > 1 ? atoi(argv[1]) : 30;
   int gap_us = 8000;
   if (const char* g = std::getenv("GAP_US")) gap_us = atoi(g);
-  uint16_t vid = 0x0bda, pid = 0x8812;
-  if (const char* p = std::getenv("DEVOURER_PID")) pid = (uint16_t)strtoul(p, 0, 0);
-  if (const char* v = std::getenv("DEVOURER_VID")) vid = (uint16_t)strtoul(v, 0, 0);
   uint8_t ch = 6;
   if (const char* c = std::getenv("DEVOURER_CHANNEL")) ch = atoi(c);
 
   auto logger = std::make_shared<Logger>();
-  libusb_context* ctx = nullptr;
-  libusb_init(&ctx);
-  libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
-  auto* h = libusb_open_device_with_vid_pid(ctx, vid, pid);
-  if (!h) { fprintf(stderr, "open fail %04x:%04x\n", vid, pid); return 1; }
-  std::shared_ptr<devourer::UsbDeviceLock> lk;
-  if (devourer::claim_interface_then_reset(h, devourer::find_wifi_interface(h), logger, true, lk) != 0) return 1;
-  WiFiDriver wifi(logger);
-  auto dev = wifi.CreateRadio(h, ctx, lk, devourer_config_from_env());
-  if (!dev) return 1;
+  OpenedRadio radio = open_radio_from_env(logger, 0x0bda, 0x8812);
+  if (!radio.dev) return 1;
+  IRadio* dev = radio.dev.get();
+  const bool csma = std::getenv("DL_CSMA") && std::strcmp(std::getenv("DL_CSMA"), "1") == 0;
 
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
-  dev->SetCcaMode(true);  // disable EDCCA — suppress CSMA backoff so the residual
-                          // reflects the transport + MAC-pipeline floor
+  if (!csma)
+    dev->SetCcaMode(true);  // disable EDCCA — suppress CSMA backoff so the residual
+                            // reflects the transport + MAC-pipeline floor
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   const auto rt = devourer::build_stream_radiotap(
@@ -78,7 +68,7 @@ int main(int argc, char** argv) {
     dev->send_packet(f.data(), f.size());
     std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
   }
-  fprintf(stderr, "dl_departure_tx: %u frames on ch%d (%04x:%04x)\n", seq, ch,
-          vid, pid);
+  fprintf(stderr, "dl_departure_tx: %u frames on ch%d (%s, csma %s)\n", seq, ch,
+          radio.label.c_str(), csma ? "on" : "off");
   return 0;
 }

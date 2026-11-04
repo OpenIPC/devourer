@@ -119,6 +119,11 @@ public:
     (void)buf; (void)len; (void)timeout_ms;
     return -1;
   }
+  /* Cap on how long rx_loop may wait for data between should_stop() polls
+   * (us; 0 = the transport default). A caller whose stop predicate does
+   * time-based work (Kestrel's held-frame flush) sets it; PCIe already polls
+   * every few hundred us, so only USB implements it. */
+  virtual void set_rx_max_wait_us(unsigned us) { (void)us; }
   virtual void clear_halt(uint8_t ep) { (void)ep; }
   /* Stop the TX engine and return only once nothing is in flight: cancel every
    * outstanding transfer, reap the completions, and refuse further sends. The

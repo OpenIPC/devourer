@@ -874,7 +874,9 @@ void UsbTransport::rx_loop(
   while (!should_stop() && sh.active > 0 &&
          !sh.dead.load(std::memory_order_relaxed)) {
     const unsigned cap = _rx_max_wait_us.load(std::memory_order_relaxed);
-    struct timeval tv {0, cap > 0 && cap < 100000 ? static_cast<long>(cap) : 100000};
+    struct timeval tv {0, 100000};
+    if (cap > 0 && cap < 100000) /* suseconds_t is int on macOS: no narrowing init */
+      tv.tv_usec = static_cast<decltype(tv.tv_usec)>(cap);
     libusb_handle_events_timeout_completed(_ctx, &tv, nullptr);
     if (sh.telemetry) {
       const auto now = std::chrono::steady_clock::now();

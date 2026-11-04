@@ -363,8 +363,12 @@ at `TSF % interval` ≈ 22–48 µs after one transitional beacon, and toggling
 native state and nonzero offsets are refused; ports 1–4 do not run a TSF
 (`TSF_SYNC` from another port is unusable) and `TBTT_SHIFT_P0` is TU-granular.
 The discipline loop steers the TSF itself through `WriteTsf` —
-`tests/pcie_ptp_tsf_discipline.cpp` (actuator = TSF step, the steps subtracted
-from the fit's TSF axis, i.e. the steering ledger below) holds the TBTT to an
+`tests/pcie_ptp_tsf_discipline.cpp` (actuator = TSF step; the fit runs against
+the MAC's free-running counter, `IRadio::ReadTsfAndFreeRun`, so every step's true
+effect is measured — the older steering-ledger axis, which books commanded steps,
+let three cells drift ~10 µs rms apart on air while each loop's own estimate stayed
+sub-µs; with the free-running axis, cross-cell TBTT alignment measured on air is
+median −3…0 µs, 1.8–3.6 µs rms over five runs) holds the TBTT to an
 I226 PHC at **0.57–0.86 µs RMS** over four runs on each of two 8852CEs, one on a
 root port and one behind an ASM1182e PCIe switch (no measurable slot
 difference, including with an NVMe saturating the switch uplink) — the same

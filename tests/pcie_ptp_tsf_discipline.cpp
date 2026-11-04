@@ -6,11 +6,21 @@
 // Sibling of pcie_ptp_beacon.cpp (the PinBeaconTbtt loop for Jaguar2) with the
 // same model and output, so the two are directly comparable: a least-squares
 // fit ref = a·tsf + b against a PTP hardware clock, the TBTT at the next TSF
-// grid point mapped through the fit, and a PI on the phase error. The steps
-// are subtracted out of the fit's TSF axis (tsf - S, S = sum of applied
-// steps), and the fit is a sliding window so step-accounting error ages out.
-// A read-add-write lands STEP_COMP_US late (the TSF runs during the write);
-// the default 2 µs is the bench readback on an RTL8852CE behind PCIe.
+// grid point mapped through the fit, and a PI on the phase error.
+//
+// The fit's x axis is a free-running counter the TSF steps never touch
+// (IRadio::ReadTsfAndFreeRun; Kestrel R_AX_FREERUN_CNT): tsf - freerun is read
+// every iteration, so every step's TRUE effect is known and nothing is booked.
+// Each sample is bracketed by two PHC reads (midpoint used). The bracket's
+// baseline is the read cost itself — ~15-25 us for the six MMIO + two PHC
+// reads, more behind a PCIe switch — so a sample is dropped only when its
+// bracket exceeds the running median of the last 32 by BRACKET_SLACK_US
+// (default 5; host preemption between the reads), or an explicit
+// BRACKET_MAX_US cap when set. LEDGER=1 (or a
+// part without a free-running counter) falls back to the older ledger axis,
+// tsf - S with S = sum of commanded steps, which assumes every read-add-write
+// landed exactly STEP_COMP_US late. On the bench it didn't: three cells drifted
+// ~10 us rms apart on air while each loop's own estimate stayed sub-us.
 //
 // Build: the pcie_ptp_tsf_discipline CMake target (DEVOURER_PCIE=ON).
 // Run: sudo DEVOURER_PCIE_BDF=0000:05:00.0 DEVOURER_CHANNEL=36 REF_PTP=/dev/ptp0 \
@@ -38,24 +48,46 @@
 
 #define FD_TO_CLOCKID(fd) ((~(clockid_t)(fd) << 3) | 3)
 
-static int64_t phc_us(clockid_t c) {
+static double phc_us(clockid_t c) {
   struct timespec t;
   clock_gettime(c, &t);
-  return (int64_t)t.tv_sec * 1000000 + t.tv_nsec / 1000;
+  return (double)t.tv_sec * 1e6 + (double)t.tv_nsec / 1e3;
 }
 
+// Strict env parsing: a malformed or non-finite value is a configuration error,
+// not something to fall back from silently (atof would turn "x" into 0 and let
+// "nan" reach the steering maths).
 static double envd(const char *k, double d) {
   const char *v = std::getenv(k);
-  return v ? atof(v) : d;
+  if (!v) return d;
+  char *end = nullptr;
+  const double x = std::strtod(v, &end);
+  if (end == v || *end != '\0' || !std::isfinite(x)) {
+    fprintf(stderr, "invalid %s=\"%s\" (want a finite number)\n", k, v);
+    std::exit(2);
+  }
+  return x;
+}
+// Integer in [lo, hi], else a configuration error.
+static long envi(const char *k, long d, long lo, long hi) {
+  const char *v = std::getenv(k);
+  if (!v) return d;
+  char *end = nullptr;
+  const long x = std::strtol(v, &end, 0);
+  if (end == v || *end != '\0' || x < lo || x > hi) {
+    fprintf(stderr, "invalid %s=\"%s\" (want an integer in %ld..%ld)\n", k, v, lo, hi);
+    std::exit(2);
+  }
+  return x;
 }
 
 int main(int argc, char **argv) {
   const char *bdf = std::getenv("DEVOURER_PCIE_BDF");
   if (!bdf) { fprintf(stderr, "set DEVOURER_PCIE_BDF\n"); return 2; }
   const char *ref = std::getenv("REF_PTP"); if (!ref) ref = "/dev/ptp0";
-  const uint8_t ch = (uint8_t)envd("DEVOURER_CHANNEL", 36);
+  const uint8_t ch = (uint8_t)envi("DEVOURER_CHANNEL", 36, 1, 196);
   const int secs = argc > 1 ? atoi(argv[1]) : 180;
-  const int interval_tu = (int)envd("BCN_TU", 100);
+  const int interval_tu = (int)envi("BCN_TU", 100, 1, 65535);  // the period is a divisor
   const int64_t interval = (int64_t)interval_tu * 1024;
   const double gain = envd("GAIN", 0.9), ki = envd("KI", 0.10);
   const double capture = envd("CAPTURE_US", 300);
@@ -63,6 +95,15 @@ int main(int argc, char **argv) {
   const double comp = envd("STEP_COMP_US", 2.0);
   const size_t window = (size_t)envd("FIT_WINDOW", 64);
   const long settle = (long)envd("SETTLE", 40);
+  // Multi-node runs: PHASE_US puts this node's TBTT at ref % interval ==
+  // PHASE_US (stagger nodes so their beacons don't collide on one channel);
+  // NODE_ID is the last octet of the beacon SA/BSSID so an observer can tell
+  // the nodes apart (tests/beacon_phase_observer.cpp).
+  const double phase = envd("PHASE_US", 0);
+  const uint8_t node_id = (uint8_t)envi("NODE_ID", 0, 0, 255);
+  const double bracket_max = envd("BRACKET_MAX_US", 0);   // 0 = adaptive
+  const double bracket_slack = envd("BRACKET_SLACK_US", 5);
+  std::deque<double> brackets;  // recent accepted+rejected bracket widths
 
   int fd = open(ref, O_RDONLY);
   if (fd < 0) { fprintf(stderr, "open %s failed\n", ref); return 1; }
@@ -89,7 +130,7 @@ int main(int argc, char **argv) {
   dev->InitWrite(SelectedChannel{ch, 0, CHANNEL_WIDTH_20});
   std::vector<uint8_t> bcn = {
       0x80,0x00,0x00,0x00, 0xff,0xff,0xff,0xff,0xff,0xff,
-      0x57,0x42,0x75,0x05,0xd6,0x00, 0x57,0x42,0x75,0x05,0xd6,0x00, 0x00,0x00,
+      0x57,0x42,0x75,0x05,0xd6,node_id, 0x57,0x42,0x75,0x05,0xd6,node_id, 0x00,0x00,
       0,0,0,0,0,0,0,0,
       (uint8_t)(interval_tu & 0xff), (uint8_t)(interval_tu >> 8), 0x00,0x00,
       0x00,0x03,'P','T','P', 0x01,0x01,0x82};
@@ -98,20 +139,58 @@ int main(int argc, char **argv) {
   }
   dev->SetCcaMode(true);
   std::this_thread::sleep_for(std::chrono::seconds(2));
+  uint64_t probe_t = 0, probe_f = 0;
+  const bool use_fr = envd("LEDGER", 0) == 0 && dev->ReadTsfAndFreeRun(probe_t, probe_f);
+  fprintf(stderr, "pcie_ptp_tsf_discipline: fit axis = %s\n",
+          use_fr ? "free-running counter (steps measured)" : "ledger (steps booked)");
 
   struct Pt { double x, y; };
   std::deque<Pt> pts;  // (tsf - S - x0, ref - y0)
   bool init = false;
   double x0 = 0, y0 = 0, S = 0, integ = 0;
-  long n = 0;
+  long n = 0, rejected = 0;
+  double last_bracket = 0;
   int write_fail_run = 0;
   std::vector<double> locked;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(secs);
   while (std::chrono::steady_clock::now() < deadline) {
-    const int64_t tsf = (int64_t)dev->ReadTsf();
-    const int64_t r = phc_us(refclk);
-    if (!init) { x0 = (double)tsf; y0 = (double)r; init = true; }
-    pts.push_back({(double)tsf - S - x0, (double)r - y0});
+    // x: the fit's axis — the free-running counter, or (ledger) tsf - S.
+    int64_t tsf = 0;
+    double x = 0, r = 0;
+    if (use_fr) {
+      uint64_t t = 0, f = 0;
+      const double r1 = phc_us(refclk);
+      const bool ok_read = dev->ReadTsfAndFreeRun(t, f);
+      const double r2 = phc_us(refclk);
+      const double br = r2 - r1;
+      double limit = bracket_max;
+      if (limit <= 0) {
+        if (brackets.size() >= 8) {
+          std::vector<double> sb(brackets.begin(), brackets.end());
+          std::nth_element(sb.begin(), sb.begin() + sb.size() / 2, sb.end());
+          limit = sb[sb.size() / 2] + bracket_slack;
+        } else {
+          limit = 1e9;  // learning the baseline
+        }
+      }
+      brackets.push_back(br);
+      if (brackets.size() > 32) brackets.pop_front();
+      if (!ok_read || br > limit) {
+        ++rejected;
+        std::this_thread::sleep_for(std::chrono::milliseconds(loop_ms));
+        continue;
+      }
+      last_bracket = br;
+      tsf = (int64_t)t;
+      x = (double)f;
+      r = 0.5 * (r1 + r2);
+    } else {
+      tsf = (int64_t)dev->ReadTsf();
+      r = phc_us(refclk);
+      x = (double)tsf - S;
+    }
+    if (!init) { x0 = x; y0 = r; init = true; }
+    pts.push_back({x - x0, r - y0});
     if (pts.size() > window) pts.pop_front();
     ++n;
     if (pts.size() >= 8) {
@@ -123,8 +202,10 @@ int main(int argc, char **argv) {
       const double b = (sy - a * sx) / m;
       // The TBTT sits on the (real) TSF grid: next grid point after now.
       const int64_t next_tbtt = (tsf / interval + 1) * interval;
-      const double tbtt_ref = y0 + a * ((double)next_tbtt - S - x0) + b;
-      double e = std::fmod(tbtt_ref, (double)interval);
+      // the same instant on the fit's axis: tsf - x is the TSF's offset from it
+      const double next_tbtt_x = (double)next_tbtt - ((double)tsf - x);
+      const double tbtt_ref = y0 + a * (next_tbtt_x - x0) + b;
+      double e = std::fmod(tbtt_ref - phase, (double)interval);
       if (e > interval / 2.0) e -= interval; else if (e < -interval / 2.0) e += interval;
       if (std::fabs(e) < capture) {
         integ = std::clamp(integ + e, -1500.0, 1500.0);
@@ -140,7 +221,7 @@ int main(int argc, char **argv) {
         const uint64_t now = dev->ReadTsf();
         ok = dev->WriteTsf(now + (uint64_t)(step + (int64_t)std::llround(comp)));
         if (ok) {
-          S += (double)step;
+          if (!use_fr) S += (double)step;  // free-running axis: nothing to book
           write_fail_run = 0;
         } else {
           // The counter may be half-updated: its axis is no longer the one the
@@ -160,8 +241,8 @@ int main(int argc, char **argv) {
       }
       if (n > settle) locked.push_back(e);
       printf("{\"ev\":\"ptptsf\",\"i\":%ld,\"phase_us\":%.1f,\"step_us\":%lld,"
-             "\"ok\":%d,\"ppm\":%.2f}\n",
-             n, e, (long long)step, ok ? 1 : 0, (a - 1.0) * 1e6);
+             "\"ok\":%d,\"ppm\":%.2f,\"bracket_us\":%.1f}\n",
+             n, e, (long long)step, ok ? 1 : 0, (a - 1.0) * 1e6, last_bracket);
       fflush(stdout);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(loop_ms));
@@ -171,10 +252,11 @@ int main(int argc, char **argv) {
     std::vector<double> ab;
     for (double e : locked) { ss += e * e; ab.push_back(std::fabs(e)); }
     std::sort(ab.begin(), ab.end());
-    printf("{\"ev\":\"ptptsf.summary\",\"bdf\":\"%s\",\"n\":%zu,\"rms_us\":%.2f,"
-           "\"p95_abs_us\":%.1f,\"max_abs_us\":%.1f}\n",
-           bdf, locked.size(), std::sqrt(ss / locked.size()),
-           ab[ab.size() * 95 / 100], ab.back());
+    printf("{\"ev\":\"ptptsf.summary\",\"bdf\":\"%s\",\"axis\":\"%s\",\"n\":%zu,"
+           "\"rejected\":%ld,\"rms_us\":%.2f,\"p95_abs_us\":%.1f,\"max_abs_us\":%.1f}\n",
+           bdf, use_fr ? "freerun" : "ledger", locked.size(), rejected,
+           std::sqrt(ss / locked.size()), ab[ab.size() * 95 / 100], ab.back());
+    fflush(stdout);
   }
   dev->Stop();
   return 0;

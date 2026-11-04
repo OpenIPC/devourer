@@ -644,6 +644,14 @@ if(DEVOURER_PCIE)
     )
     target_link_libraries(pcie_ptp_tsf_discipline PUBLIC devourer)
 endif()
+# beacon_phase_observer — on-air check that PTP-disciplined nodes hold their
+# beacons on one timebase (one receiver, one clock, every node's beacon).
+if(DEVOURER_PCIE)
+    add_executable(beacon_phase_observer
+        tests/beacon_phase_observer.cpp
+    )
+    target_link_libraries(beacon_phase_observer PUBLIC devourer)
+endif()
 
 # kestrelprobe — staged USB bring-up prober for the Kestrel (RTL8852B/C):
 # AX identity (die-id/cut) -> power-on + EFUSE -> firmware download, the

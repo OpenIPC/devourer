@@ -1092,6 +1092,21 @@ bool RtlKestrelDevice::StartBeacon(const uint8_t *beacon, size_t len,
   return ok;
 }
 
+bool RtlKestrelDevice::ReadTsfAndFreeRun(uint64_t &tsf, uint64_t &freerun) {
+  namespace r = kestrel::reg;
+  tsf = ReadTsf();
+  uint32_t hi = _device.rtw_read32(r::R_AX_FREERUN_CNT_HIGH);
+  uint32_t lo = _device.rtw_read32(r::R_AX_FREERUN_CNT_LOW);
+  const uint32_t hi2 = _device.rtw_read32(r::R_AX_FREERUN_CNT_HIGH);
+  if (hi2 != hi) {
+    hi = hi2;
+    lo = _device.rtw_read32(r::R_AX_FREERUN_CNT_LOW);
+  }
+  freerun = (static_cast<uint64_t>(hi) << 32) | lo;
+  /* A dead device reads all-ones on both. */
+  return !(hi == 0xFFFFFFFFu && lo == 0xFFFFFFFFu);
+}
+
 bool RtlKestrelDevice::WriteTsf(uint64_t tsf) {
   namespace r = kestrel::reg;
   if (_device.is_usb())

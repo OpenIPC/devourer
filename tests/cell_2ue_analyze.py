@@ -9,7 +9,8 @@ Inputs are the JSONL streams of the DU, each UE and the witness:
 Reported as distributions, per the EPIC #254 KPI rule:
   UL (the DU's own measurement): per UE, arrivals vs superframes elapsed, the
      arrival error against the UL target (rms/p99/max) and the in-slot ratio,
-     after the first --settle-s seconds (TA convergence).
+     after the first --settle-s seconds of each UE's uplink (TA convergence;
+     a UE that joins late settles from its own start).
   DL (each UE's measurement): frames received vs sent over the superframes
      the UE says it was listening (cell.ue.done listen_from_sf..listen_to_sf),
      in-slot ratio. Every UE the DU's grid schedules must report: a missing
@@ -129,10 +130,12 @@ def analyze(du, ues, witness, settle_s):
     # UL, from the DU.
     ul = [e for e in du if e.get("ev") == "cell.ul"]
     if ul:
-        sf0 = min(e["sf"] for e in ul)
         settle_sf = int(settle_s * 1e6 / P)
         for ue in sorted({e["ue"] for e in ul}):
             mine = [e for e in ul if e["ue"] == ue]
+            # settle from THIS UE's first uplink: a UE that joins late has its
+            # own TA convergence
+            sf0 = min(e["sf"] for e in mine)
             late = [e for e in mine if e["sf"] >= sf0 + settle_sf]
             sfs = {e["sf"] for e in late}
             span = (max(sfs) - min(sfs) + 1) if sfs else 0
@@ -152,7 +155,10 @@ def analyze(du, ues, witness, settle_s):
     late_sub = [e["late_us"] for e in du if e.get("ev") == "cell.dl" and "late_us" in e]
     rep["dl_submit_late_us"] = {"p50": pct(late_sub, 0.5), "p99": pct(late_sub, 0.99),
                                "max": max(late_sub, default=float("nan"))}
-    expected = sorted({s["ue"] for s in slots if s["kind"] == 1})
+    # The UEs the DU actually served (a capacity grid may leave positions
+    # empty); without DL events, every DL slot's position.
+    served = {e["ue"] for e in du if e.get("ev") == "cell.dl"}
+    expected = sorted(served) if served else sorted({s["ue"] for s in slots if s["kind"] == 1})
     by_ue = {}
     for stream in ues:
         ident = [e["ue"] for e in stream if e.get("ev") in ("cell.dl.rx", "cell.ue.done", "cell.ue.epoch")]
@@ -251,12 +257,14 @@ def analyze(du, ues, witness, settle_s):
                         s = None
                 if e["k"] == "bcn":
                     want = ("bcn", 0)
+                elif e["k"] == "rach":
+                    want = ("rach", 0)
                 elif e["k"] == "dl":
                     want = ("dl", e["st"])
                 else:
                     want = ("ul", e["st"])
-                kind = {0: "bcn", 1: "dl", 3: "ul"}.get(s["kind"], "other") if s else "idle"
-                ok = s is not None and kind == want[0] and (want[0] == "bcn" or s["ue"] == want[1])
+                kind = {0: "bcn", 1: "dl", 3: "ul", 5: "rach"}.get(s["kind"], "other") if s else "idle"
+                ok = s is not None and kind == want[0] and (want[0] in ("bcn", "rach") or s["ue"] == want[1])
                 frames.append((du_t, air, e["k"], e["st"], ok))
                 if e["k"] == "dl":
                     own = next((x for x in slots if x["kind"] == 1 and x["ue"] == e["st"]), None)
@@ -269,7 +277,7 @@ def analyze(du, ues, witness, settle_s):
             overlaps = count_overlaps([(f[0], f[1]) for f in frames])
             by = {}
             for _, _, k, st, ok in frames:
-                key = f"{k}{st if k != 'bcn' else ''}"
+                key = f"{k}{st if k not in ('bcn', 'rach') else ''}"
                 n, g = by.get(key, (0, 0))
                 by[key] = (n + 1, g + (1 if ok else 0))
             rep["witness"] = {

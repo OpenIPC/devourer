@@ -200,6 +200,12 @@ int main() {
     CHECK(!t.update(3) && t.ta() == 50); /* still clamped: unchanged */
     t.sample(100);
     t.discard();
+    /* One wild arrival (the rig's joining UE: its beacon before the first TSF
+     * step, 39 ms off) does not steer the TA: the window median does. */
+    TaLoop o(0.5, 25600);
+    for (int i = 0; i < 9; ++i) o.sample(-420);
+    o.sample(39125);
+    CHECK(o.update(3) && o.ta() == -210 && o.last_mean() == -420);
     CHECK(t.pending() == 0 && t.ta() == 50);
   }
 

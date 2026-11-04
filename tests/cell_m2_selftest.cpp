@@ -106,6 +106,38 @@ int main() {
     CHECK(s.inflight() == 0 && s.next(7, true).has_value());
   }
 
+  /* --- unsend: a refused submission spends no attempt. --- */
+  {
+    HarqConfig c;
+    c.max_attempts = 2;
+    c.timeout_sf = 1;
+    HarqSender s(c);
+    auto t = s.next(0, true);
+    s.unsend(*t); /* the first transmission never left: its seq is reused */
+    CHECK(s.inflight() == 0 && s.stats().new_tx == 0);
+    auto t2 = s.next(1, true);
+    CHECK(t2 && t2->seq == 0 && t2->attempt == 1);
+    auto r = s.next(2, false); /* timed out: retransmission (attempt 2 of 2) */
+    CHECK(r && r->retx && r->attempt == 2);
+    s.unsend(*r); /* refused: still owed, attempt not spent */
+    CHECK(s.stats().retx == 0 && s.inflight() == 1);
+    auto r2 = s.next(3, false);
+    CHECK(r2 && r2->retx && r2->attempt == 2 && s.stats().dropped == 0);
+  }
+
+  /* --- Implausible feedback (claims seqs never sent) is ignored whole. --- */
+  {
+    HarqSender s;
+    for (int i = 0; i < 3; ++i)
+      s.next(static_cast<uint64_t>(i), true); /* seqs 0..2 in flight */
+    s.on_feedback(HarqFeedback{100, 0, 10}); /* base far past anything sent */
+    CHECK(s.inflight() == 3 && s.stats().implausible == 1);
+    s.on_feedback(HarqFeedback{0, 1u << 5, 10}); /* acks seq 6: never sent */
+    CHECK(s.inflight() == 3 && s.stats().implausible == 2);
+    s.on_feedback(HarqFeedback{3, 0, 10}); /* all three, exactly: plausible */
+    CHECK(s.inflight() == 0 && s.stats().acked == 3);
+  }
+
   /* --- Lossy channel: HARQ vs no-HARQ baseline. ---
    * One DL frame per superframe, deterministic 30% loss in each direction's
    * data path (feedback assumed delivered, one superframe late). */

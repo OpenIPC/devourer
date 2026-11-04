@@ -16,12 +16,12 @@ Kestrel has no per-frame TX report (no CCX path). The DU therefore cannot see
 whether a hardware ACK came back. On any chip, a no-ACK "TX complete" proves
 only that the frame aired. So delivery is what the UE says it received:
 
-- **DL frame body:** carries the HARQ `seq`, the process id, the attempt
-  number, and `low`, the sender's window low edge (everything below it is
-  resolved).
-- **UE uplink beacon IE:** carries the UE's `HarqFeedback`, its cumulative
-  `base` plus a 32-seq bitmap, and its mean DL SNR. The UE republishes it
-  whenever it changes, at most once per 100 ms pass.
+- **On air:** each DL frame carries its HARQ seq, attempt and the sender's
+  window low edge. The UE's uplink beacon carries its `HarqFeedback` (a
+  cumulative base plus a 32-seq bitmap) and its DL SNR. Both are versioned,
+  and tagged with the cell PSK when `CELL_PSK` is set. The byte layouts live
+  in one place: `examples/cell/cell.h`, at `build_dl_frame` /
+  `build_ue_beacon`.
 - **DU sender rules:**
   - ACK: the seq is below `base`, or its bitmap bit is set.
   - NACK: a later seq was received. It is judged by when the UE *generated*

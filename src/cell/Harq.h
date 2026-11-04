@@ -39,6 +39,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iterator>
 #include <optional>
 
 namespace devourer::cell {
@@ -125,10 +126,11 @@ struct HarqTx {
   uint32_t low = 0;     /* the window low edge to put in the frame */
   int attempt = 1;      /* 1 = first transmission */
   bool retx = false;
+  uint64_t prev_last_sf = 0; /* for unsend(): the entry's previous attempt time */
 };
 
 struct HarqStats {
-  uint64_t new_tx = 0, retx = 0, acked = 0, dropped = 0, nacks = 0, timeouts = 0;
+  uint64_t new_tx = 0, retx = 0, acked = 0, dropped = 0, nacks = 0, timeouts = 0, implausible = 0;
 };
 
 class HarqSender {
@@ -150,11 +152,12 @@ public:
     expire(sf);
     for (Entry &e : q_) {
       if (e.due) {
+        const uint64_t prev = e.last_sf;
         e.due = false;
         e.attempts += 1;
         e.last_sf = sf;
         ++st_.retx;
-        return HarqTx{e.seq, e.seq % kHarqProcesses, low(), e.attempts, true};
+        return HarqTx{e.seq, e.seq % kHarqProcesses, low(), e.attempts, true, prev};
       }
     }
     /* max_span is the largest permitted newest - oldest difference */
@@ -169,8 +172,41 @@ public:
     return HarqTx{e.seq, e.seq % kHarqProcesses, low(), 1, false};
   }
 
-  /* Apply a UE report (its gen_sf says when the UE observed it). */
+  /* The frame next() returned was NOT submitted (the radio refused it): undo
+   * that attempt, so a failed submission never consumes a delivery attempt.
+   * Only the most recent next() result may be passed. */
+  void unsend(const HarqTx &tx) {
+    for (auto it = q_.begin(); it != q_.end(); ++it) {
+      if (it->seq != tx.seq)
+        continue;
+      if (tx.retx) {
+        it->attempts -= 1;
+        it->last_sf = tx.prev_last_sf;
+        it->due = true; /* still owed */
+        --st_.retx;
+      } else if (std::next(it) == q_.end() && tx.seq + 1 == next_seq_) {
+        q_.erase(it); /* the new frame never left: reuse its seq */
+        --next_seq_;
+        --st_.new_tx;
+      }
+      return;
+    }
+  }
+
+  /* Apply a UE report (its gen_sf says when the UE observed it). A report
+   * claiming a seq this sender never sent (base past the next new seq, or a
+   * bitmap bit beyond it) is implausible — spoofed or corrupted — and is
+   * ignored whole, so it cannot erase frames still in flight. */
   void on_feedback(const HarqFeedback &fb) {
+    if (seq_lt(next_seq_, fb.base)) {
+      ++st_.implausible;
+      return;
+    }
+    for (int i = 0; i < static_cast<int>(kHarqWindow); ++i)
+      if ((fb.bitmap & (1u << i)) && !seq_lt(fb.base + 1 + static_cast<uint32_t>(i), next_seq_)) {
+        ++st_.implausible;
+        return;
+      }
     /* the highest seq the feedback shows received, if any above base */
     std::optional<uint32_t> top;
     for (int i = static_cast<int>(kHarqWindow) - 1; i >= 0; --i)

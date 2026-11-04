@@ -1655,6 +1655,12 @@ if(NOT WIN32)
     target_include_directories(cell PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/cell)
+    # CELL_PSK tags the scheduling frames with HMAC-SHA1 (cell.h CellMac takes
+    # the primitive injected); without OpenSSL the cell runs unauthenticated.
+    if(OpenSSL_FOUND)
+        target_link_libraries(cell PRIVATE OpenSSL::Crypto)
+        target_compile_definitions(cell PRIVATE DEVOURER_CELL_OPENSSL=1)
+    endif()
 endif()
 
 # Headless guard for the M2 cell core (src/cell/Harq.h, LinkAdapt.h): HARQ

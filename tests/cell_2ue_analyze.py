@@ -180,7 +180,8 @@ def analyze(du, ues, witness, settle_s):
         }
 
     # HARQ / delivery (M2).
-    dl_all = [e for e in du if e.get("ev") == "cell.dl" and "attempt" in e]
+    # successful submissions only: a refused send_packet put nothing on air
+    dl_all = [e for e in du if e.get("ev") == "cell.dl" and "attempt" in e and e.get("ok")]
     if dl_all:
         rep["harq"] = {}
         for ue in expected:
@@ -357,6 +358,7 @@ def selftest():
     ue_h.append({"ev": "cell.dl.rx", "ue": 1, "sf": 5, "seq": 5, "new": 0, "phase_us": 1600,
                  "in_slot": 1})
     ue_h.append({"ev": "cell.ue.done", "ue": 1, "listen_from_sf": 0, "listen_to_sf": 20})
+    du_h.append({"ev": "cell.dl", "ue": 1, "sf": 11, "seq": 10, "attempt": 1, "rate": 54, "ok": 0})
     du_h.append({"ev": "cell.harq", "ue": 1, "harq": 1, "dropped": 2, "rate": 24})
     du_h.append({"ev": "cell.la", "ue": 1, "rate": 54})
     du_h.append({"ev": "cell.la", "ue": 1, "rate": 36})

@@ -12,16 +12,14 @@
 //                 path, so an unACKed unicast counts as a failure and escalates
 //                 the queue's contention window to CWmax — the next frame then
 //                 waits a uniform 0..1023 slots (0-9.2 ms; measured on the
-//                 8852CE). Body = 'C' 'D' ue(2) sf(8) seq(4) low(4) pid(1)
-//                 attempt(1): the HARQ seq, the sender's window low edge and
-//                 process id, and the transmission attempt (src/cell/Harq.h).
+//                 8852CE). Body: the HARQ seq, window low edge, process id and
+//                 attempt, versioned and tagged (layout at build_dl_frame).
 //   UE uplink   — the UE's own hardware beacon, SA = ue_mac(ue), placed in its
-//                 UL slot by stepping the UE's TSF; body IE 'C' 'U' ue(2)
-//                 epoch(4) fb_base(4) fb_bitmap(4) fb_gen_sf(4) dl_snr(1): the
-//                 grant epoch the UE runs, its HARQ feedback (src/cell/Harq.h;
-//                 gen_sf = low 32 bits of the DU superframe it was generated
-//                 in, extended by the DU around its own count) and its mean DL
-//                 SNR in 0.5 dB units (0 = no DL frame measured). A hardware beacon
+//                 UL slot by stepping the UE's TSF; its 'C' 'U' IE carries the
+//                 grant epoch it runs, its HARQ feedback (src/cell/Harq.h; the
+//                 report's generation superframe extended by the DU around its
+//                 own count) and its DL SNR, versioned and tagged (layout at
+//                 build_ue_beacon). A hardware beacon
 //                 because send_packet has no sub-slot departure control
 //                 (docs/scheduled-mac.md); with SetBeaconBackoff(false) it
 //                 leaves a fixed 22 us after its TBTT.
@@ -38,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -102,25 +101,76 @@ inline std::vector<uint8_t> build_du_beacon(const GrantMap &m) {
   return f;
 }
 
-constexpr uint8_t kUeIeLen = 3 + 2 + 2 + 4 + 4 + 4 + 4 + 1; /* OUI 'CU' ue epoch base bitmap gen snr */
+/* --- Scheduling-frame integrity (M2 review) ---------------------------------
+ * The UE uplink IE (HARQ feedback) and the DL body carry a protocol version
+ * and an 8-byte tag: HMAC-SHA1 keyed by the cell PSK over a direction label,
+ * the cell id and the body, truncated (the primitive is injected, as for the
+ * RACH: `CellMac`; examples fill it from OpenSSL). With no key (an empty
+ * CellMac) the tag is all-zero and receivers accept it: an unauthenticated
+ * development cell. A receiver WITH a key rejects a bad or missing tag. Replay:
+ * the DU accepts a UE's feedback only with a gen_sf no older than the last it
+ * accepted (main.cpp); a replayed DL frame is a HARQ duplicate. */
+using CellMac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
+constexpr uint8_t kCellProtoVersion = 2;
+constexpr size_t kCellTagLen = 8;
 
-// The UE uplink beacon: header + vendor IE 'C' 'U' ue(2) epoch(4) fb_base(4)
-// fb_bitmap(4) fb_gen_sf(4, low 32 bits) dl_snr_half_db(1).
+namespace detail {
+inline void cell_tag(const CellMac &mac, char label, uint16_t cell, const uint8_t *body, size_t n,
+                     uint8_t out[kCellTagLen]) {
+  std::memset(out, 0, kCellTagLen);
+  if (!mac)
+    return;
+  std::vector<uint8_t> m = {static_cast<uint8_t>(label), static_cast<uint8_t>(cell),
+                            static_cast<uint8_t>(cell >> 8)};
+  m.insert(m.end(), body, body + n);
+  uint8_t full[20];
+  if (mac(m.data(), m.size(), full))
+    std::memcpy(out, full, kCellTagLen);
+}
+inline bool cell_tag_ok(const CellMac &mac, char label, uint16_t cell, const uint8_t *body, size_t n,
+                        const uint8_t *tag) {
+  if (!mac)
+    return true; /* unauthenticated cell */
+  uint8_t want[kCellTagLen];
+  cell_tag(mac, label, cell, body, n, want);
+  uint8_t d = 0;
+  for (size_t i = 0; i < kCellTagLen; ++i)
+    d |= static_cast<uint8_t>(want[i] ^ tag[i]);
+  return d == 0;
+}
+}  // namespace detail
+
+/* UE IE body after the OUI: 'C' 'U' ver ue(2) epoch(4) base(4) bitmap(4)
+ * gen_sf(4, low 32 bits) snr(1) snr_gen(1) | tag(8). */
+constexpr size_t kUeBodyLen = 2 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 1;
+constexpr uint8_t kUeIeLen = static_cast<uint8_t>(3 + kUeBodyLen + kCellTagLen);
+
+// The UE uplink beacon: header + the 'C' 'U' vendor IE above. dl_snr_half_db
+// is the mean DL SNR (0.5 dB units, 0 = none) and snr_gen counts SNR
+// measurements: the DU folds a reported SNR once per new snr_gen, not once per
+// beacon that repeats it.
 inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int interval_tu,
                                             uint32_t epoch,
                                             devourer::cell::HarqFeedback fb = {},
-                                            uint8_t dl_snr_half_db = 0) {
+                                            uint8_t dl_snr_half_db = 0, uint8_t snr_gen = 0,
+                                            const CellMac &mac = {}) {
   uint8_t sa[6];
   cell_mac(sa, cell, ue);
   auto f = detail::beacon_head(sa, interval_tu);
+  std::vector<uint8_t> b = {'C', 'U', kCellProtoVersion};
+  detail::put(b, ue, 2);
+  detail::put(b, epoch, 4);
+  detail::put(b, fb.base, 4);
+  detail::put(b, fb.bitmap, 4);
+  detail::put(b, fb.gen_sf & 0xFFFFFFFFull, 4);
+  b.push_back(dl_snr_half_db);
+  b.push_back(snr_gen);
+  uint8_t t[kCellTagLen];
+  detail::cell_tag(mac, 'U', cell, b.data(), b.size(), t);
   f.insert(f.end(), {221, kUeIeLen, devourer::cell::kGrantOui[0], devourer::cell::kGrantOui[1],
-                     devourer::cell::kGrantOui[2], 'C', 'U'});
-  detail::put(f, ue, 2);
-  detail::put(f, epoch, 4);
-  detail::put(f, fb.base, 4);
-  detail::put(f, fb.bitmap, 4);
-  detail::put(f, fb.gen_sf & 0xFFFFFFFFull, 4);
-  f.push_back(dl_snr_half_db);
+                     devourer::cell::kGrantOui[2]});
+  f.insert(f.end(), b.begin(), b.end());
+  f.insert(f.end(), t, t + kCellTagLen);
   return f;
 }
 
@@ -129,9 +179,13 @@ struct UeBeacon {
   uint32_t epoch = 0;
   devourer::cell::HarqFeedback fb;
   uint8_t dl_snr_half_db = 0; /* 0 = none */
+  uint8_t snr_gen = 0;
 };
-// Parse a UE uplink beacon of `cell` (MPDU, radiotap stripped).
-inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uint16_t cell) {
+// Parse a UE uplink beacon of `cell` (MPDU, radiotap stripped): nullopt for
+// another cell, another protocol version, an SA/body mismatch, or (keyed
+// cell) a tag that does not verify.
+inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uint16_t cell,
+                                               const CellMac &mac = {}) {
   if (p == nullptr || len < 36 || p[0] != 0x80)
     return std::nullopt;
   const int st = cell_station(p + 10, cell);
@@ -145,17 +199,23 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
     if (p[off] == 221 && l == kUeIeLen && v[0] == devourer::cell::kGrantOui[0] &&
         v[1] == devourer::cell::kGrantOui[1] && v[2] == devourer::cell::kGrantOui[2] &&
         v[3] == 'C' && v[4] == 'U') {
-      const uint64_t ue = detail::get(v + 5, 2);  // 16 bits on air
+      const uint8_t *b = v + 3;
+      if (b[2] != kCellProtoVersion)
+        return std::nullopt;
+      const uint64_t ue = detail::get(b + 3, 2);  // 16 bits on air
       if (ue != static_cast<uint64_t>(st))
         return std::nullopt;  // SA and body disagree
-      UeBeacon b;
-      b.ue = static_cast<uint8_t>(ue);
-      b.epoch = static_cast<uint32_t>(detail::get(v + 7, 4));
-      b.fb.base = static_cast<uint32_t>(detail::get(v + 11, 4));
-      b.fb.bitmap = static_cast<uint32_t>(detail::get(v + 15, 4));
-      b.fb.gen_sf = detail::get(v + 19, 4); /* low 32 bits: extend at the DU */
-      b.dl_snr_half_db = v[23];
-      return b;
+      if (!detail::cell_tag_ok(mac, 'U', cell, b, kUeBodyLen, b + kUeBodyLen))
+        return std::nullopt;
+      UeBeacon r;
+      r.ue = static_cast<uint8_t>(ue);
+      r.epoch = static_cast<uint32_t>(detail::get(b + 5, 4));
+      r.fb.base = static_cast<uint32_t>(detail::get(b + 9, 4));
+      r.fb.bitmap = static_cast<uint32_t>(detail::get(b + 13, 4));
+      r.fb.gen_sf = detail::get(b + 17, 4); /* low 32 bits: extend at the DU */
+      r.dl_snr_half_db = b[21];
+      r.snr_gen = b[22];
+      return r;
     }
     off += 2 + l;
   }
@@ -169,11 +229,13 @@ struct DlHarq {
   uint8_t attempt = 1; /* 1 = first transmission */
 };
 
-constexpr size_t kDlBodyLen = 2 + 2 + 8 + 4 + 4 + 1 + 1; /* 'CD' ue sf seq low pid attempt */
+/* DL body: 'C' 'D' ver ue(2) sf(8) seq(4) low(4) pid(1) attempt(1) | tag(8). */
+constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1;
+constexpr size_t kDlBodyLen = kDlTaggedLen + kCellTagLen;
 
 // The DL frame MPDU (no FCS): QoS-Data, RA = UE, TA = BSSID = DU.
 inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf, uint32_t seq,
-                                           size_t pad, DlHarq h = {}) {
+                                           size_t pad, DlHarq h = {}, const CellMac &mac = {}) {
   uint8_t ra[6], ta[6];
   cell_mac(ra, cell, ue);
   cell_mac(ta, cell, 0);
@@ -182,14 +244,17 @@ inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t s
   f.insert(f.end(), ta, ta + 6);
   f.insert(f.end(), ta, ta + 6);
   f.insert(f.end(), {0x00, 0x00, 0x00, 0x00});  // seq ctl, QoS ctl: TID 0, normal ACK
-  f.push_back('C');
-  f.push_back('D');
-  detail::put(f, ue, 2);
-  detail::put(f, sf, 8);
-  detail::put(f, seq, 4);
-  detail::put(f, h.low, 4);
-  f.push_back(h.pid);
-  f.push_back(h.attempt);
+  std::vector<uint8_t> b = {'C', 'D', kCellProtoVersion};
+  detail::put(b, ue, 2);
+  detail::put(b, sf, 8);
+  detail::put(b, seq, 4);
+  detail::put(b, h.low, 4);
+  b.push_back(h.pid);
+  b.push_back(h.attempt);
+  uint8_t t[kCellTagLen];
+  detail::cell_tag(mac, 'D', cell, b.data(), b.size(), t);
+  f.insert(f.end(), b.begin(), b.end());
+  f.insert(f.end(), t, t + kCellTagLen);
   f.insert(f.end(), pad, 0x5a);
   return f;
 }
@@ -200,32 +265,40 @@ struct DlFrame {
   uint32_t seq = 0;
   DlHarq harq;
 };
-inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint16_t cell) {
+inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint16_t cell,
+                                             const CellMac &mac = {}) {
   if (p == nullptr || len < 26 + kDlBodyLen || p[0] != 0x88)
     return std::nullopt;
   const int ra = cell_station(p + 4, cell), ta = cell_station(p + 10, cell);
-  if (ra <= 0 || ta != 0 || p[26] != 'C' || p[27] != 'D')
+  const uint8_t *b = p + 26;
+  if (ra <= 0 || ta != 0 || b[0] != 'C' || b[1] != 'D' || b[2] != kCellProtoVersion)
     return std::nullopt;
-  const uint64_t ue = detail::get(p + 28, 2);  // 16 bits on air
+  const uint64_t ue = detail::get(b + 3, 2);  // 16 bits on air
   if (ue != static_cast<uint64_t>(ra))
+    return std::nullopt;
+  if (!detail::cell_tag_ok(mac, 'D', cell, b, kDlTaggedLen, b + kDlTaggedLen))
     return std::nullopt;
   DlFrame d;
   d.ue = static_cast<uint8_t>(ue);
-  d.sf = detail::get(p + 30, 8);
-  d.seq = static_cast<uint32_t>(detail::get(p + 38, 4));
-  d.harq.low = static_cast<uint32_t>(detail::get(p + 42, 4));
-  d.harq.pid = p[46];
-  d.harq.attempt = p[47];
+  d.sf = detail::get(b + 5, 8);
+  d.seq = static_cast<uint32_t>(detail::get(b + 13, 4));
+  d.harq.low = static_cast<uint32_t>(detail::get(b + 17, 4));
+  d.harq.pid = b[21];
+  d.harq.attempt = b[22];
   return d;
 }
 
-// Radiotap for one DL frame: legacy rate (Mb/s) + a DBM_TX_POWER dB delta
-// vs the session base (Kestrel rewrites its BB TX target between frames on a
-// value change). Present = RATE (bit 2) | DBM_TX_POWER (bit 10); no TX_FLAGS,
-// so the frame keeps normal-ACK semantics.
-inline std::vector<uint8_t> build_dl_radiotap(int rate_mbps, int8_t pwr_db) {
+// Radiotap for one DL frame: the legacy rate (Mb/s), and — only when
+// `pwr_db` is set — a DBM_TX_POWER field. On Kestrel that field is an
+// ABSOLUTE per-frame level against the calibrated base (it bypasses the
+// session offset and the per-rate shape), so an ordinary frame must not carry
+// it: present = RATE (bit 2) alone, or RATE | DBM_TX_POWER (bit 10). No
+// TX_FLAGS, so the frame keeps normal-ACK semantics.
+inline std::vector<uint8_t> build_dl_radiotap(int rate_mbps, std::optional<int8_t> pwr_db = {}) {
+  if (!pwr_db)
+    return {0x00, 0x00, 0x09, 0x00, 0x04, 0x00, 0x00, 0x00, static_cast<uint8_t>(rate_mbps * 2)};
   return {0x00, 0x00, 0x0a, 0x00, 0x04, 0x04, 0x00, 0x00,
-          static_cast<uint8_t>(rate_mbps * 2), static_cast<uint8_t>(pwr_db)};
+          static_cast<uint8_t>(rate_mbps * 2), static_cast<uint8_t>(*pwr_db)};
 }
 
 // --- Clocks --------------------------------------------------------------------

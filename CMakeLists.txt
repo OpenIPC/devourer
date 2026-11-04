@@ -1627,6 +1627,15 @@ target_link_libraries(UeRxAttributionSelftest PRIVATE devourer)
 
 add_test(NAME ue_rx_attribution_derive COMMAND UeRxAttributionSelftest)
 
+# Headless guard for the M1 cell core (src/cell/SlotGrid.h, GrantMap.h):
+# airtime + slot budget, fixed-grid phase math, grant-map IE round trip and
+# rejects, the receiver's epoch / effective-superframe rules.
+add_executable(CellSelftest
+    tests/cell_selftest.cpp
+)
+target_link_libraries(CellSelftest PRIVATE devourer)
+add_test(NAME cell_core COMMAND CellSelftest)
+
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
 # translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.

@@ -30,6 +30,13 @@
 //   CELL_BCN_SLOT_US [1500] CELL_DL_SLOT_US [4000] CELL_TURN_US [1000]
 //   CELL_UL_SLOT_US [2000]    slot lengths (src/cell/SlotGrid.h budget)
 //   CELL_UL_TARGET_US [500]   where in its UL slot the DU wants an arrival
+//   CELL_DL_GUARD_US [500]    DL departure guard in the DL slot budget (M0:
+//                             8852CE ch149 p99.9 0.46 ms)
+//   DEVOURER_TX_RETRY_LIMIT [0] DL retries; the DL slot must budget them
+// The DU refuses a grid whose slots cannot carry their frames: beacon airtime
+// + 22 us departure in the beacon slot, the DL frame's full budget (attempts x
+// (airtime + SIFS + ACK) + retry gaps + guard) in a DL slot, and the UL target
+// plus the uplink beacon's airtime inside a UL slot.
 //   CELL_TA [1] CELL_TA_GAIN [0.5] CELL_TA_EVERY_S [2]   DU TA loop
 //   CELL_DL_PAD [64]          DL payload padding bytes
 //   CELL_SECS [60]            run time
@@ -103,6 +110,11 @@ std::vector<uint16_t> env_ues() {
       fprintf(stderr, "invalid CELL_UES=\"%s\" (want ids 1..254, comma-separated)\n", t.c_str());
       std::exit(2);
     }
+    for (uint16_t seen : v)
+      if (seen == x) {
+        fprintf(stderr, "invalid CELL_UES=\"%s\" (UE %ld listed twice)\n", t.c_str(), x);
+        std::exit(2);
+      }
     v.push_back(static_cast<uint16_t>(x));
     if (q == std::string::npos)
       break;
@@ -143,12 +155,13 @@ void emit(const char *line) {
   fflush(stdout);
 }
 
-void sleep_until_tsf(IRadio *dev, int64_t target) {
+// Returns the TSF reading that ended the wait (>= target).
+int64_t sleep_until_tsf(IRadio *dev, int64_t target) {
   for (;;) {
     const int64_t now = static_cast<int64_t>(dev->ReadTsf());
     const int64_t left = target - now;
     if (left <= 0)
-      return;
+      return now;
     if (left > 1500)
       std::this_thread::sleep_for(std::chrono::microseconds(left - 1000));
   }
@@ -161,6 +174,47 @@ bool caps_ok(IRadio *dev) {
                     "beacon_backoff_ctl=%d hw_beacon_txtsf=%d)\n",
             c.tsf_write_ok, c.tbtt_follows_tsf, c.beacon_backoff_ctl, c.hw_beacon_txtsf);
     return false;
+  }
+  return true;
+}
+
+// The DU's grid must carry its frames (see the header); checked before the
+// radio is opened, so a configuration error never touches the hardware.
+bool du_budget_ok(const Cfg &c, const std::vector<uint16_t> &ues) {
+  const size_t pad = static_cast<size_t>(envl("CELL_DL_PAD", 64, 0, 1400));
+  const int64_t dl_guard = envl("CELL_DL_GUARD_US", 500, 0, 100000);
+  const int retry_limit = static_cast<int>(envl("DEVOURER_TX_RETRY_LIMIT", 0, 0, 63));
+  if (!grid_for(c, ues)) {
+    fprintf(stderr, "the grid does not fit a %d TU superframe\n", c.tu);
+    return false;
+  }
+  {
+    using devourer::cell::ofdm_airtime_us;
+    using devourer::cell::SlotBudget;
+    using devourer::cell::slot_len_us;
+    GrantMap probe;
+    probe.cell_id = c.cell;
+    probe.period_tu = static_cast<uint16_t>(c.tu);
+    probe.grants.resize(ues.size());
+    const int64_t bcn_need = 22 + ofdm_airtime_us(build_du_beacon(probe).size() + 4, 6);
+    SlotBudget dl;
+    dl.mpdu_len = build_dl_frame(c.cell, 1, 0, 0, pad).size() + 4;
+    dl.acked = true;
+    dl.attempts = retry_limit + 1;
+    /* per retry: ACK timeout (~SIFS + ACK + slot) + AIFS + CWmin backoff */
+    dl.retry_gap_us = devourer::cell::kSifsUs + 44 + devourer::cell::kSlotTimeUs + 34 +
+                      15 * devourer::cell::kSlotTimeUs;
+    dl.guard_us = dl_guard;
+    const int64_t dl_need = slot_len_us(dl);
+    const int64_t ul_need =
+        c.ul_target_us + ofdm_airtime_us(build_ue_beacon(c.cell, 1, c.tu, 0).size() + 4, 6);
+    if (bcn_need > c.bcn_us || dl_need == 0 || dl_need > c.dl_us || ul_need > c.ul_us) {
+      fprintf(stderr, "slots too short for their frames: beacon %lld/%lld us, DL %lld/%lld us "
+                      "(%d attempts, guard %lld), UL target+airtime %lld/%lld us\n",
+              (long long)bcn_need, (long long)c.bcn_us, (long long)dl_need, (long long)c.dl_us,
+              retry_limit + 1, (long long)dl_guard, (long long)ul_need, (long long)c.ul_us);
+      return false;
+    }
   }
   return true;
 }
@@ -278,18 +332,17 @@ int run_du(IRadio *dev, const Cfg &c) {
     for (uint16_t ue : ues) {
       const size_t idx = *grid->find(SlotKind::Downlink, ue);
       const int64_t start = grid->slot_start_tsf(sf, idx);
-      sleep_until_tsf(dev, start);
+      /* The frame is built before the wait; the reading that ends the wait
+       * is the submit stamp (no extra register reads on the send path). */
       auto f = build_dl_frame(c.cell, static_cast<uint8_t>(ue), static_cast<uint64_t>(sf), seq, pad);
       std::vector<uint8_t> pkt(rt);
       pkt.insert(pkt.end(), f.begin(), f.end());
-      const int64_t sub = static_cast<int64_t>(dev->ReadTsf());
+      const int64_t sub = sleep_until_tsf(dev, start);
       const bool ok = dev->send_packet(pkt.data(), pkt.size());
-      const int64_t ret = static_cast<int64_t>(dev->ReadTsf());
       char l[200];
       snprintf(l, sizeof l,
-               "{\"ev\":\"cell.dl\",\"ue\":%u,\"sf\":%lld,\"seq\":%u,\"late_us\":%lld,"
-               "\"call_us\":%lld,\"ok\":%d}",
-               ue, (long long)sf, seq, (long long)(sub - start), (long long)(ret - sub), ok ? 1 : 0);
+               "{\"ev\":\"cell.dl\",\"ue\":%u,\"sf\":%lld,\"seq\":%u,\"late_us\":%lld,\"ok\":%d}",
+               ue, (long long)sf, seq, (long long)(sub - start), ok ? 1 : 0);
       emit(l);
       ++seq;
     }
@@ -300,10 +353,12 @@ int run_du(IRadio *dev, const Cfg &c) {
       fr_ref.store(static_cast<int64_t>(f));
     if (ta_on && std::chrono::steady_clock::now() >= next_ta) {
       next_ta += std::chrono::seconds(ta_every_s);
+      /* Stage the next map; it replaces `map` only once it is on air. */
+      GrantMap next = map;
       bool changed = false;
       {
         std::lock_guard<std::mutex> lk(mu);
-        for (Grant &g : map.grants) {
+        for (Grant &g : next.grants) {
           TaLoop &l = ta.at(g.ue);
           // Only judge a UE running the newest map: its arrivals reflect it.
           const bool current = ue_epoch.count(g.ue) && ue_epoch[g.ue] == map.epoch;
@@ -316,17 +371,28 @@ int run_du(IRadio *dev, const Cfg &c) {
         }
       }
       if (changed) {
-        ++map.epoch;
-        map.effective_sf = static_cast<uint64_t>(sf + 3);
-        bcn = build_du_beacon(map);
-        const bool ok = !bcn.empty() && dev->UpdateBeaconPayload(bcn.data(), bcn.size());
+        ++next.epoch;
+        next.effective_sf = static_cast<uint64_t>(sf + 3);
+        const auto nb = build_du_beacon(next);
+        const bool ok = !nb.empty() && dev->UpdateBeaconPayload(nb.data(), nb.size());
+        if (ok) {
+          map = next;
+        } else {
+          /* The old map stays on air: keep its epoch (UEs keep reporting it,
+           * so sampling continues) and put the loops back on its TAs; the
+           * next TA pass retries. */
+          std::lock_guard<std::mutex> lk(mu);
+          for (const Grant &g : map.grants)
+            ta.at(g.ue).set_ta(g.ta_us);
+        }
+        const GrantMap &shown = ok ? map : next;
         char l[320];
         int n = snprintf(l, sizeof l, "{\"ev\":\"cell.grant\",\"epoch\":%u,\"effective_sf\":%llu,"
                                       "\"ok\":%d,\"ta\":{",
-                         map.epoch, (unsigned long long)map.effective_sf, ok ? 1 : 0);
-        for (size_t i = 0; i < map.grants.size() && n > 0 && n < (int)sizeof l; ++i)
-          n += snprintf(l + n, sizeof l - n, "%s\"%u\":%d", i ? "," : "", map.grants[i].ue,
-                        map.grants[i].ta_us);
+                         shown.epoch, (unsigned long long)shown.effective_sf, ok ? 1 : 0);
+        for (size_t i = 0; i < shown.grants.size() && n > 0 && n < (int)sizeof l; ++i)
+          n += snprintf(l + n, sizeof l - n, "%s\"%u\":%d", i ? "," : "", shown.grants[i].ue,
+                        shown.grants[i].ta_us);
         if (n > 0 && n < (int)sizeof l)
           snprintf(l + n, sizeof l - n, "}}");
         emit(l);
@@ -420,6 +486,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * in (half per step, clamped), so the steady state is the crystal drift
    * alone, not a re-step every pass. */
   double comp_us = 0;
+  long step_fails = 0;
+  /* The DU superframes this UE was running (synced, map in force), for the
+   * DL accounting: frames sent outside it were never expected. */
+  int64_t listen_from = -1, listen_to = -1;
   while (std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     uint64_t t = 0, f = 0;
@@ -453,6 +523,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
     if (!g || g->ul_slot >= grid->slots().size())
       continue;
     const int64_t ul_off = grid->slots()[g->ul_slot].start_us;
+    {
+      const int64_t sfn = du_now / P;
+      if (listen_from < 0)
+        listen_from = sfn + 1; /* this superframe's DL may already be past */
+      listen_to = sfn - 1; /* the last superframe fully listened */
+    }
     if (!beaconing || running_epoch != mcopy.epoch) {
       const auto b = build_ue_beacon(c.cell, me, c.tu, mcopy.epoch);
       const bool ok = beaconing ? dev->UpdateBeaconPayload(b.data(), b.size())
@@ -474,8 +550,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
        * the offset this step must produce. */
       const int64_t want_off = static_cast<int64_t>(t) - static_cast<int64_t>(f) + step;
       const uint64_t cur = dev->ReadTsf();
-      dev->WriteTsf(static_cast<uint64_t>(static_cast<int64_t>(cur) + step +
-                                          static_cast<int64_t>(std::llround(comp_us))));
+      if (!dev->WriteTsf(static_cast<uint64_t>(static_cast<int64_t>(cur) + step +
+                                               static_cast<int64_t>(std::llround(comp_us))))) {
+        /* Not a step: the next pass re-measures from a fresh read pair. */
+        ++step_fails;
+        char l[120];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.ue.step_fail\",\"ue\":%u,\"step_us\":%lld}",
+                 me, (long long)step);
+        emit(l);
+        continue;
+      }
       ++steps;
       int64_t resid = 0;
       uint64_t t2 = 0, f2 = 0;
@@ -505,8 +589,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->StopRxLoop();
   rx.join();
   dev->ClearAckResponder();
-  char l[96];
-  snprintf(l, sizeof l, "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld}", me, steps);
+  char l[200];
+  snprintf(l, sizeof l,
+           "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
+           "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld}",
+           me, steps, step_fails, (long long)listen_from, (long long)listen_to);
   emit(l);
   return 0;
 }
@@ -564,6 +651,8 @@ int main() {
     return 2;
   }
   const Cfg c = cfg_from_env();
+  if (std::strcmp(role, "du") == 0 && !du_budget_ok(c, env_ues()))
+    return 2;
   auto logger = std::make_shared<Logger>();
   apply_logging_env(*logger);
   OpenedRadio radio = open_radio_from_env(logger, 0x0bda, 0);

@@ -11,17 +11,20 @@ Reported as distributions, per the EPIC #254 KPI rule:
      arrival error against the UL target (rms/p99/max) and the in-slot ratio,
      after the first --settle-s seconds (TA convergence).
   DL (each UE's measurement): frames received vs sent over the superframes
-     the UE was listening, in-slot ratio.
+     the UE says it was listening (cell.ue.done listen_from_sf..listen_to_sf),
+     in-slot ratio. Every UE the DU's grid schedules must report: a missing
+     or empty UE stream fails the DL verdict.
   witness: every cell frame mapped onto the DU clock (a robust line through
      the DU beacons' egress TSF vs the witness RX stamp, so every frame maps
-     to its own air start), judged by its mid-air instant: frames outside
-     their own slot, overlaps (two frames whose air intervals intersect, from
+     to its own air start): a frame is in its own slot only if its whole air
+     interval [start, start + airtime] lies inside that slot; overlaps (two frames whose air intervals intersect, from
      6 Mb/s airtime), and per-UE DL lateness (air start - DL slot start).
      Judged from --settle-s after the first UE uplink to the last one (while
      no UE runs, the DU's ACKed DL is retried and the retries leave the slot),
      on first copies; DL retransmissions in that window count separately.
 The verdict line (ev cell.verdict) is in_slot == 1.0 in both directions and
-zero witness overlaps.
+zero witness overlaps. A witness log that was supplied but cannot be mapped
+(fewer than 8 DU beacons) is an error and fails the verdict.
 
 --selftest runs the analysis on a synthetic run (no files).
 """
@@ -131,17 +134,31 @@ def analyze(du, ues, witness, settle_s):
     late_sub = [e["late_us"] for e in du if e.get("ev") == "cell.dl"]
     rep["dl_submit_late_us"] = {"p50": pct(late_sub, 0.5), "p99": pct(late_sub, 0.99),
                                "max": max(late_sub, default=float("nan"))}
+    expected = sorted({s["ue"] for s in slots if s["kind"] == 1})
+    by_ue = {}
     for stream in ues:
-        rx = [e for e in stream if e.get("ev") == "cell.dl.rx"]
-        if not rx:
+        ident = [e["ue"] for e in stream if e.get("ev") in ("cell.dl.rx", "cell.ue.done", "cell.ue.epoch")]
+        if ident:
+            by_ue[ident[0]] = stream
+    for ue in expected:
+        stream = by_ue.get(ue)
+        if stream is None:
+            rep["dl"][str(ue)] = {"error": "no stream for this UE", "in_slot": 0.0}
             continue
-        ue = rx[0]["ue"]
-        lo, hi = min(e["sf"] for e in rx), max(e["sf"] for e in rx)
+        rx = [e for e in stream if e.get("ev") == "cell.dl.rx"]
+        done = next((e for e in stream if e.get("ev") == "cell.ue.done"), None)
+        if done and done.get("listen_from_sf", -1) >= 0 and done.get("listen_to_sf", -1) >= 0:
+            lo, hi = done["listen_from_sf"], done["listen_to_sf"]
+        elif rx:
+            lo, hi = min(e["sf"] for e in rx), max(e["sf"] for e in rx)
+        else:
+            lo, hi = 0, -1
         sent = sum(1 for e in dl_sent if e["ue"] == ue and lo <= e["sf"] <= hi)
+        got = [e for e in rx if lo <= e["sf"] <= hi]
         rep["dl"][str(ue)] = {
-            "sent": sent, "received": len(rx),
-            "in_slot": round(sum(e["in_slot"] for e in rx) / len(rx), 4),
-            "phase_p50_us": pct([e["phase_us"] for e in rx], 0.5),
+            "sent": sent, "received": len(got),
+            "in_slot": round(sum(e["in_slot"] for e in got) / len(got), 4) if got else 0.0,
+            "phase_p50_us": pct([e["phase_us"] for e in got], 0.5),
         }
 
     # Witness: onto the DU clock via the DU beacons.
@@ -151,7 +168,9 @@ def analyze(du, ues, witness, settle_s):
         for e, v in zip(w, t):
             e["t"] = v
         b = [e for e in w if e["k"] == "bcn" and e.get("egress")]
-        if len(b) >= 8:
+        if len(b) < 8:
+            rep["witness"] = {"error": f"witness has {len(b)} DU beacons; 8 needed to map it"}
+        else:
             # DU egress = a * witness_t + c: the line maps every frame's
             # witness stamp to its air start on the DU clock (the stamp's
             # latch point within a PPDU is the same for all frames).
@@ -175,6 +194,13 @@ def analyze(du, ues, witness, settle_s):
                     seen_dl.add(key)
                 air = airtime_us(e["len"])
                 s = slot_of((du_t + air / 2.0) % P)
+                if s is not None:
+                    # the whole air interval must sit inside the slot
+                    off = (du_t - s["start_us"]) % P
+                    if off > P / 2:
+                        off -= P
+                    if off < 0 or off + air > s["len_us"]:
+                        s = None
                 if e["k"] == "bcn":
                     want = ("bcn", 0)
                 elif e["k"] == "dl":
@@ -209,8 +235,11 @@ def analyze(du, ues, witness, settle_s):
             }
 
     ul_ok = all(v["in_slot"] == 1.0 for v in rep["ul"].values()) and len(rep["ul"]) > 0
-    dl_ok = all(v["in_slot"] == 1.0 for v in rep["dl"].values()) and len(rep["dl"]) > 0
-    w_ok = rep["witness"] is None or rep["witness"]["overlaps"] == 0
+    dl_ok = (all(v.get("in_slot") == 1.0 and v.get("received", 0) > 0 for v in rep["dl"].values())
+             and len(rep["dl"]) > 0)
+    w_ok = (rep["witness"] is None if witness is None
+            else rep["witness"] is not None and "error" not in rep["witness"]
+            and rep["witness"]["overlaps"] == 0)
     rep["verdict"] = {"ul_in_slot": ul_ok, "dl_in_slot": dl_ok, "no_overlaps": w_ok,
                       "pass": ul_ok and dl_ok and w_ok}
     return rep
@@ -259,6 +288,25 @@ def selftest():
     # DL sent counts only the superframes the UE was listening.
     r2 = analyze(du, [s[50:] for s in ue_streams], w, settle_s=1)
     assert r2["dl"]["1"]["sent"] == 150 and r2["dl"]["1"]["received"] == 150, r2["dl"]
+    # The UE's own listening window wins: a lost FINAL frame is counted.
+    s1 = ue_streams[0][:-1] + [{"ev": "cell.ue.done", "ue": 1, "listen_from_sf": 0,
+                                "listen_to_sf": 199}]
+    r4 = analyze(du, [s1, ue_streams[1]], w, settle_s=1)
+    assert r4["dl"]["1"]["sent"] == 200 and r4["dl"]["1"]["received"] == 199, r4["dl"]
+    # A UE the grid schedules but whose stream is missing fails the DL verdict.
+    r5 = analyze(du, [ue_streams[0]], w, settle_s=1)
+    assert "error" in r5["dl"]["2"] and not r5["verdict"]["dl_in_slot"], r5["dl"]
+    # A supplied witness that cannot be mapped is an error, not a pass.
+    r6 = analyze(du, ue_streams, [e for e in w if e["k"] != "bcn"], settle_s=1)
+    assert "error" in r6["witness"] and not r6["verdict"]["pass"], r6["witness"]
+    # A frame whose midpoint is in its slot but which runs past the slot end fails.
+    sl = next(x for x in du if x.get("ev") == "cell.slot" and x["kind"] == 3 and x["ue"] == 2)
+    w7 = [dict(e) for e in w]
+    for e in w7:
+        if e["k"] == "ul" and e["st"] == 2:
+            e["tsfl"] += sl["len_us"] - 500 - 30  # starts 30 us before the slot end
+    r7 = analyze(du, ue_streams, w7, settle_s=1)
+    assert r7["witness"]["in_own_slot"]["ul2"] == 0.0, r7["witness"]
     # Put UE2's uplink into UE1's slot: the witness must flag it and an overlap.
     for e in w:
         if e["k"] == "ul" and e["st"] == 2:

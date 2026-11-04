@@ -283,6 +283,8 @@ public:
     return changed;
   }
   int64_t ta() const { return ta_; }
+  // Restore a TA (a map that carried a moved TA failed to publish).
+  void set_ta(int64_t t) { ta_ = t; }
   double last_mean() const { return last_mean_; }
 
 private:

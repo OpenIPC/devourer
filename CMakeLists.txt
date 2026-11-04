@@ -1657,6 +1657,15 @@ if(NOT WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/cell)
 endif()
 
+# Headless guard for the M2 cell core (src/cell/Harq.h, LinkAdapt.h): HARQ
+# receiver dedup/window, sender ACK/NACK/timeout/attempt limit/span, a lossy-
+# channel HARQ-vs-baseline simulation, and the link-adaptation rate rules.
+add_executable(CellM2Selftest
+    tests/cell_m2_selftest.cpp
+)
+target_link_libraries(CellM2Selftest PRIVATE devourer)
+add_test(NAME cell_m2 COMMAND CellM2Selftest)
+
 # Headless guard for the TsfSync one-way time-distribution fit (src/TsfSync.h):
 # skew/offset recovery from beacon {egress, arrival} TSF pairs, clock
 # translation, the local 32-bit TSF wrap, and the Packet::TxEgressTsf pick.

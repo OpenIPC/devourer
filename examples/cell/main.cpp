@@ -299,13 +299,16 @@ bool du_budget_ok(const Cfg &c, const std::vector<uint16_t> &ues) {
     probe.period_tu = static_cast<uint16_t>(c.tu);
     probe.grants.resize(c.capacity);
     /* worst case: every position granted + a full RACH answer IE */
-    const std::vector<uint8_t> rar_max(c.rach_us > 0 ? 3 + 8 * (13 + devourer::cell::kRachTagLen) : 0,
-                                       0);
+    const std::vector<uint8_t> rar_max(
+        c.rach_us > 0 ? 3 + devourer::cell::kRachMaxPerBeacon *
+                                (devourer::cell::rach_detail::kRspLen + devourer::cell::kRachTagLen)
+                      : 0,
+        0);
     std::vector<uint8_t> rar = rar_max;
     if (!rar.empty()) {
       rar[0] = 'R';
       rar[1] = 'B';
-      rar[2] = 8;
+      rar[2] = static_cast<uint8_t>(devourer::cell::kRachMaxPerBeacon);
     }
     const int64_t bcn_need = 22 + ofdm_airtime_us(build_du_beacon(probe, rar).size() + 4, 6);
     SlotBudget dl;
@@ -778,7 +781,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   std::array<uint8_t, 6> joiner_mac = {0x02, 0xce, 0xfe, static_cast<uint8_t>(rng()),
                                        static_cast<uint8_t>(rng()), static_cast<uint8_t>(rng())};
   const uint64_t nonce = (static_cast<uint64_t>(rng()) << 32) | rng();
-  devourer::cell::RachClient rach(nonce, [&rng] { return static_cast<uint32_t>(rng()); });
+  devourer::cell::RachClient rach(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });
   std::vector<devourer::cell::RachResponse> rar_seen;
   const auto mac = rach_mac(c);
   const auto rach_idx = grid->find(SlotKind::Rach, 0);
@@ -909,7 +912,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
       }
       const int64_t rlen = grid->slots()[*rach_idx].len_us;
       const int64_t air = devourer::cell::ofdm_airtime_us(24 + 2 + 21 + devourer::cell::kRachTagLen + 4, 6);
-      const auto off = rach.opportunity(static_cast<uint64_t>(sfn + 1), rlen - air - 500);
+      /* the whole msgA, plus the departure guard, must end inside the slot */
+      const auto off = rach.opportunity(static_cast<uint64_t>(sfn + 1), rlen, air + 500);
       if (!off)
         continue;
       devourer::cell::RachRequest q;

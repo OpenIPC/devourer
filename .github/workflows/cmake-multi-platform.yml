@@ -278,7 +278,11 @@ jobs:
           -S ${{ github.workspace }}
 
       - name: Build (ASan + UBSan)
-        run: cmake --build build-asan -j
+        # Bounded: a bare -j is unlimited, and ~50 concurrent RelWithDebInfo
+        # ASan/UBSan compiles + links exhaust the hosted runner's memory — it
+        # is then killed mid-link ("The runner has received a shutdown
+        # signal", exit 143), as on master c39b99b and PR #516.
+        run: cmake --build build-asan -j "$(nproc)"
 
       - name: Test (ASan + UBSan)
         working-directory: build-asan

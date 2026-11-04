@@ -1,0 +1,299 @@
+// cell.h — the M1 (#255) reference cell node's pure logic: identities, the
+// three on-air frame shapes, clock bookkeeping and the two control loops.
+// Header-only, no radio dependency (examples/cell/main.cpp drives a radio with
+// it; tests/cell_node_selftest.cpp covers it).
+//
+// On-air (one channel, one superframe = one beacon interval, src/cell/SlotGrid):
+//   DU beacon   — hardware beacon at the DU's TBTT (slot 0), SA = du_mac(cell),
+//                 carrying the grant map IE (src/cell/GrantMap.h).
+//   DL frame    — one unicast QoS-Data per UE in its DL slot, RA = ue_mac(ue),
+//                 TA = du_mac, normal ACK policy: the UE arms the hardware ACK
+//                 responder for its MAC. Kestrel's TX descriptor has no no-ACK
+//                 path, so an unACKed unicast counts as a failure and escalates
+//                 the queue's contention window to CWmax — the next frame then
+//                 waits a uniform 0..1023 slots (0-9.2 ms; measured on the
+//                 8852CE). Body = 'C' 'D' ue(2) sf(8) seq(4).
+//   UE uplink   — the UE's own hardware beacon, SA = ue_mac(ue), placed in its
+//                 UL slot by stepping the UE's TSF; body IE 'C' 'U' ue(2)
+//                 epoch(4) (the grant epoch the UE runs). A hardware beacon
+//                 because send_packet has no sub-slot departure control
+//                 (docs/scheduled-mac.md); with SetBeaconBackoff(false) it
+//                 leaves a fixed 22 us after its TBTT.
+//
+// Clocks. Kestrel stamps RX frames (RxAtrib.tsfl) with the MAC's free-running
+// counter, which TSF writes never move. So a UE fits the DU's TSF against its
+// own free-running counter (devourer::TsfSync over the DU beacons) and that fit
+// stays valid while the UE steps its TSF to place its uplink. The DU never
+// steps its TSF, so its tsf - freerun offset is a constant it reads once.
+#ifndef DEVOURER_EXAMPLES_CELL_H
+#define DEVOURER_EXAMPLES_CELL_H
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <optional>
+#include <vector>
+
+#include "cell/GrantMap.h"
+#include "cell/SlotGrid.h"
+
+namespace cellnode {
+
+using devourer::cell::GrantMap;
+using devourer::cell::SlotGrid;
+using devourer::cell::SlotKind;
+
+// --- Identities ---------------------------------------------------------------
+// Locally administered unicast: 02:ce:11:<cell hi>:<cell lo>:<ue>, ue 0 = DU.
+inline void cell_mac(uint8_t out[6], uint16_t cell, uint8_t ue) {
+  const uint8_t m[6] = {0x02, 0xce, 0x11, static_cast<uint8_t>(cell >> 8),
+                        static_cast<uint8_t>(cell), ue};
+  std::memcpy(out, m, 6);
+}
+// The UE id when `mac` is a station of `cell` (0 = its DU), else -1.
+inline int cell_station(const uint8_t *mac, uint16_t cell) {
+  uint8_t m[6];
+  cell_mac(m, cell, 0);
+  return std::memcmp(mac, m, 5) == 0 ? mac[5] : -1;
+}
+
+// --- Frames --------------------------------------------------------------------
+namespace detail {
+inline void put(std::vector<uint8_t> &o, uint64_t v, int n) {
+  for (int i = 0; i < n; ++i)
+    o.push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+inline uint64_t get(const uint8_t *p, int n) {
+  uint64_t v = 0;
+  for (int i = 0; i < n; ++i)
+    v |= static_cast<uint64_t>(p[i]) << (8 * i);
+  return v;
+}
+// 24-byte beacon header + timestamp/interval/capability + SSID "CELL" + rates.
+inline std::vector<uint8_t> beacon_head(const uint8_t sa[6], int interval_tu) {
+  std::vector<uint8_t> f = {0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  f.insert(f.end(), sa, sa + 6);
+  f.insert(f.end(), sa, sa + 6);
+  f.insert(f.end(), {0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0});
+  f.push_back(static_cast<uint8_t>(interval_tu));
+  f.push_back(static_cast<uint8_t>(interval_tu >> 8));
+  f.insert(f.end(), {0x00, 0x00, 0x00, 0x04, 'C', 'E', 'L', 'L', 0x01, 0x01, 0x8c});
+  return f;
+}
+}  // namespace detail
+
+// The DU beacon: header + the grant map IE. Empty if the map cannot encode.
+inline std::vector<uint8_t> build_du_beacon(const GrantMap &m) {
+  uint8_t sa[6];
+  cell_mac(sa, m.cell_id, 0);
+  auto f = detail::beacon_head(sa, m.period_tu);
+  const auto ie = devourer::cell::encode_grant_ie(m);
+  if (ie.empty())
+    return {};
+  f.insert(f.end(), ie.begin(), ie.end());
+  return f;
+}
+
+// The UE uplink beacon: header + vendor IE 'C' 'U' ue(2) epoch(4).
+inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int interval_tu,
+                                            uint32_t epoch) {
+  uint8_t sa[6];
+  cell_mac(sa, cell, ue);
+  auto f = detail::beacon_head(sa, interval_tu);
+  f.insert(f.end(), {221, 3 + 8, devourer::cell::kGrantOui[0], devourer::cell::kGrantOui[1],
+                     devourer::cell::kGrantOui[2], 'C', 'U'});
+  detail::put(f, ue, 2);
+  detail::put(f, epoch, 4);
+  return f;
+}
+
+struct UeBeacon {
+  uint8_t ue = 0;
+  uint32_t epoch = 0;
+};
+// Parse a UE uplink beacon of `cell` (MPDU, radiotap stripped).
+inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uint16_t cell) {
+  if (p == nullptr || len < 36 || p[0] != 0x80)
+    return std::nullopt;
+  const int st = cell_station(p + 10, cell);
+  if (st <= 0)
+    return std::nullopt;
+  for (size_t off = 36; off + 2 <= len;) {
+    const size_t l = p[off + 1];
+    if (off + 2 + l > len)
+      break;
+    const uint8_t *v = p + off + 2;
+    if (p[off] == 221 && l == 3 + 8 && v[0] == devourer::cell::kGrantOui[0] &&
+        v[1] == devourer::cell::kGrantOui[1] && v[2] == devourer::cell::kGrantOui[2] &&
+        v[3] == 'C' && v[4] == 'U') {
+      const uint64_t ue = detail::get(v + 5, 2);  // 16 bits on air
+      if (ue != static_cast<uint64_t>(st))
+        return std::nullopt;  // SA and body disagree
+      UeBeacon b;
+      b.ue = static_cast<uint8_t>(ue);
+      b.epoch = static_cast<uint32_t>(detail::get(v + 7, 4));
+      return b;
+    }
+    off += 2 + l;
+  }
+  return std::nullopt;
+}
+
+// The DL frame MPDU (no FCS): QoS-Data, RA = UE, TA = BSSID = DU.
+inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf, uint32_t seq,
+                                           size_t pad) {
+  uint8_t ra[6], ta[6];
+  cell_mac(ra, cell, ue);
+  cell_mac(ta, cell, 0);
+  std::vector<uint8_t> f = {0x88, 0x02, 0x00, 0x00};  // QoS-Data, FromDS
+  f.insert(f.end(), ra, ra + 6);
+  f.insert(f.end(), ta, ta + 6);
+  f.insert(f.end(), ta, ta + 6);
+  f.insert(f.end(), {0x00, 0x00, 0x00, 0x00});  // seq ctl, QoS ctl: TID 0, normal ACK
+  f.push_back('C');
+  f.push_back('D');
+  detail::put(f, ue, 2);
+  detail::put(f, sf, 8);
+  detail::put(f, seq, 4);
+  f.insert(f.end(), pad, 0x5a);
+  return f;
+}
+
+struct DlFrame {
+  uint8_t ue = 0;
+  uint64_t sf = 0;
+  uint32_t seq = 0;
+};
+inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint16_t cell) {
+  if (p == nullptr || len < 26 + 16 || p[0] != 0x88)
+    return std::nullopt;
+  const int ra = cell_station(p + 4, cell), ta = cell_station(p + 10, cell);
+  if (ra <= 0 || ta != 0 || p[26] != 'C' || p[27] != 'D')
+    return std::nullopt;
+  const uint64_t ue = detail::get(p + 28, 2);  // 16 bits on air
+  if (ue != static_cast<uint64_t>(ra))
+    return std::nullopt;
+  DlFrame d;
+  d.ue = static_cast<uint8_t>(ue);
+  d.sf = detail::get(p + 30, 8);
+  d.seq = static_cast<uint32_t>(detail::get(p + 38, 4));
+  return d;
+}
+
+// --- Clocks --------------------------------------------------------------------
+// 32-bit -> 64-bit counter reconstruction, mirroring devourer::TsfSync's: feed
+// it the same RX tsfl stream in the same order, and extend() maps a later
+// 32-bit reading of the same counter into that 64-bit domain.
+class Wrap32 {
+public:
+  int64_t feed(uint32_t lo) {
+    if (init_ && lo < prev_)
+      hi_ += int64_t{1} << 32;
+    prev_ = lo;
+    init_ = true;
+    return hi_ + lo;
+  }
+  // A reading taken after the last feed(): if it is numerically far below the
+  // last fed value the counter has wrapped since.
+  int64_t extend(uint32_t lo) const {
+    int64_t v = hi_ + lo;
+    if (init_ && lo + (uint64_t{1} << 31) < prev_)
+      v += int64_t{1} << 32;
+    return v;
+  }
+  bool ready() const { return init_; }
+
+private:
+  bool init_ = false;
+  uint32_t prev_ = 0;
+  int64_t hi_ = 0;
+};
+
+// The 64-bit value congruent to `lo` mod 2^32 that is nearest to `ref` (a
+// recent full 64-bit read of the same counter): extends an RX tsfl stamp.
+inline int64_t extend32_near(uint32_t lo, int64_t ref) {
+  const int64_t base = ref & ~((int64_t{1} << 32) - 1);
+  int64_t v = base | lo;
+  if (v - ref > (int64_t{1} << 31))
+    v -= int64_t{1} << 32;
+  else if (ref - v > (int64_t{1} << 31))
+    v += int64_t{1} << 32;
+  return v;
+}
+
+// Wrap a phase error into [-period/2, period/2).
+inline int64_t wrap_phase(int64_t err, int64_t period) {
+  int64_t e = err % period;
+  if (e < 0)
+    e += period;
+  if (e >= period / 2)
+    e -= period;
+  return e;
+}
+
+// UE uplink placement. The UE's beacon fires when ITS tsf % period == 0; it
+// must fire when the DU's tsf % period == ul_off (UL slot start on the DU
+// grid) minus the timing advance. So the UE wants its tsf to read
+// du_tsf - ul_off + ta. Returns the TSF step to apply now (0 within
+// `deadband_us`), given the UE's current tsf and the DU tsf for the same
+// instant.
+inline int64_t ue_tsf_step(int64_t ue_tsf, int64_t du_tsf, int64_t ul_off, int64_t ta_us,
+                           int64_t period, int64_t deadband_us) {
+  const int64_t want = du_tsf - ul_off + ta_us;
+  const int64_t err = wrap_phase(ue_tsf - want, period);  // + = UE ahead
+  return (err > deadband_us || err < -deadband_us) ? -err : 0;
+}
+
+// DU timing-advance controller for one UE: the measured arrival error (DU
+// clock, arrival phase minus target) is averaged over a window; at each
+// update() the TA moves by -gain * mean, rounded to whole us, clamped to
+// +-max_ta. Positive TA = the UE fires earlier.
+class TaLoop {
+public:
+  TaLoop(double gain, int64_t max_ta_us) : gain_(gain), max_(max_ta_us) {}
+  void sample(int64_t err_us) {
+    sum_ += static_cast<double>(err_us);
+    ++n_;
+  }
+  size_t pending() const { return n_; }
+  // Drop the window without moving the TA (samples taken under an old map).
+  void discard() {
+    sum_ = 0;
+    n_ = 0;
+  }
+  // Returns true when the TA changed. min_samples guards a noisy window.
+  bool update(size_t min_samples) {
+    if (n_ < min_samples || n_ == 0)
+      return false;
+    const double mean = sum_ / static_cast<double>(n_);
+    sum_ = 0;
+    n_ = 0;
+    last_mean_ = mean;
+    const int64_t step = static_cast<int64_t>(std::llround(gain_ * mean));
+    if (step == 0)
+      return false;
+    int64_t t = ta_ + step;  // arrival late (mean > 0) -> fire earlier -> TA up
+    if (t > max_)
+      t = max_;
+    if (t < -max_)
+      t = -max_;
+    const bool changed = t != ta_;
+    ta_ = t;
+    return changed;
+  }
+  int64_t ta() const { return ta_; }
+  double last_mean() const { return last_mean_; }
+
+private:
+  double gain_;
+  int64_t max_;
+  int64_t ta_ = 0;
+  double sum_ = 0;
+  size_t n_ = 0;
+  double last_mean_ = 0;
+};
+
+}  // namespace cellnode
+
+#endif /* DEVOURER_EXAMPLES_CELL_H */

@@ -138,6 +138,12 @@ int main(int argc, char **argv) {
     fprintf(stderr, "StartBeacon UNSUPPORTED\n"); return 1;
   }
   dev->SetCcaMode(true);
+  // BCN_BACKOFF=0: deterministic departure (fixed AIFS after the TBTT) — only
+  // with co-channel cells staggered, as the multi-cell tests do via PHASE_US.
+  if (envi("BCN_BACKOFF", 1, 0, 1) == 0 && !dev->SetBeaconBackoff(false)) {
+    fprintf(stderr, "BCN_BACKOFF=0 but this part has no beacon backoff control\n");
+    return 1;
+  }
   std::this_thread::sleep_for(std::chrono::seconds(2));
   uint64_t probe_t = 0, probe_f = 0;
   const bool use_fr = envd("LEDGER", 0) == 0 && dev->ReadTsfAndFreeRun(probe_t, probe_f);

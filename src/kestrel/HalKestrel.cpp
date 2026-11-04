@@ -1409,8 +1409,16 @@ void HalKestrel::scheduler_init() {
   field32(r::R_AX_CCA_CFG_0, 0x6a,
           c ? r::B_AX_R_SIFS_AGGR_TIME_V1_MSK : r::B_AX_R_SIFS_AGGR_TIME_MSK,
           c ? r::B_AX_R_SIFS_AGGR_TIME_V1_SH : r::B_AX_R_SIFS_AGGR_TIME_SH);
-  /* Beacon-queue EDCA (path BCN): W16 at BCNQ_PARAM+2 = CW|AIFS. */
-  const uint8_t cw = static_cast<uint8_t>((3u << 4) | 2u); /* ecw_max/min */
+  /* Beacon-queue EDCA (path BCN). */
+  set_beacon_backoff(_bcn_backoff_random);
+}
+
+void HalKestrel::set_beacon_backoff(bool random) {
+  /* W16 at BCNQ_PARAM+2 = CW|AIFS, a native 16-bit access (a 32-bit access
+   * to this 2-byte-aligned register is a malformed TLP over PCIe). */
+  _bcn_backoff_random = random;
+  const uint8_t cw = random ? static_cast<uint8_t>((3u << 4) | 2u) /* ecw_max/min */
+                            : static_cast<uint8_t>(0);
   uint16_t edca = static_cast<uint16_t>(
       ((cw & r::B_AX_BE_0_CW_MSK) << r::B_AX_BE_0_CW_SH) |
       ((r::BCN_IFS_25US & r::B_AX_BE_0_AIFS_MSK) << r::B_AX_BE_0_AIFS_SH));

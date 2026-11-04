@@ -384,6 +384,24 @@ repeated-steer accuracy (incl. a PCIe master via `MASTER_CMD='ssh …'`):
 
 Harness: `tests/timesync_ta_demo.sh` (+ `tests/timesync_ta_analyze.py`).
 
+### Deterministic beacon departure (`SetBeaconBackoff`)
+
+A hardware beacon does not leave at its TBTT: it contends like any frame,
+waiting AIFS plus a random backoff. On Kestrel (RTL8852CE) the vendor beacon
+queue is AIFS 25 µs, ecw_min 2 / ecw_max 3, and the beacon's own egress
+timestamp shows it leaving at exactly 22, 30, 39 or 48 µs after the TBTT in
+roughly equal shares — ~10 µs RMS of departure jitter that no TSF discipline
+can remove. `IRadio::SetBeaconBackoff(false)` (where
+`AdapterCaps::beacon_backoff_ctl`) sets the beacon queue's CW to 0 with the
+AIFS unchanged; on the bench 568 of 569 beacons then left at 22 µs. The
+setting persists across a scheduler re-init.
+
+The default stays random, and it should: the backoff is what keeps two
+**uncoordinated** co-channel APs whose TBTTs coincide from colliding on every
+beacon. Turn it off only when co-channel cells' TBTTs are coordinated —
+staggered by a schedule, as in a scheduled RAN. `tests/pcie_ptp_tsf_discipline`
+takes `BCN_BACKOFF=0` for this (use it with distinct `PHASE_US` per cell).
+
 ## Bridging to network PTP (IEEE 1588)
 
 The missing half of a wired-time → Wi-Fi-time bridge is holding the Wi-Fi TSF

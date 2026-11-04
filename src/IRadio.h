@@ -561,6 +561,20 @@ public:
    * shared port is reused. */
   virtual bool StopBeacon() { return false; }
 
+  /* Random backoff for the hardware beacon (default true: the vendor EDCA,
+   * which spreads each beacon over AIFS + 0..CW slots after its TBTT so that
+   * uncoordinated co-channel APs don't collide on every beacon). false makes
+   * the departure deterministic: a fixed AIFS after the TBTT. That is right only
+   * when co-channel cells' TBTTs are coordinated (staggered by a schedule, as
+   * a scheduled RAN does) — two uncoordinated APs with the backoff off and
+   * coinciding TBTTs collide every beacon. Persists until changed, including
+   * across a re-init. Check AdapterCaps::beacon_backoff_ctl; returns false where
+   * unsupported (default). */
+  virtual bool SetBeaconBackoff(bool random) {
+    (void)random;
+    return false;
+  }
+
   /* Disable / restore the MAC carrier-sense gate that defers TX — both primary
    * CCA (0x520[14], carrier-sense of a decodable preamble) and EDCCA (0x520[15],
    * energy detect). With it off the MAC does not defer TX to a busy channel, so

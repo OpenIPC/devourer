@@ -176,6 +176,8 @@ public:
   /* Port-0 TSF, then R_AX_FREERUN_CNT (never moved by WriteTsf), each with a
    * hi/lo/hi wrap guard. */
   bool ReadTsfAndFreeRun(uint64_t &tsf, uint64_t &freerun) override;
+  /* Beacon EDCA random backoff on/off (HalKestrel::set_beacon_backoff). */
+  bool SetBeaconBackoff(bool random) override;
 
   /* Jaguar1 semantics (see IRadio): the AX TBTT already sits on the TSF grid,
    * so offset 0 holds natively and a nonzero TSF-preserving pin is physically

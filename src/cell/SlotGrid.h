@@ -32,6 +32,15 @@ namespace devourer::cell {
 constexpr int64_t kTuUs = 1024;
 constexpr int64_t kSifsUs = 16;      /* 5 GHz OFDM */
 constexpr int64_t kSlotTimeUs = 9;   /* 5 GHz OFDM */
+/* UEs one cell's grid may carry: the grant map (GrantMap.h) advertises at
+ * most this many grants in one beacon IE. */
+constexpr size_t kMaxUesPerCell = 24;
+/* Input bounds that keep slot_len_us's int64 arithmetic exact: an MPDU up to
+ * the 802.11ac maximum (11454 bytes), a retry ladder far past any hardware
+ * limit, margins up to 10 s. */
+constexpr size_t kMaxMpduLen = 11454;
+constexpr int kMaxAttempts = 64;
+constexpr int64_t kMaxMarginUs = 10'000'000;
 
 /* Legacy-OFDM PPDU airtime (us) for an MPDU of `mpdu_len` bytes including the
  * FCS, at `rate_mbps` in {6,9,12,18,24,36,48,54}. Returns 0 for other rates. */
@@ -57,10 +66,18 @@ struct SlotBudget {
   int64_t guard_us = 0;      /* departure/sync guard (M0 contract) */
 };
 
-/* Total slot length (us) for a budget; 0 if a rate is unsupported. */
+/* Total slot length (us) for a budget; 0 (invalid) for an unsupported rate,
+ * attempts outside 1..kMaxAttempts, an MPDU over kMaxMpduLen, or a margin
+ * outside 0..kMaxMarginUs — a negative margin would silently under-budget
+ * the slot. */
 inline int64_t slot_len_us(const SlotBudget &b) {
+  auto margin_ok = [](int64_t v) { return v >= 0 && v <= kMaxMarginUs; };
+  if (b.attempts < 1 || b.attempts > kMaxAttempts || b.mpdu_len > kMaxMpduLen ||
+      !margin_ok(b.retry_gap_us) || !margin_ok(b.turnaround_us) ||
+      !margin_ok(b.guard_us))
+    return 0;
   const int64_t psdu = ofdm_airtime_us(b.mpdu_len, b.rate_mbps);
-  if (psdu == 0 || b.attempts < 1)
+  if (psdu == 0)
     return 0;
   int64_t per = psdu;
   if (b.acked) {
@@ -148,13 +165,16 @@ private:
 };
 
 /* The M1 layout: beacon slot, one DL slot per UE, a turnaround guard, one UL
- * slot per UE, in UE-list order. nullopt when it does not fit the period. */
+ * slot per UE, in UE-list order. nullopt when it does not fit the period, or
+ * when there are more UEs than one grant map can advertise (kMaxUesPerCell). */
 inline std::optional<SlotGrid> build_fixed_grid(int period_tu, int64_t offset_us,
                                                 int64_t beacon_slot_us,
                                                 const std::vector<uint16_t> &ues,
                                                 int64_t dl_slot_us,
                                                 int64_t turnaround_us,
                                                 int64_t ul_slot_us) {
+  if (ues.size() > kMaxUesPerCell)
+    return std::nullopt;
   SlotGrid g(period_tu, offset_us);
   if (!g.append(SlotKind::Beacon, 0, beacon_slot_us))
     return std::nullopt;

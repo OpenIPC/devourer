@@ -25,11 +25,13 @@
 #include <optional>
 #include <vector>
 
+#include "cell/SlotGrid.h"
+
 namespace devourer::cell {
 
 constexpr uint8_t kGrantOui[3] = {0x57, 0x42, 0x75}; /* devourer test OUI */
 constexpr uint8_t kGrantVersion = 1;
-constexpr size_t kGrantMax = 24; /* keeps the IE under its 255-byte limit */
+constexpr size_t kGrantMax = kMaxUesPerCell; /* 3+21+24*8+2 = 218 <= 255 IE bytes */
 
 struct Grant {
   uint16_t ue = 0;
@@ -169,34 +171,64 @@ inline std::optional<GrantMap> find_grant_map(const uint8_t *mpdu, size_t len) {
   return std::nullopt;
 }
 
-/* UE side: holds the map in force. offer() takes a decoded map; it becomes
- * pending if its epoch is newer than anything seen, and current() switches to
- * it once the UE's superframe count reaches effective_sf. Older or equal
- * epochs (replays, reordering) are ignored. */
+/* UE side: holds the map in force for ONE cell (epochs are per cell).
+ * offer() takes a decoded map of that cell; it is queued if its epoch is newer
+ * than anything seen from the cell, and current(sf) puts in force the newest
+ * queued map whose effective_sf has been reached — so two future maps offered
+ * back to back each take effect at their own superframe. Rejected: older or
+ * equal epochs (replays, reordering) and other cells' maps. A newer map
+ * replaces queued maps due at or after its own superframe (the scheduler
+ * changed its mind). Moving to another cell is an explicit rebind(), which
+ * forgets everything. */
 class GrantMapReceiver {
 public:
-  /* True when `m` was accepted as the new pending map. */
+  static constexpr size_t kMaxPending = 8;
+
+  explicit GrantMapReceiver(uint16_t cell_id) : cell_id_(cell_id) {}
+  uint16_t cell_id() const { return cell_id_; }
+
+  /* True when `m` was accepted (queued). */
   bool offer(const GrantMap &m) {
+    if (m.cell_id != cell_id_)
+      return false;
     if (have_any_ && m.epoch <= newest_epoch_)
       return false;
     have_any_ = true;
     newest_epoch_ = m.epoch;
-    pending_ = m;
+    /* A newer epoch supersedes any queued map due at or after its own
+     * superframe; maps due earlier still take effect first. */
+    while (!pending_.empty() && pending_.back().effective_sf >= m.effective_sf)
+      pending_.pop_back();
+    if (pending_.size() == kMaxPending)
+      pending_.erase(pending_.begin());
+    pending_.push_back(m);
     return true;
   }
-  /* The map in force at superframe `sf` (promotes a due pending map). */
+  /* The map in force at superframe `sf` (promotes the newest due one). */
   const GrantMap *current(uint64_t sf) {
-    if (pending_ && sf >= pending_->effective_sf) {
-      current_ = std::move(*pending_);
-      pending_.reset();
+    size_t due = 0;
+    while (due < pending_.size() && sf >= pending_[due].effective_sf)
+      ++due;
+    if (due > 0) {
+      current_ = std::move(pending_[due - 1]);
+      pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(due));
     }
     return current_ ? &*current_ : nullptr;
   }
+  /* Serve another cell from scratch (handover, re-association). */
+  void rebind(uint16_t cell_id) {
+    cell_id_ = cell_id;
+    have_any_ = false;
+    newest_epoch_ = 0;
+    pending_.clear();
+    current_.reset();
+  }
 
 private:
+  uint16_t cell_id_;
   bool have_any_ = false;
   uint32_t newest_epoch_ = 0;
-  std::optional<GrantMap> pending_;
+  std::vector<GrantMap> pending_; /* ascending effective_sf (and epoch) */
   std::optional<GrantMap> current_;
 };
 

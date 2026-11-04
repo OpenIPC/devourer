@@ -47,7 +47,27 @@ int main() {
     CHECK(slot_len_us(b) == 3 * one + 2 * 100 + 10 + 500);
     b.attempts = 0;
     CHECK(slot_len_us(b) == 0);
+    b.attempts = kMaxAttempts + 1;
+    CHECK(slot_len_us(b) == 0);
+    b.attempts = kMaxAttempts; /* the bounds keep this exact and positive */
+    b.retry_gap_us = b.turnaround_us = b.guard_us = kMaxMarginUs;
+    b.mpdu_len = kMaxMpduLen;
+    CHECK(slot_len_us(b) > 0);
+    b.mpdu_len = kMaxMpduLen + 1;
+    CHECK(slot_len_us(b) == 0);
+    b.mpdu_len = 100;
     b.attempts = 1;
+    b.retry_gap_us = b.turnaround_us = b.guard_us = 0;
+    b.guard_us = -1; /* a negative margin would under-budget the slot */
+    CHECK(slot_len_us(b) == 0);
+    b.guard_us = 0;
+    b.turnaround_us = -10;
+    CHECK(slot_len_us(b) == 0);
+    b.turnaround_us = 0;
+    b.retry_gap_us = kMaxMarginUs + 1;
+    CHECK(slot_len_us(b) == 0);
+    b.retry_gap_us = 0;
+    CHECK(slot_len_us(b) == one);
     b.rate_mbps = 5;
     CHECK(slot_len_us(b) == 0);
   }
@@ -71,6 +91,14 @@ int main() {
     }
     /* Does not fit: 2 x 60 ms DL in a 100 TU superframe. */
     CHECK(!build_fixed_grid(100, 0, 2000, {1, 2}, 60000, 1000, 1000).has_value());
+    /* The grant map's capacity bounds the UE count: 24 fits, 25 does not. */
+    std::vector<uint16_t> many(kMaxUesPerCell);
+    for (size_t i = 0; i < many.size(); ++i)
+      many[i] = static_cast<uint16_t>(i + 1);
+    CHECK(build_fixed_grid(1000, 0, 2000, many, 1000, 1000, 1000).has_value());
+    many.push_back(99);
+    CHECK(!build_fixed_grid(1000, 0, 2000, many, 1000, 1000, 1000).has_value());
+    CHECK(kGrantMax == kMaxUesPerCell);
     SlotGrid h(100, 0);
     CHECK(!h.append(SlotKind::Idle, 0, 0));
     CHECK(h.append(SlotKind::Idle, 0, 102400));
@@ -152,7 +180,7 @@ int main() {
 
   /* Receiver: newer epochs only; a map takes effect at its superframe. */
   {
-    GrantMapReceiver r;
+    GrantMapReceiver r(0);
     GrantMap a;
     a.epoch = 5;
     a.effective_sf = 10;
@@ -170,6 +198,51 @@ int main() {
     CHECK(r.offer(b));
     CHECK(r.current(11)->epoch == 5); /* old map until sf 12 */
     CHECK(r.current(12)->epoch == 6);
+  }
+
+  /* Two future maps offered back to back: each takes effect at its own sf. */
+  {
+    GrantMapReceiver r(3);
+    GrantMap m6, m7;
+    m6.cell_id = m7.cell_id = 3;
+    m6.epoch = 6; m6.effective_sf = 12;
+    m7.epoch = 7; m7.effective_sf = 20;
+    CHECK(r.offer(m6) && r.offer(m7));
+    CHECK(r.current(11) == nullptr);
+    CHECK(r.current(12) && r.current(12)->epoch == 6);
+    CHECK(r.current(19)->epoch == 6);
+    CHECK(r.current(20)->epoch == 7);
+    /* A UE that wakes late jumps straight to the newest due map. */
+    GrantMapReceiver late(3);
+    CHECK(late.offer(m6) && late.offer(m7));
+    CHECK(late.current(25)->epoch == 7);
+    CHECK(late.current(30)->epoch == 7);
+    /* A newer map due earlier replaces a queued later one. */
+    GrantMapReceiver re(3);
+    GrantMap m8 = m6;
+    m8.epoch = 8; m8.effective_sf = 15;
+    CHECK(re.offer(m6) && re.offer(m7) && re.offer(m8));
+    CHECK(re.current(12)->epoch == 6);
+    CHECK(re.current(15)->epoch == 8);
+    CHECK(re.current(25)->epoch == 8); /* epoch 7 (sf 20) was superseded */
+  }
+
+  /* Maps are per cell: another cell's map is refused whatever its epoch, and
+   * rebind() starts over for the new cell. */
+  {
+    GrantMapReceiver r(1);
+    GrantMap mine, other;
+    mine.cell_id = 1; mine.epoch = 10; mine.effective_sf = 1;
+    other.cell_id = 2; other.epoch = 99; other.effective_sf = 1;
+    CHECK(!r.offer(other));
+    CHECK(r.offer(mine));
+    other.epoch = 3;
+    CHECK(!r.offer(other));
+    CHECK(r.current(1)->cell_id == 1);
+    r.rebind(2);
+    CHECK(r.cell_id() == 2 && r.current(1) == nullptr);
+    CHECK(r.offer(other)); /* a lower epoch is fine in the new cell */
+    CHECK(r.current(1)->cell_id == 2 && r.current(1)->epoch == 3);
   }
 
   if (failures == 0)

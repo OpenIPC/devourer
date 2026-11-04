@@ -41,6 +41,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -50,14 +51,36 @@
 #include "WiFiDriver.h"
 #include "logger.h"
 
+// Integer from an env var or argv string, in [lo, hi]; anything else is a
+// configuration error (BCN_TU=0 would make the period a zero divisor).
+static long parse_int(const char *what, const char *v, long d, long lo, long hi) {
+  if (!v) return d;
+  char *end = nullptr;
+  const long x = std::strtol(v, &end, 0);
+  if (end == v || *end != '\0' || x < lo || x > hi) {
+    fprintf(stderr, "invalid %s \"%s\" (want an integer in %ld..%ld)\n", what, v, lo, hi);
+    std::exit(2);
+  }
+  return x;
+}
+
+// One machine event = one complete line, one write, flushed (the repo's
+// logging contract; a piped harness must not see half a record or wait on a
+// buffer).
+static void emit(const std::string &line) {
+  fputs(line.c_str(), stdout);
+  fputc('\n', stdout);
+  fflush(stdout);
+}
+
 int main(int argc, char **argv) {
   const char *bdf = std::getenv("DEVOURER_PCIE_BDF");
   if (!bdf) { fprintf(stderr, "set DEVOURER_PCIE_BDF\n"); return 2; }
-  const uint8_t ch = std::getenv("DEVOURER_CHANNEL") ? atoi(std::getenv("DEVOURER_CHANNEL")) : 36;
-  const int tu = std::getenv("BCN_TU") ? atoi(std::getenv("BCN_TU")) : 100;
+  const uint8_t ch = (uint8_t)parse_int("DEVOURER_CHANNEL", std::getenv("DEVOURER_CHANNEL"), 36, 1, 196);
+  const int tu = (int)parse_int("BCN_TU", std::getenv("BCN_TU"), 100, 1, 65535);
   const int64_t period = (int64_t)tu * 1024;
-  const int secs = argc > 1 ? atoi(argv[1]) : 120;
-  const int nodes = argc > 2 ? atoi(argv[2]) : 3;
+  const int secs = (int)parse_int("secs", argc > 1 ? argv[1] : nullptr, 120, 1, 86400);
+  const int nodes = (int)parse_int("nodes", argc > 2 ? argv[2] : nullptr, 3, 1, 256);
   const uint8_t prefix[5] = {0x57, 0x42, 0x75, 0x05, 0xd6};
 
   auto logger = std::make_shared<Logger>();
@@ -107,12 +130,20 @@ int main(int argc, char **argv) {
       fclose(f);
     }
   }
-  printf("{\"ev\":\"bcnobs.counts\"");
-  for (int k = 0; k < nodes; ++k) printf(",\"node%d\":%ld", k, count[k]);
-  printf("}\n");
+  {
+    std::string line = "{\"ev\":\"bcnobs.counts\"";
+    for (int k = 0; k < nodes; ++k)
+      line += ",\"node" + std::to_string(k) + "\":" + std::to_string(count[k]);
+    emit(line + "}");
+  }
 
   auto report = [&](int k, const char *kind, const std::vector<double> &d) {
-    if (d.empty()) { printf("{\"ev\":\"bcnobs.spacing\",\"node\":%d,\"kind\":\"%s\",\"n\":0}\n", k, kind); return; }
+    char buf[256];
+    if (d.empty()) {
+      snprintf(buf, sizeof(buf), "{\"ev\":\"bcnobs.spacing\",\"node\":%d,\"kind\":\"%s\",\"n\":0}", k, kind);
+      emit(buf);
+      return;
+    }
     std::vector<double> s = d;
     std::sort(s.begin(), s.end());
     const double med = s[s.size() / 2];
@@ -120,10 +151,12 @@ int main(int argc, char **argv) {
     double ss = 0;
     for (double x : d) { dev_abs.push_back(std::fabs(x - med)); ss += (x - med) * (x - med); }
     std::sort(dev_abs.begin(), dev_abs.end());
-    printf("{\"ev\":\"bcnobs.spacing\",\"node\":%d,\"kind\":\"%s\",\"n\":%zu,\"median_us\":%.1f,"
-           "\"jitter_rms_us\":%.2f,\"p95_abs_dev_us\":%.1f,\"max_abs_dev_us\":%.1f}\n",
-           k, kind, d.size(), med, std::sqrt(ss / d.size()),
-           dev_abs[dev_abs.size() * 95 / 100], dev_abs.back());
+    snprintf(buf, sizeof(buf),
+             "{\"ev\":\"bcnobs.spacing\",\"node\":%d,\"kind\":\"%s\",\"n\":%zu,\"median_us\":%.1f,"
+             "\"jitter_rms_us\":%.2f,\"p95_abs_dev_us\":%.1f,\"max_abs_dev_us\":%.1f}",
+             k, kind, d.size(), med, std::sqrt(ss / d.size()),
+             dev_abs[dev_abs.size() * 95 / 100], dev_abs.back());
+    emit(buf);
   };
   // For each beacon of node k, the most recent node-0 beacon within one
   // period before it gives one sample (uint32 wrap-safe difference).

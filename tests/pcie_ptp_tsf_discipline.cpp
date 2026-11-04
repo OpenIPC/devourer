@@ -54,18 +54,40 @@ static double phc_us(clockid_t c) {
   return (double)t.tv_sec * 1e6 + (double)t.tv_nsec / 1e3;
 }
 
+// Strict env parsing: a malformed or non-finite value is a configuration error,
+// not something to fall back from silently (atof would turn "x" into 0 and let
+// "nan" reach the steering maths).
 static double envd(const char *k, double d) {
   const char *v = std::getenv(k);
-  return v ? atof(v) : d;
+  if (!v) return d;
+  char *end = nullptr;
+  const double x = std::strtod(v, &end);
+  if (end == v || *end != '\0' || !std::isfinite(x)) {
+    fprintf(stderr, "invalid %s=\"%s\" (want a finite number)\n", k, v);
+    std::exit(2);
+  }
+  return x;
+}
+// Integer in [lo, hi], else a configuration error.
+static long envi(const char *k, long d, long lo, long hi) {
+  const char *v = std::getenv(k);
+  if (!v) return d;
+  char *end = nullptr;
+  const long x = std::strtol(v, &end, 0);
+  if (end == v || *end != '\0' || x < lo || x > hi) {
+    fprintf(stderr, "invalid %s=\"%s\" (want an integer in %ld..%ld)\n", k, v, lo, hi);
+    std::exit(2);
+  }
+  return x;
 }
 
 int main(int argc, char **argv) {
   const char *bdf = std::getenv("DEVOURER_PCIE_BDF");
   if (!bdf) { fprintf(stderr, "set DEVOURER_PCIE_BDF\n"); return 2; }
   const char *ref = std::getenv("REF_PTP"); if (!ref) ref = "/dev/ptp0";
-  const uint8_t ch = (uint8_t)envd("DEVOURER_CHANNEL", 36);
+  const uint8_t ch = (uint8_t)envi("DEVOURER_CHANNEL", 36, 1, 196);
   const int secs = argc > 1 ? atoi(argv[1]) : 180;
-  const int interval_tu = (int)envd("BCN_TU", 100);
+  const int interval_tu = (int)envi("BCN_TU", 100, 1, 65535);  // the period is a divisor
   const int64_t interval = (int64_t)interval_tu * 1024;
   const double gain = envd("GAIN", 0.9), ki = envd("KI", 0.10);
   const double capture = envd("CAPTURE_US", 300);
@@ -78,7 +100,7 @@ int main(int argc, char **argv) {
   // NODE_ID is the last octet of the beacon SA/BSSID so an observer can tell
   // the nodes apart (tests/beacon_phase_observer.cpp).
   const double phase = envd("PHASE_US", 0);
-  const uint8_t node_id = (uint8_t)envd("NODE_ID", 0);
+  const uint8_t node_id = (uint8_t)envi("NODE_ID", 0, 0, 255);
   const double bracket_max = envd("BRACKET_MAX_US", 0);   // 0 = adaptive
   const double bracket_slack = envd("BRACKET_SLACK_US", 5);
   std::deque<double> brackets;  // recent accepted+rejected bracket widths
@@ -234,6 +256,7 @@ int main(int argc, char **argv) {
            "\"rejected\":%ld,\"rms_us\":%.2f,\"p95_abs_us\":%.1f,\"max_abs_us\":%.1f}\n",
            bdf, use_fr ? "freerun" : "ledger", locked.size(), rejected,
            std::sqrt(ss / locked.size()), ab[ab.size() * 95 / 100], ab.back());
+    fflush(stdout);
   }
   dev->Stop();
   return 0;

@@ -98,18 +98,19 @@ int main() {
 
   /* --- msgB: round trip; forged/foreign entries are dropped one by one. --- */
   {
-    std::vector<RachResponse> rs = {{11, RachStatus::Granted, 2, 2, 6},
-                                    {12, RachStatus::DeniedFull, 0, 0, 0}};
+    std::vector<RachResponse> rs = {{mac_of(1), 11, RachStatus::Granted, 2, 2, 6},
+                                    {mac_of(2), 12, RachStatus::DeniedFull, 0, 0, 0}};
     const auto b = encode_rach_responses(7, rs, key);
     CHECK(decode_rach_responses(b.data(), b.size(), 7, key) == rs);
     CHECK(decode_rach_responses(b.data(), b.size(), 7, other).empty());
     CHECK(decode_rach_responses(b.data(), b.size(), 8, key).empty());
     auto t = b;
-    t[3 + 9] ^= 1; /* the first entry's ue id: only that entry is dropped */
+    t[3 + 15] ^= 1; /* the first entry's ue id: only that entry is dropped */
     auto d = decode_rach_responses(t.data(), t.size(), 7, key);
     CHECK(d.size() == 1 && d[0].nonce == 12);
-    std::vector<RachResponse> many(12, RachResponse{1, RachStatus::Granted, 1, 1, 1});
-    CHECK(encode_rach_responses(7, many, key)[2] == 8); /* capped per beacon */
+    std::vector<RachResponse> many(12, RachResponse{mac_of(1), 1, RachStatus::Granted, 1, 1, 1});
+    const auto capped = encode_rach_responses(7, many, key);
+    CHECK(capped[2] == kRachMaxPerBeacon && capped.size() + 3 <= 255); /* one IE */
   }
 
   /* --- Server: authenticate + freshness before allocating; duplicates;
@@ -140,9 +141,76 @@ int main() {
     CHECK(srv.on_request(ok2.data(), ok2.size(), 500)->ue == 2);
     auto full = srv.on_request(ok3.data(), ok3.size(), 500);
     CHECK(full && full->status == RachStatus::DeniedFull && reg.size() == 2);
-    /* Answers stay in the beacon for answer_ttl_sf superframes. */
-    CHECK(srv.pending(502).size() == 3);
-    CHECK(srv.pending(510).empty());
+    /* Each answer is published in answer_beacons (4) beacons, then dropped. */
+    for (int i = 0; i < 4; ++i)
+      CHECK(srv.pending(502 + i).size() == 3);
+    CHECK(srv.pending(506).empty());
+    /* A grant whose position was released and reused is not resurrected by
+     * a retry of the old request: the station is admitted afresh. */
+    CHECK(reg.release(mac_of(1)));
+    auto take = req(5, 105, 506, key);
+    CHECK(srv.on_request(take.data(), take.size(), 506)->ue == 1); /* reuses position 1 */
+    auto retry = srv.on_request(ok1.data(), ok1.size(), 507);   /* MAC 1's old nonce */
+    CHECK(retry && retry->status == RachStatus::DeniedFull);     /* pool full now, not ue 1 */
+    /* Same nonce from another MAC is another request, answered to that MAC. */
+    auto other_mac = req(9, 102, 507, key);
+    auto om = srv.on_request(other_mac.data(), other_mac.size(), 507);
+    CHECK(om && om->mac == mac_of(9) && om->status == RachStatus::DeniedFull);
+  }
+
+  /* --- Server: a queue longer than one beacon is paged; history is bounded. --- */
+  {
+    std::vector<std::pair<uint8_t, uint8_t>> pos;
+    for (uint8_t i = 0; i < 20; ++i)
+      pos.push_back({i, static_cast<uint8_t>(20 + i)});
+    UeRegistry reg(pos);
+    RachServerConfig sc;
+    sc.answer_beacons = 1;
+    sc.history_max = 16;
+    RachServer srv(7, reg, key, sc);
+    for (uint8_t i = 0; i < 12; ++i) {
+      RachRequest q;
+      q.cell_id = 7;
+      q.mac = mac_of(static_cast<uint8_t>(40 + i));
+      q.nonce = 500 + i;
+      q.fresh_sf = 100;
+      const auto p = encode_rach_request(q, key);
+      CHECK(srv.on_request(p.data(), p.size(), 100).has_value());
+    }
+    const auto b1 = srv.pending(101), b2 = srv.pending(102);
+    CHECK(b1.size() == kRachMaxPerBeacon && b2.size() == 12 - kRachMaxPerBeacon);
+    std::set<uint64_t> seen;
+    for (const auto &r : b1) seen.insert(r.nonce);
+    for (const auto &r : b2) seen.insert(r.nonce);
+    CHECK(seen.size() == 12); /* every answer published once */
+    CHECK(srv.pending(103).empty());
+    CHECK(srv.history() == 12);
+    for (uint8_t i = 0; i < 8; ++i) { /* past history_max: the oldest go */
+      RachRequest q;
+      q.cell_id = 7;
+      q.mac = mac_of(static_cast<uint8_t>(80 + i));
+      q.nonce = 900 + i;
+      q.fresh_sf = 104;
+      const auto p = encode_rach_request(q, key);
+      srv.on_request(p.data(), p.size(), 104);
+    }
+    CHECK(srv.history() <= 16);
+    srv.pending(1000); /* far later: everything aged out */
+    RachRequest q;
+    q.cell_id = 7;
+    q.mac = mac_of(99);
+    q.nonce = 1;
+    q.fresh_sf = 1000;
+    const auto p = encode_rach_request(q, key);
+    srv.on_request(p.data(), p.size(), 1000);
+    CHECK(srv.history() == 1);
+  }
+
+  /* --- Registry is capped at what a grid / grant map can carry. --- */
+  {
+    std::vector<std::pair<uint8_t, uint8_t>> pos(kMaxUesPerCell + 5, {1, 2});
+    UeRegistry big(pos);
+    CHECK(big.capacity() == kMaxUesPerCell);
   }
 
   /* --- Client: backoff, loss detection, same nonce, give-up. --- */
@@ -154,32 +222,50 @@ int main() {
     cc.max_window_sf = 16;
     cc.response_sf = 3;
     cc.max_attempts = 3;
-    RachClient c(777, rnd, cc);
+    RachClient c(mac_of(7), 777, rnd, cc);
     uint64_t sf = 0;
     std::optional<int64_t> off;
-    for (; sf < 100 && !(off = c.opportunity(sf, 8000)); ++sf) {
+    for (; sf < 100 && !(off = c.opportunity(sf, 8000, 700)); ++sf) {
     }
-    CHECK(off && *off >= 0 && *off < 8000 && c.state() == RachState::Sent && c.attempt() == 1);
+    CHECK(off && *off >= 0 && *off + 700 <= 8000 && c.state() == RachState::Sent && c.attempt() == 1);
     const uint64_t first = sf;
     CHECK(first >= 1 && first <= 4); /* inside the first window */
     /* No answer: after response_sf the client backs off and tries again. */
     int sent = 1;
     for (++sf; sf < 400 && c.state() != RachState::Failed; ++sf)
-      if (c.opportunity(sf, 8000))
+      if (c.opportunity(sf, 8000, 700))
         ++sent;
     CHECK(sent == 3 && c.state() == RachState::Failed && c.losses() == 3);
+    /* A late answer cannot revive a failed client. */
+    CHECK(!c.on_responses({{mac_of(7), 777, RachStatus::Granted, 1, 1, 5}}) &&
+          c.state() == RachState::Failed);
+    /* Offsets always leave room for the whole transmission, at the edge too. */
+    for (int k = 0; k < 2000; ++k) {
+      RachClient e(mac_of(8), 1000 + k, rnd, cc);
+      std::optional<int64_t> o;
+      for (uint64_t x = 0; x < 50 && !(o = e.opportunity(x, 1000, 999)); ++x) {
+      }
+      CHECK(o && (*o == 0 || *o == 1));
+    }
+    RachClient tight(mac_of(8), 5, rnd, cc);
+    CHECK(!tight.opportunity(10, 600, 700) && tight.state() == RachState::Failed);
+    /* No answer is accepted before the first transmission. */
+    RachClient early(mac_of(9), 6, rnd, cc);
+    CHECK(!early.on_responses({{mac_of(9), 6, RachStatus::Granted, 1, 1, 5}}));
     /* An answer for another nonce is ignored; ours joins. */
-    RachClient j(42, rnd, cc);
-    for (sf = 0; !j.opportunity(sf, 8000); ++sf) {
+    RachClient j(mac_of(42), 42, rnd, cc);
+    for (sf = 0; !j.opportunity(sf, 8000, 700); ++sf) {
     }
-    CHECK(!j.on_responses({{41, RachStatus::Granted, 1, 1, 5}}) && j.state() == RachState::Sent);
-    CHECK(j.on_responses({{42, RachStatus::Granted, 2, 2, 6}}) && j.state() == RachState::Joined);
+    CHECK(!j.on_responses({{mac_of(42), 41, RachStatus::Granted, 1, 1, 5}}) && j.state() == RachState::Sent);
+    /* our nonce but another station's MAC: not ours */
+    CHECK(!j.on_responses({{mac_of(41), 42, RachStatus::Granted, 1, 1, 5}}) && j.state() == RachState::Sent);
+    CHECK(j.on_responses({{mac_of(42), 42, RachStatus::Granted, 2, 2, 6}}) && j.state() == RachState::Joined);
     CHECK(j.answer()->ue == 2);
-    RachClient dn(43, rnd, cc);
-    for (sf = 0; !dn.opportunity(sf, 8000); ++sf) {
+    RachClient dn(mac_of(43), 43, rnd, cc);
+    for (sf = 0; !dn.opportunity(sf, 8000, 700); ++sf) {
     }
-    CHECK(dn.on_responses({{43, RachStatus::DeniedFull, 0, 0, 0}}) && dn.state() == RachState::Denied);
-    CHECK(!dn.opportunity(sf + 50, 8000)); /* denied: no retry storm */
+    CHECK(dn.on_responses({{mac_of(43), 43, RachStatus::DeniedFull, 0, 0, 0}}) && dn.state() == RachState::Denied);
+    CHECK(!dn.opportunity(sf + 50, 8000, 700)); /* denied: no retry storm */
   }
 
   /* --- Contention: 1 UE already in, 8 join through one 8 ms RACH slot; two
@@ -193,7 +279,7 @@ int main() {
     auto rnd = [&seed] { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
     std::vector<RachClient> cl;
     for (uint8_t i = 0; i < 8; ++i)
-      cl.emplace_back(1000 + i, rnd);
+      cl.emplace_back(mac_of(static_cast<uint8_t>(10 + i)), 1000 + i, rnd);
     uint64_t collisions = 0;
     std::vector<RachResponse> beacon; /* the answers in this superframe's beacon */
     uint64_t sf = 0;
@@ -208,7 +294,7 @@ int main() {
         break;
       std::vector<std::pair<int64_t, size_t>> tx; /* (offset, client) */
       for (size_t i = 0; i < cl.size(); ++i)
-        if (auto off = cl[i].opportunity(sf, 8000))
+        if (auto off = cl[i].opportunity(sf, 8000, 700))
           tx.push_back({*off, i});
       for (size_t a = 0; a < tx.size(); ++a) {
         bool hit = false;

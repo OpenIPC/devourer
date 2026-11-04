@@ -19,6 +19,8 @@
 #include <optional>
 #include <vector>
 
+#include "cell/SlotGrid.h"
+
 namespace devourer::cell {
 
 struct UeSlot {
@@ -29,9 +31,16 @@ struct UeSlot {
 
 class UeRegistry {
 public:
-  /* positions[i] = the DL/UL slot indices of grid position i + 1. */
+  /* positions[i] = the DL/UL slot indices of grid position i + 1. At most
+   * kMaxUesPerCell positions are kept: a grid and one grant map cannot carry
+   * more (build_fixed_grid / encode_grant_ie refuse), so the pool never
+   * admits a station it could not schedule. */
   explicit UeRegistry(std::vector<std::pair<uint8_t, uint8_t>> positions)
-      : pos_(std::move(positions)), owner_(pos_.size()) {}
+      : pos_(std::move(positions)) {
+    if (pos_.size() > kMaxUesPerCell)
+      pos_.resize(kMaxUesPerCell);
+    owner_.resize(pos_.size());
+  }
 
   size_t capacity() const { return pos_.size(); }
   size_t size() const { return by_mac_.size(); }

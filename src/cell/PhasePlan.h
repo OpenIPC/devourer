@@ -27,6 +27,9 @@ namespace devourer::cell {
  *   - the same channel: the two cells' active spans (beacon + all
  *     positions) disjoint, so coordination never meets a fixed conflict
  *     (one point), or at least neither beacon inside the other's span (half).
+ * Never across bands (gap_cross_band: the UEs refuse such gaps). Running
+ * cells on another superframe period are left out (`other_period`): their
+ * beacons do not recur at one offset of the joining grid.
  * Each pair scores up to 2 (both directions / both spans); the plan takes
  * the best total over a `step_us` grid and, of the best, the middle of the
  * widest run of equally good phases (the most margin). */
@@ -34,6 +37,7 @@ struct PhaseCell {
   uint16_t du = 0;
   uint8_t channel = 0;
   int64_t phase_us = 0;                   /* ignored for the joining cell */
+  int64_t period_us = 0;                  /* its superframe (0: the plan's) */
   int64_t beacon_us = 0;                  /* its beacon slot */
   std::vector<std::pair<GridSpan, GridSpan>> positions; /* (DL, UL) per position */
   int64_t span_us = 0;                    /* beacon + every position: the active span */
@@ -48,17 +52,23 @@ struct PhasePlan {
   double score = 0, max_score = 0;
   /* per existing cell: how well the pair works at the chosen phase (0..2) */
   std::vector<std::pair<uint16_t, double>> pairs;
+  /* existing cells on another superframe period: their beacons do not recur
+   * at one offset of the joining grid, so they are not planned against */
+  std::vector<uint16_t> other_period;
 };
+/* At most this many candidate phases (the step grows for a long period). */
+constexpr int64_t kMaxPhaseCandidates = 20000;
 
 /* A cell from its reported layout (Coord.h; the F1 Report's fixed items and
  * positions): the beacon is the fixed item at the TBTT. */
-inline PhaseCell phase_cell(uint16_t du, uint8_t channel, int64_t phase_us,
+inline PhaseCell phase_cell(uint16_t du, uint8_t channel, int64_t phase_us, int64_t period_us,
                             const std::vector<CoordInterval> &fixed,
                             const std::vector<CoordPosition> &positions) {
   PhaseCell c;
   c.du = du;
   c.channel = channel;
   c.phase_us = phase_us;
+  c.period_us = period_us;
   int64_t end = 0;
   for (const CoordInterval &f : fixed) {
     if (f.start_us == 0)
@@ -94,6 +104,8 @@ inline double pair_score(const PhaseCell &joining, int64_t phase, const PhaseCel
                          const PhaseParams &pp) {
   const int64_t P = pp.period_us;
   if (joining.channel != e.channel) {
+    if (gap_cross_band(joining.channel, e.channel))
+      return 0; /* the UEs never gap across bands */
     return measurable(e, neighbour_offset_us(phase, e.phase_us, P), pp) +
            measurable(joining, neighbour_offset_us(e.phase_us, phase, P), pp);
   }
@@ -109,13 +121,23 @@ inline PhasePlan plan_phase(const PhaseCell &joining, const std::vector<PhaseCel
                             const PhaseParams &pp = {}) {
   using namespace mg_detail;
   PhasePlan best;
-  best.max_score = 2.0 * static_cast<double>(existing.size());
-  const int64_t P = pp.period_us, step = std::max<int64_t>(1, pp.step_us);
+  const int64_t P = pp.period_us;
+  if (P <= 0)
+    return best;
+  const int64_t step = std::max<int64_t>({1, pp.step_us, (P + kMaxPhaseCandidates - 1) / kMaxPhaseCandidates});
+  std::vector<const PhaseCell *> same;
+  for (const auto &e : existing) {
+    if (e.period_us != 0 && e.period_us != P)
+      best.other_period.push_back(e.du);
+    else
+      same.push_back(&e);
+  }
+  best.max_score = 2.0 * static_cast<double>(same.size());
   std::vector<double> score;
   for (int64_t ph = 0; ph < P; ph += step) {
     double sc = 0;
-    for (const auto &e : existing)
-      sc += pair_score(joining, ph, e, pp);
+    for (const PhaseCell *e : same)
+      sc += pair_score(joining, ph, *e, pp);
     score.push_back(sc);
   }
   if (score.empty())
@@ -141,8 +163,8 @@ inline PhasePlan plan_phase(const PhaseCell &joining, const std::vector<PhaseCel
   }
   best.phase_us = static_cast<int64_t>((best_start + best_len / 2) % n) * step;
   best.score = top;
-  for (const auto &e : existing)
-    best.pairs.push_back({e.du, pair_score(joining, best.phase_us, e, pp)});
+  for (const PhaseCell *e : same)
+    best.pairs.push_back({e->du, pair_score(joining, best.phase_us, *e, pp)});
   return best;
 }
 

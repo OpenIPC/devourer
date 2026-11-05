@@ -68,6 +68,10 @@
 // same). Joining DUs are planned one at a time, in id order; each waits for
 // the expected DUs not yet heard, up to RAN_PHASE_WAIT_S. A joining DU is in
 // no neighbour list until it reports its phase.
+// Phase requests are refused without RAN_F1_KEY (an assignment is lasting
+// state), unless RAN_F1_INSECURE=1. A sticky assignment holds only for the
+// period, channel and grid it was planned for. Running cells on another
+// period are not planned against (logged as other_period).
 //   RAN_PHASE_WAIT_S [20]     (below the DUs' CELL_PHASE_WAIT_S)
 //   RAN_GAP_RETUNE_US [26000] RAN_GAP_GUARD_US [2000]  the UEs' gap bound
 //                             (= CELL_UE_GAP_RETUNE_US / _GUARD_US)
@@ -343,40 +347,70 @@ int main() {
     std::chrono::steady_clock::time_point first;
   };
   std::map<uint16_t, Joining> joining;
-  std::map<uint16_t, int64_t> phase_of;
+  /* A sticky assignment holds for the layout it was planned for: a DU that
+   * comes back with another period, channel or grid is planned afresh. */
+  struct Assigned {
+    int64_t phase_us = 0;
+    int64_t period_us = 0;
+    uint8_t channel = 0;
+    std::vector<devourer::cell::CoordInterval> fixed;
+    std::vector<devourer::cell::CoordPosition> positions;
+    bool fits(const f1::Report &r) const {
+      return period_us == r.period_us && channel == r.channel && fixed == r.fixed &&
+             positions == r.positions && phase_us < r.period_us;
+    }
+  };
+  std::map<uint16_t, Assigned> phase_of;
+  /* A phase request is state the CU keeps (a sticky assignment): never from
+   * an unauthenticated sender unless explicitly allowed. */
+  const bool phase_insecure = envl("RAN_F1_INSECURE", 0, 0, 1) != 0;
+  if (!mac && !phase_insecure)
+    fprintf(stderr, "ran-controller: no RAN_F1_KEY: phase requests are ignored (RAN_F1_INSECURE=1 "
+                    "to allow)\n");
   auto answer_phase = [&](const DuState &d) {
-    send(d, f1::encode_phase(f1::PhaseAssign{d.rep.du, phase_of.at(d.rep.du), d.rep.seq}, mac));
+    send(d, f1::encode_phase(f1::PhaseAssign{d.rep.du, phase_of.at(d.rep.du).phase_us, d.rep.seq},
+                             mac));
+  };
+  auto fresh = [](std::chrono::steady_clock::time_point at, std::chrono::steady_clock::time_point now) {
+    return at.time_since_epoch().count() != 0 && now - at < std::chrono::seconds(3);
   };
   auto plan_joining = [&](std::chrono::steady_clock::time_point now) {
     for (auto &kv : joining) {
       if (phase_of.count(kv.first))
         continue;
       const f1::Report &rq = kv.second.st.rep;
-      /* Wait for the expected DUs not yet heard (a joining one never blocks:
-       * the lower ids are planned first, the higher ones around this). */
+      /* Wait for the expected DUs not heard lately — the same freshness as
+       * the cells planned against (a joining one never blocks: the lower ids
+       * are planned first, the higher ones around this). */
       bool all = true;
-      for (long id : expected)
-        all = all && (id == kv.first || dus.count(static_cast<uint16_t>(id)) ||
-                      joining.count(static_cast<uint16_t>(id)));
+      for (long id : expected) {
+        const auto u = static_cast<uint16_t>(id);
+        const auto d = dus.find(u);
+        const auto j = joining.find(u);
+        all = all && (u == kv.first || (d != dus.end() && fresh(d->second.at, now)) ||
+                      (j != joining.end() && fresh(j->second.st.at, now)));
+      }
       if (!all && now - kv.second.first < std::chrono::seconds(phase_wait_s))
         continue;
       std::vector<devourer::cell::PhaseCell> ex;
       for (const auto &d : dus)
-        if (d.first != kv.first && d.second.rep.phase_us >= 0 &&
-            now - d.second.at < std::chrono::seconds(3))
+        if (d.first != kv.first && d.second.rep.phase_us >= 0 && fresh(d.second.at, now))
           ex.push_back(devourer::cell::phase_cell(d.first, d.second.rep.channel,
-                                                  d.second.rep.phase_us, d.second.rep.fixed,
-                                                  d.second.rep.positions));
+                                                  d.second.rep.phase_us, d.second.rep.period_us,
+                                                  d.second.rep.fixed, d.second.rep.positions));
       for (const auto &j : joining) /* assigned, not yet running */
-        if (j.first != kv.first && phase_of.count(j.first) && !dus.count(j.first))
+        if (j.first != kv.first && phase_of.count(j.first) && !dus.count(j.first) &&
+            fresh(j.second.st.at, now))
           ex.push_back(devourer::cell::phase_cell(j.first, j.second.st.rep.channel,
-                                                  phase_of[j.first], j.second.st.rep.fixed,
+                                                  phase_of[j.first].phase_us,
+                                                  j.second.st.rep.period_us, j.second.st.rep.fixed,
                                                   j.second.st.rep.positions));
       devourer::cell::PhaseParams pp = phase_pp;
       pp.period_us = rq.period_us;
-      const auto me = devourer::cell::phase_cell(kv.first, rq.channel, 0, rq.fixed, rq.positions);
+      const auto me = devourer::cell::phase_cell(kv.first, rq.channel, 0, rq.period_us, rq.fixed,
+                                                 rq.positions);
       const auto plan = devourer::cell::plan_phase(me, ex, pp);
-      phase_of[kv.first] = plan.phase_us;
+      phase_of[kv.first] = Assigned{plan.phase_us, rq.period_us, rq.channel, rq.fixed, rq.positions};
       std::string pairs = "{";
       for (size_t i = 0; i < plan.pairs.size(); ++i) {
         char b[48];
@@ -386,8 +420,10 @@ int main() {
       char l[256];
       snprintf(l, sizeof l,
                "{\"ev\":\"ran.phase\",\"du\":%u,\"channel\":%u,\"phase_us\":%lld,"
-               "\"score\":%.2f,\"max_score\":%.2f,\"against\":%zu,\"pairs\":",
-               kv.first, rq.channel, (long long)plan.phase_us, plan.score, plan.max_score, ex.size());
+               "\"score\":%.2f,\"max_score\":%.2f,\"against\":%zu,\"other_period\":%zu,"
+               "\"pairs\":",
+               kv.first, rq.channel, (long long)plan.phase_us, plan.score, plan.max_score,
+               plan.pairs.size(), plan.other_period.size());
       emit(std::string(l) + pairs + "}}");
       answer_phase(kv.second.st);
     }
@@ -464,13 +500,19 @@ int main() {
                        expected.end())
             r.reset();
           if (r && r->phase_us < 0) {
-            /* A phase request (M6): above this DU's last request and last
-             * report, else a replay. */
+            /* A phase request (M6): authenticated, above this DU's last
+             * request and last report (else a replay), and on a period a DU
+             * grid can have (CELL_TU 10..1000 TU). */
+            if (!mac && !phase_insecure)
+              continue;
             auto j = joining.find(r->du);
             const auto d = dus.find(r->du);
             if ((j != joining.end() && r->seq <= j->second.st.rep.seq) ||
-                (d != dus.end() && r->seq <= d->second.rep.seq) || r->period_us <= 0)
+                (d != dus.end() && r->seq <= d->second.rep.seq) || r->period_us < 10 * 1024 ||
+                r->period_us > 1000 * 1024 || r->period_us % 1024 != 0)
               continue;
+            if (auto a = phase_of.find(r->du); a != phase_of.end() && !a->second.fits(*r))
+              phase_of.erase(a); /* another layout: planned afresh */
             if (j == joining.end())
               j = joining.emplace(r->du, Joining{{}, std::chrono::steady_clock::now()}).first;
             j->second.st.rep = *r;

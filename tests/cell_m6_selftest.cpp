@@ -523,14 +523,14 @@ int main() {
     CHECK(g);
     CoordDu d;
     coord_layout(*g, d);
-    const PhaseCell a = phase_cell(1, 149, 0, d.fixed, d.positions);
+    const PhaseCell a = phase_cell(1, 149, 0, 102400, d.fixed, d.positions);
     CHECK(a.beacon_us == 1500 && a.span_us == 20500 && a.positions.size() == 3);
     PhaseParams pp;
     pp.retune_us = 26000;
     pp.guard_us = 2000;
     /* Another channel: every position of each cell can measure the other's
      * beacon only for a phase in [48500, 53900]; the plan takes its middle. */
-    PhaseCell b = phase_cell(2, 157, 0, d.fixed, d.positions);
+    PhaseCell b = phase_cell(2, 157, 0, 102400, d.fixed, d.positions);
     auto p = plan_phase(b, {a}, pp);
     CHECK(p.score == 2 && p.max_score == 2 && p.phase_us == 51200);
     CHECK(p.pairs.size() == 1 && p.pairs[0].first == 1 && p.pairs[0].second == 2);
@@ -551,9 +551,24 @@ int main() {
     PhaseCell c2 = b;
     c2.channel = 157;
     c2.phase_us = 51200;
-    PhaseCell j = phase_cell(3, 36, 0, d.fixed, d.positions);
+    PhaseCell j = phase_cell(3, 36, 0, 102400, d.fixed, d.positions);
     p = plan_phase(j, {a, c2}, pp);
     CHECK(p.max_score == 4 && p.score >= 1 && p.score < 4);
+    /* Across bands: no gap credit (the UEs never gap there). */
+    PhaseCell lo = phase_cell(4, 6, 0, 102400, d.fixed, d.positions);
+    CHECK(mg_detail::pair_score(lo, 51200, a, pp) == 0);
+    CHECK(gap_cross_band(6, 149) && !gap_cross_band(36, 149));
+    /* Another period: left out, not mis-scored on this one's modulus. */
+    PhaseCell longer = a;
+    longer.du = 9;
+    longer.period_us = 204800;
+    p = plan_phase(b, {a, longer}, pp);
+    CHECK(p.max_score == 2 && p.other_period.size() == 1 && p.other_period[0] == 9);
+    /* A long period: the candidate grid is capped. */
+    PhaseParams lp = pp;
+    lp.period_us = 1000 * 1024;
+    lp.step_us = 1;
+    CHECK(plan_phase(j, {}, lp).phase_us < lp.period_us);
     /* No other cell: any phase (the middle of the circle). */
     CHECK(plan_phase(j, {}, pp).max_score == 0);
     /* F1 v8: Phase. */

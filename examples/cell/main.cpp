@@ -2825,7 +2825,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
             {0, c.bcn_us},
             {sl[g->dl_slot].start_us, sl[g->dl_slot].len_us},
             {sl[g->ul_slot].start_us, sl[g->ul_slot].len_us}};
-        const bool cross_band = (cur_ch <= 14) != (n.channel <= 14);
+        const bool cross_band = devourer::cell::gap_cross_band(cur_ch, n.channel);
         const auto w = cross_band ? std::nullopt
                                   : devourer::cell::gap_window(n.offset_us, 500, gap_retune_us,
                                                                gap_guard_us, P, busy);

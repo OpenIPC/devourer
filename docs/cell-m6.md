@@ -298,35 +298,16 @@ measurement-gap run.
 ## Phase planning (where a joining cell's TBTT goes)
 
 A gap fits only where the neighbour's beacon falls in an idle part of the
-UE's grid, so the phase layout decides who can measure whom. The CU plans it
-(`src/cell/PhasePlan.h` `plan_phase`):
-
-- **Running cells keep their phases.** Re-phasing a live cell would move
-  every UE's clock. Only a joining DU is placed.
-- **Another channel:** for each candidate phase, the share of each cell's
-  capacity positions that can fit a gap (`gap_window`, the UEs' bound) for
-  the other's beacon, both ways. A pair scores up to 2.
-- **The same channel:** 2 if the two active spans (beacon plus every
-  position) are disjoint, so coordination never meets a fixed conflict; 1 if
-  only the beacons are clear of the other's span.
-- **The choice:** the best total over a 100 µs grid, and of the best, the
-  middle of the widest run of equal scores (the most margin either side).
-
-**The exchange.** A DU started with `CELL_PHASE_AUTO=1` asks before it starts
-its beacon, so a waiting DU airs nothing a UE could lock to.
-- **Request:** a Report with `phase_us = −1`, carrying its grid (fixed items,
-  positions), channel and tier, every 500 ms.
-- **Answer:** F1 `Phase` (v8) from the CU's address, tagged, echoing the
-  request's seq. The DU takes only an answer to its own run's requests.
-- **No answer within `CELL_PHASE_WAIT_S` (30 s):** the DU keeps
-  `CELL_PHASE_US` (`cell.phase.default`).
-- **CU side:** a joining DU is kept apart from the running ones, and is in no
-  neighbour list until it reports its phase. Joiners are planned one at a
-  time, in id order. Each waits up to `RAN_PHASE_WAIT_S` (20 s) for the
-  expected DUs not yet heard. The assignment is sticky, so a restarted DU
-  gets the same phase (`ran.phase` logs the score per pair).
-- **Shared bound:** the CU plans with the UEs' gap bound, `RAN_GAP_RETUNE_US`
-  / `RAN_GAP_GUARD_US` (26000 / 2000, matching the UE defaults).
+UE's grid, so the phase layout decides who can measure whom. The CU places
+a **joining** DU's TBTT; running cells keep theirs (re-phasing a live cell
+would move every UE's clock).
+- **The scoring:** see `plan_phase` in `src/cell/PhasePlan.h`.
+- **The exchange:** a DU with `CELL_PHASE_AUTO=1` asks before it starts its
+  beacon (a Report with phase −1) and gets F1 `Phase` (v8). The settings are
+  in the env headers of `examples/cell/main.cpp` and
+  `tools/ran-controller/main.cpp`.
+- **The bound:** the CU plans with the UEs' gap bound (26 + 2 ms on both
+  sides).
 
 **The rig grid** has a 1500 µs beacon and three positions (DL 4000, a
 1000 turnaround, UL 2000), so the active span is 20.5 ms. Against a cell at

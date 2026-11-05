@@ -47,12 +47,24 @@ source only once the target has staged the UE. So a refusing target never
 leaves a command on the air.
 - The source gets it on the target's ack, not a round later; the lead would
   otherwise be spent waiting.
-- If the source refuses, the target gets a cancel (`target_pos = 0`) and drops
-  the UE it pre-admitted.
+- **Cancel:** any failure or timeout sends the target a cancel
+  (`target_pos = 0`), retried until acknowledged. A DU cancels only the id it
+  staged or published, so a cancel is safe to send on any failure and never
+  removes another UE that holds the same id.
+- **Stale replies:** a `Stale` reply answers a reordered copy of a resent
+  command and is not a verdict.
+- **No clock, no command:** the CU sends nothing to a DU without a network
+  superframe. A DU that is Lost neither airs a handover IE nor publishes an
+  arrival.
 
 **3. Target DU.** It pre-admits the UE under the commanded id (the registry
 must hand out exactly that id). It publishes the UE's grant in the commanded
 position with the switch instant as the map's effective superframe.
+- The arrival is recorded before the registry admit, so the UE can never be
+  granted as an ordinary joiner.
+- An arrival that misses its publish window expires (`cell.ho.target_expired`)
+  and its id comes back. A deferred arrival removes only its own grant from
+  the pass's map; every other change stands.
 
 **4. Source DU.** It airs the tagged `HoIe` until the switch.
 - *CELL_HO_RELEASE_SF* (20) superframes after the switch, it releases the
@@ -75,7 +87,22 @@ again, and the moved UE starts its dwell.
 
 ## Rig result
 
-Measured with testrig `scripts/m5_ran_coord.sh` plus `--cu-env`:
+**Repeated and asserted** with testrig `scripts/m6_handover.sh`: 5 normal
+runs and 3 target-crash runs (`--kill-target-on-stage`), 90 s each. All 8
+pass.
+
+| KPI | min | median | max |
+|---|---|---|---|
+| interruption: first in-slot uplink at the target after the switch (superframes) | 1 | 1 | 1 |
+| CU `ran.ho_done` after the instant (superframes) | 5 | 6 | 16 |
+| fallback delay after the switch, target crash (superframes) | 10 | 10 | 10 |
+
+The 1-superframe interruption is the UE's hardware beacon in the switch
+superframe itself, which still sits at its old offset until the UE's one TSF
+step. The fallback delay is `CELL_HO_FALLBACK_SF`.
+
+The first runs, single, measured with testrig `scripts/m5_ran_coord.sh` plus
+`--cu-env`:
 
 - **Roles:** two co-channel cells on ch149; cell 1 is j6412-1 (phase 0) and
   cell 2 is j6412-3 (phase 13450 µs). Cell 1's UE runs on j6412-2.
@@ -116,13 +143,23 @@ superframe when there is nothing to serve.
 4. The release check was off by one: the UE's last old-identity uplink falls
    in the switch superframe itself.
 
+**From the review:**
+- a lost target ack or a timeout leaves the target's reservation behind;
+- a reordered Stale reply aborts a good handover;
+- a missed arrival window freezes the target's map;
+- handover runs without sync;
+- a retired key can be reused;
+- an unchecked ACK-responder re-arm;
+- the pre-admit race;
+- a cancel consumed before its publish;
+- a flag read after it was overwritten.
+
 ## Not covered yet
 
 - **DAPS:** the duplicated uplink through both cells with `SeqDedup`
   (same-channel first), and the "kill one path mid-crossing" test.
 - **A moving UE:** the rig's UEs are stationary, so the crossing is forced
-  with a negative A3 offset. An emulated crossing (per-packet TX
-  attenuation) is next.
+  with a negative A3 offset.
 - **Different-channel handover:** this needs `FastRetune` and the
   deaf-time budget.
 - **Security context:** the cells share one key on the rig (`CELL_PSK`).

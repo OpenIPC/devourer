@@ -245,7 +245,15 @@ int main() {
   std::map<std::pair<uint16_t, uint16_t>, int64_t> moved_at; /* new key -> switch time (ms) */
   /* Old keys of UEs that handed over: the source keeps reporting their last
    * measurement until it goes stale, which must not trigger again. */
-  std::set<std::pair<uint16_t, uint16_t>> retired;
+  std::map<std::pair<uint16_t, uint16_t>, int64_t> retired; /* key -> retired at (ms) */
+  /* Cancels for a target that may hold a pre-admitted UE, retried until the
+   * target acknowledges (a DU cancels only the id it staged or published,
+   * so a cancel is safe to send on any failure). */
+  struct Cancel {
+    devourer::cell::HoCommand cmd;
+    int tries = 0;
+  };
+  std::map<uint32_t, Cancel> cancels;
   uint32_t ho_last_id = 0;
   auto ms_now = [&] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
@@ -305,10 +313,20 @@ int main() {
         } else if (ty == f1::Type::Ack) {
           if (auto a = f1::decode_ack(buf, static_cast<size_t>(n), mac);
               a && a->kind == f1::AckKind::Handover) {
+            if (auto c = cancels.find(a->version);
+                c != cancels.end() && a->du == c->second.cmd.target &&
+                a->status == f1::AckStatus::Staged) {
+              emit("{\"ev\":\"ran.ho_cancelled\",\"id\":" + std::to_string(a->version) + "}");
+              cancels.erase(c);
+            }
             for (auto it = flights.begin(); it != flights.end(); ++it) {
               HoFlight &fl = it->second;
               if (fl.cmd.id != a->version)
                 continue;
+              /* A Stale reply answers a reordered (older) copy of a command
+               * resent since: no verdict on the handover. */
+              if (a->status == f1::AckStatus::Stale)
+                break;
               const bool ok = a->status == f1::AckStatus::Staged;
               const bool was = a->du == fl.cmd.source ? fl.src_ok : fl.tgt_ok;
               (a->du == fl.cmd.source ? fl.src_ok : fl.tgt_ok) = ok;
@@ -316,14 +334,9 @@ int main() {
                 emit("{\"ev\":\"ran.ho_failed\",\"id\":" + std::to_string(fl.cmd.id) +
                      ",\"du\":" + std::to_string(a->du) + ",\"status\":\"" +
                      f1::ack_status_name(a->status) + "\"}");
-                /* A target that already staged the UE drops it again. */
-                if (fl.tgt_ok || a->du == fl.cmd.source)
-                  if (auto t = dus.find(fl.cmd.target); t != dus.end()) {
-                    devourer::cell::HoCommand cancel = fl.cmd;
-                    cancel.target_pos = 0;
-                    cancel.seq = next_seq();
-                    send(t->second, f1::encode_handover(fl.cmd.target, cancel, mac));
-                  }
+                /* The target may hold the UE (even a refusing target: its
+                 * earlier Staged ack may have been lost): cancel, retried. */
+                cancels[fl.cmd.id] = Cancel{fl.cmd};
                 flights.erase(it); /* the A3 fires again later: a fresh command */
               } else if (!was) {
                 emit("{\"ev\":\"ran.ho_ack\",\"id\":" + std::to_string(fl.cmd.id) +
@@ -409,7 +422,7 @@ int main() {
                  (long long)tms, ue, from, to, why);
         emit(b);
       };
-      std::set<std::pair<uint16_t, uint16_t>> seen, still_retired;
+      std::set<std::pair<uint16_t, uint16_t>> seen;
       for (long id : expected) {
         auto dit = dus.find(static_cast<uint16_t>(id));
         if (dit == dus.end())
@@ -432,9 +445,13 @@ int main() {
             neigh[static_cast<uint16_t>(oid)] = v; /* absent or expired: no evidence */
           }
           const auto key = std::make_pair(cell, q.ue);
-          if (retired.count(key)) {
-            still_retired.insert(key); /* still reported: keep ignoring it */
-            continue;
+          /* A just-moved UE's old key: the source's last (stale) reports must
+           * not trigger again. Time-bound (stale window + release + a report),
+           * so the id is usable again by a later UE there. */
+          if (auto r = retired.find(key); r != retired.end()) {
+            if (tms - r->second < 6000)
+              continue;
+            retired.erase(r);
           }
           seen.insert(key);
           auto it = ho.find(key);
@@ -534,8 +551,7 @@ int main() {
                    (unsigned long long)tnet, (long long)(tnet - fl.cmd.effective_net_sf));
           emit(b);
           moved_at[{fl.cmd.target, fl.cmd.target_ue}] = tms;
-          retired.insert({fl.cmd.source, fl.cmd.ue});
-          still_retired.insert({fl.cmd.source, fl.cmd.ue});
+          retired[{fl.cmd.source, fl.cmd.ue}] = tms;
           if (auto h = ho.find({fl.cmd.source, fl.cmd.ue}); h != ho.end()) {
             if (h->second.firing)
               log_clear(fl.cmd.ue, fl.cmd.source, *h->second.firing, "handed_over");
@@ -546,22 +562,37 @@ int main() {
         }
         if (tnet > fl.cmd.effective_net_sf + 100) { /* ~10 s past: did not happen */
           emit("{\"ev\":\"ran.ho_timeout\",\"id\":" + std::to_string(fl.cmd.id) + "}");
+          cancels[fl.cmd.id] = Cancel{fl.cmd}; /* never committed: free the target */
           it = flights.erase(it);
           continue;
         }
         /* Two-phase: the target first; the source (which tells the UE) only
          * once the target has staged it, so a target that refuses never
          * leaves a command on the air. */
-        if (tnet < fl.cmd.effective_net_sf && !(fl.src_ok && fl.tgt_ok)) {
+        /* Never on an unknown clock: a DU without a network superframe (not
+         * locked) gets nothing until it has one again. */
+        const uint16_t du = fl.tgt_ok ? fl.cmd.source : fl.cmd.target;
+        if (tnet < fl.cmd.effective_net_sf && !(fl.src_ok && fl.tgt_ok) &&
+            dus.at(du).rep.net_sf > 0 && tit->second.rep.net_sf > 0) {
           fl.cmd.seq = next_seq();
-          const uint16_t du = fl.tgt_ok ? fl.cmd.source : fl.cmd.target;
           send(dus.at(du), f1::encode_handover(du, fl.cmd, mac));
         }
         ++it;
       }
-      /* A retired key the source no longer reports is forgotten (the id may
-       * be reused by a new UE there). */
-      retired = still_retired;
+      /* Cancels: resent each round until acknowledged (5 tries). */
+      for (auto c = cancels.begin(); c != cancels.end();) {
+        auto t = dus.find(c->second.cmd.target);
+        if (t == dus.end() || ++c->second.tries > 5) {
+          emit("{\"ev\":\"ran.ho_cancel_unacked\",\"id\":" + std::to_string(c->first) + "}");
+          c = cancels.erase(c);
+          continue;
+        }
+        devourer::cell::HoCommand x = c->second.cmd;
+        x.target_pos = 0;
+        x.seq = next_seq();
+        send(t->second, f1::encode_handover(x.target, x, mac));
+        ++c;
+      }
       /* A UE without a valid serving measurement this round: its evidence
        * is gone, so its timers go, and a logged candidate clears. */
       for (auto it = ho.begin(); it != ho.end();) {

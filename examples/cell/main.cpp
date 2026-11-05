@@ -1287,6 +1287,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               ie.ul_slot = static_cast<uint8_t>(*ul);
               ie.effective_sf = static_cast<uint64_t>(static_cast<int64_t>(cmd.effective_net_sf) - off);
               ie.tsf_delta_us = cmd.tsf_delta_us;
+              ie.channel = cmd.target_channel != c.ch ? cmd.target_channel : 0;
               auto bytes = devourer::cell::encode_ho_ie(ie, auth);
               if (!bytes.empty()) {
                 std::lock_guard<std::mutex> lk(f1_mu);
@@ -2015,7 +2016,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
   uint8_t tgt_du_mac[6] = {0};
   bool force_beacon = false;
   /* After a switch, until the target grants us: the way back (mu). */
+  /* Inter-frequency: the channel the UE runs on, a retune the switch (or
+   * a fallback) asks the control thread for, and the first beacon of the new
+   * serving DU after it (the deaf time). */
+  uint8_t cur_ch = c.ch;
+  std::optional<uint8_t> retune_to;
+  std::atomic<int64_t> retune_done_us{0}; /* steady clock, 0 = none pending */
   struct HoBack {
+    uint8_t channel = 0; /* the source's channel, to return to */
     uint16_t cell = 0, ue = 0;
     int64_t delta_us = 0;
     int64_t deadline_sf = 0; /* in the target's count */
@@ -2074,6 +2082,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
         const auto eg = p.TxEgressTsf();
         if (!eg)
           return;
+        if (const int64_t rd = retune_done_us.exchange(0); rd != 0) {
+          const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+          char l[160];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.retune_first_beacon\",\"ue\":%d,\"after_us\":%lld}",
+                   me_a.load(), (long long)(now_us - rd));
+          emit(l);
+        }
         sync.Add(*eg, p.RxAtrib.tsfl);
         if (me_a > 0)
           if (auto h = devourer::cell::find_ho_ie(p.Data.data(), p.Data.size(), cell_a.load(),
@@ -2209,7 +2227,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
                  (long long)h.tsf_delta_us, (long long)before, (long long)du_now);
         emit(l);
         rearm_ack = true;
-        ho_back = HoBack{h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
+        ho_back = HoBack{cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
+        if (h.channel != 0 && h.channel != cur_ch)
+          retune_to = h.channel; /* inter-frequency: done right after this lock */
       }
       /* Committed once the target's map in force grants us; no grant by the
        * deadline = back to the source (conditional: the UE never ends up
@@ -2221,6 +2241,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
           rxr_source.reset();
         } else if (sfn >= ho_back->deadline_sf) {
           const HoBack b = *ho_back;
+          if (b.channel != cur_ch)
+            retune_to = b.channel; /* back to the source's channel */
           sync.ShiftRemote(-b.delta_us);
           du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
           cell_a.store(b.cell);
@@ -2245,6 +2267,32 @@ int run_ue(IRadio *dev, const Cfg &c) {
       m = rxr.current(static_cast<uint64_t>(sfn));
       if (m)
         mcopy = *m;
+    }
+    if (retune_to) {
+      /* Inter-frequency switch (or fallback): the uplink beacon stops, the
+       * radio retunes (FastRetune, Kestrel's lean intra-band path), and the
+       * beacon restarts on the new channel next pass. The clock needs
+       * nothing: the TSF delta already put it on the new cell's. */
+      const uint8_t from = cur_ch, to = *retune_to;
+      retune_to.reset();
+      if (beaconing) {
+        dev->StopBeacon();
+        beaconing = false;
+      }
+      const auto r0 = std::chrono::steady_clock::now();
+      dev->FastRetune(to);
+      const auto r1 = std::chrono::steady_clock::now();
+      cur_ch = to;
+      retune_done_us.store(std::chrono::duration_cast<std::chrono::microseconds>(
+                               r1.time_since_epoch())
+                               .count());
+      char l[200];
+      snprintf(l, sizeof l,
+               "{\"ev\":\"cell.ue.retune\",\"ue\":%d,\"from_ch\":%u,\"to_ch\":%u,"
+               "\"retune_us\":%lld}",
+               me_a.load(), from, to,
+               (long long)std::chrono::duration_cast<std::chrono::microseconds>(r1 - r0).count());
+      emit(l);
     }
     if (rearm_ack) {
       /* The ACK responder for the identity now in use; retried every pass

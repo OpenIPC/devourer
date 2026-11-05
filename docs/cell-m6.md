@@ -126,6 +126,61 @@ The first runs, single, measured with testrig `scripts/m5_ran_coord.sh` plus
   the UE does not rebuild its uplink beacon. Its uplink never left the
   source, which is part of why the fallback is seamless.
 
+## Inter-frequency handover (the target on another channel)
+
+**The channel travels with the command.** `HoCommand.target_channel` comes
+from the target DU's report, and the UE's IE carries it (`HoIe.channel`, IE
+version 2).
+
+**The switch.** At the instant, the UE does everything it does on the same
+channel: it shifts the clock by the TSF delta, takes the target identity and
+runs the target's map. In addition it:
+1. stops its uplink beacon;
+2. retunes (`FastRetune`, Kestrel's lean intra-band 20 MHz path);
+3. restarts the beacon on the new channel.
+
+It needs no beacon of the target beforehand, since the delta already places
+its clock. It cannot have buffered the target's grant maps, because it never
+heard the target, so its grant arrives with the target's first beacon after
+the retune.
+
+**The deadline to return.** With no target grant within
+`CELL_HO_FALLBACK_SF` (10) superframes, the UE retunes back and resumes at
+the source, which still holds it. This bounds the deaf time of a failed
+handover.
+
+**Trigger.** With one radio per DU, no DU hears a UE on another channel, so
+the A3 has no neighbour measurement to compare. UE measurement gaps (the UE
+briefly visits the other channel and reports what it hears) are the next
+step. Until then, the test forces the trigger: `RAN_HO_FORCE=SRC:UE:TGT@SECONDS`
+issues the command at that time through the normal execution path.
+
+**Rig result** (testrig `scripts/m6_handover.sh --channel2 157`). Cell 1 is
+on ch149 and cell 2 on ch157, both UNII-3. There were 5 normal runs and 3
+with the target killed after staging; all 8 pass.
+
+| KPI | min | median | max |
+|---|---|---|---|
+| switch lands on the target's effective superframe | 8/8 | | |
+| `FastRetune` 149↔157 on the 8852CE (11 retunes) | 23.5 ms | 23.6 ms | 23.7 ms |
+| first target beacon after the retune | 37 ms | 52 ms | 101 ms |
+| interruption: first in-slot uplink at the target after the switch (superframes) | 2 | 2 | 3 |
+| CU `ran.ho_done` after the instant (superframes) | 5 | 6 | 16 |
+| target crash: fallback (superframes) | 10 | 10 | 10 |
+| target crash: uplinks the source missed (superframes) | 10 | 10 | 10 |
+| target crash: first source beacon after the retune back | 56 ms | 57 ms | 91 ms |
+
+- **Interruption:** one superframe more than on the same channel. That is
+  the retune (about 24 ms) and the beacon restart; the first target beacon
+  comes within one beacon interval.
+- **A failed handover:** the UE is away from the source for exactly the
+  fallback window. This is the sequential, deaf-time cost #260 asks to
+  budget.
+- **An unexplained observation:** in one target-crash run, the UE received a
+  beacon of the source (ch149) while still tuned to ch157, about 1 s after
+  the retune, before its own retune back. Its cause is not established. The
+  rig script does not count it as the post-return beacon.
+
 ## DAPS: the duplicated uplink (same channel)
 
 **Common sequence.** A UE uplinks once per superframe. Every DU that hears
@@ -222,8 +277,8 @@ superframe when there is nothing to serve.
     budget.
 - **A moving UE:** the rig's UEs are stationary, so the crossing is forced
   with a negative A3 offset.
-- **Different-channel handover:** this needs `FastRetune` and the
-  deaf-time budget.
+- **The inter-frequency trigger:** UE measurement gaps. The test forces
+  the handover (`RAN_HO_FORCE`).
 - **Security context:** the cells share one key on the rig (`CELL_PSK`).
   Pre-staging a per-cell context (802.11r-style) is open.
 - **EVM:** not in the measurement reports.

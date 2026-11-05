@@ -290,7 +290,7 @@ int main() {
   /* --- F1 Handover + Ack kind. --- */
   {
     const Mac k1 = fake_mac(1), k2 = fake_mac(2);
-    HoCommand h{1793880000u, 1, 1, 2, 3, 2, 17518356600ull, -1234567890123ll, 99};
+    HoCommand h{1793880000u, 1, 1, 2, 3, 157, 2, 17518356600ull, -1234567890123ll, 99};
     const auto w = f1::encode_handover(2, h, k1);
     CHECK(f1::peek_type(w.data(), w.size()) == f1::Type::Handover);
     auto d = f1::decode_handover(w.data(), w.size(), k1);
@@ -308,7 +308,7 @@ int main() {
   /* --- The beacon IE: in an MPDU, CRC, tag, the newest id for this UE. --- */
   {
     const Mac k = fake_mac(7), other = fake_mac(8);
-    HoIe a{100, 1, 1, 2, 3, 3, 7, 4200, 13450 - 1000 * 102400ll};
+    HoIe a{100, 1, 1, 2, 3, 3, 7, 157, 4200, 13450 - 1000 * 102400ll};
     HoIe newer = a;
     newer.id = 101;
     newer.target_ue = 4;
@@ -319,11 +319,12 @@ int main() {
     mpdu[0] = 0x80;
     for (const HoIe &x : {a, newer, someone_else}) {
       auto ie = encode_ho_ie(x, k);
-      CHECK(ie.size() == 2 + 3 + 33 + 2 + kHoTagLen);
+      CHECK(ie.size() == 2 + 3 + 34 + 2 + kHoTagLen);
       mpdu.insert(mpdu.end(), ie.begin(), ie.end());
     }
     auto got = find_ho_ie(mpdu.data(), mpdu.size(), 1, 1, k);
     CHECK(got && *got == newer); /* the newest id addressed to (cell 1, UE 1) */
+    CHECK(got->channel == 157);  /* the target's channel travels with it */
     CHECK(!find_ho_ie(mpdu.data(), mpdu.size(), 1, 1, other)); /* wrong key: inert */
     CHECK(!find_ho_ie(mpdu.data(), mpdu.size(), 2, 1, k));     /* another cell's UE */
     auto torn = mpdu;
@@ -344,7 +345,7 @@ int main() {
   /* --- Replay across beacons: the UE acts once, on a fresh command. --- */
   {
     HoReceiver rx;
-    HoIe h{100, 1, 1, 2, 3, 3, 7, 4200, 0};
+    HoIe h{100, 1, 1, 2, 3, 3, 7, 0, 4200, 0};
     CHECK(rx.accept(h, 4190));   /* new id, instant ahead */
     CHECK(!rx.accept(h, 4191));  /* the same IE in the next beacons (or replayed) */
     HoIe older = h;

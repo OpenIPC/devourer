@@ -123,6 +123,10 @@ int main() {
     const CoordPlan p = coord_plan({a, b}, {36, 149});
     CHECK(p.channel.at(2) == 36 && p.retuned.size() == 1 && p.retuned[0] == 2);
     CHECK(p.moved == 0); /* separated in frequency: nothing to move */
+    /* No spare left: never a resolved shared-channel plan for it. */
+    const CoordPlan q = coord_plan({a, b}, {149});
+    CHECK(q.retuned.empty() && q.unseparated.size() == 1 && q.unseparated[0] == 2);
+    CHECK(q.unresolved >= 1);
   }
 
   /* --- Infeasible in time (both full, everything heard): a spare channel
@@ -210,7 +214,7 @@ int main() {
     flip[10] ^= 1;
     CHECK(!f1::decode_report(flip.data(), flip.size(), k1));
 
-    f1::Schedule s{7, 9, 1000, {{1, 3}, {3, 1}}};
+    f1::Schedule s{7, 9, 1000, 0x1122334455667788ull, {{1, 3}, {3, 1}}};
     const auto ws = f1::encode_schedule(s, k1);
     CHECK(f1::decode_schedule(ws.data(), ws.size(), k1) == s);
     f1::Ack a{7, 9, f1::AckStatus::Late, 990};
@@ -231,40 +235,59 @@ int main() {
     sc.publish_lead_sf = 3;
     sc.cu_timeout_ms = 3000;
     f1::Stager st(sc);
+    uint64_t seq = 100;
+    auto S = [&](uint32_t v, uint64_t eff) { return f1::Schedule{1, v, eff, ++seq, {}}; };
     auto ok = [](const f1::Schedule &) { return true; };
     auto no = [](const f1::Schedule &) { return false; };
     CHECK(!st.cu_alive(0));
     /* Too close to its instant: Late; the DU carries nothing. */
-    CHECK(st.on_schedule({1, 1, 104, {}}, 100, 0, ok) == f1::AckStatus::Late);
+    CHECK(st.on_schedule(S(1, 104), 100, 0, ok) == f1::AckStatus::Late);
     /* One the DU cannot carry: Invalid. */
-    CHECK(st.on_schedule({1, 1, 120, {}}, 100, 0, no) == f1::AckStatus::Invalid);
+    CHECK(st.on_schedule(S(1, 120), 100, 0, no) == f1::AckStatus::Invalid);
     CHECK(st.cu_alive(10));
-    CHECK(st.on_schedule({1, 2, 120, {}}, 100, 0, ok) == f1::AckStatus::Staged);
-    CHECK(st.on_schedule({1, 2, 120, {}}, 101, 100, ok) == f1::AckStatus::Staged); /* keepalive */
-    CHECK(st.on_schedule({1, 1, 130, {}}, 101, 100, ok) == f1::AckStatus::Stale);
+    CHECK(st.on_schedule(S(2, 120), 100, 0, ok) == f1::AckStatus::Staged);
+    CHECK(st.on_schedule(S(2, 120), 101, 100, ok) == f1::AckStatus::Staged); /* keepalive */
+    CHECK(st.on_schedule(S(1, 130), 101, 100, ok) == f1::AckStatus::Stale);
     /* A newer one supersedes the staged one before it is due. */
-    CHECK(st.on_schedule({1, 3, 125, {}}, 102, 200, ok) == f1::AckStatus::Staged);
+    CHECK(st.on_schedule(S(3, 125), 102, 200, ok) == f1::AckStatus::Staged);
     CHECK(st.staged_version() == 3);
+    CHECK(!st.published(102)); /* never released by due(): not applied */
+    CHECK(st.staged_version() == 3 && st.applied_version() == 0);
     CHECK(!st.due(110));  /* not yet: 125 - 3 = 122 */
     auto d = st.due(122);
     CHECK(d && d->version == 3);
     /* While it is being published, nothing overtakes it. */
-    CHECK(st.on_schedule({1, 4, 140, {}}, 122, 300, ok) == f1::AckStatus::Late);
-    st.published();
+    CHECK(st.on_schedule(S(4, 140), 122, 300, ok) == f1::AckStatus::Late);
+    CHECK(st.published(122));
     CHECK(st.applied_version() == 3 && st.staged_version() == 0);
-    CHECK(st.on_schedule({1, 3, 125, {}}, 123, 400, ok) == f1::AckStatus::Applied);
-    CHECK(st.on_schedule({1, 2, 140, {}}, 123, 400, ok) == f1::AckStatus::Stale);
+    CHECK(st.on_schedule(S(3, 125), 123, 400, ok) == f1::AckStatus::Applied);
+    CHECK(st.on_schedule(S(2, 140), 123, 400, ok) == f1::AckStatus::Stale);
+    /* An old applied version while a newer one is staged: Stale, not Applied. */
+    CHECK(st.on_schedule(S(5, 140), 124, 500, ok) == f1::AckStatus::Staged);
+    CHECK(st.on_schedule(S(3, 125), 124, 500, ok) == f1::AckStatus::Stale);
     /* A staged schedule whose publish never lands is abandoned, not applied
      * off its instant, and its version cannot come back. */
-    CHECK(st.on_schedule({1, 5, 140, {}}, 124, 500, ok) == f1::AckStatus::Staged);
     CHECK(st.due(137));  /* publishing... but the publish keeps failing */
     CHECK(!st.due(139)); /* 139 + 2 > 140: missed */
     auto ab = st.take_abandoned();
     CHECK(ab && ab->version == 5 && st.applied_version() == 3 && st.staged_version() == 0);
-    CHECK(st.on_schedule({1, 5, 160, {}}, 139, 600, ok) == f1::AckStatus::Stale);
-    CHECK(st.on_schedule({1, 6, 160, {}}, 139, 600, ok) == f1::AckStatus::Staged);
-    /* CU outage. */
-    CHECK(st.cu_alive(600 + 3000) && !st.cu_alive(600 + 3001));
+    CHECK(st.on_schedule(S(5, 160), 139, 600, ok) == f1::AckStatus::Stale);
+    /* A publication completing after its deadline is abandoned too. */
+    CHECK(st.on_schedule(S(6, 160), 139, 600, ok) == f1::AckStatus::Staged);
+    CHECK(st.due(157));
+    CHECK(!st.published(159)); /* 159 + 2 > 160 */
+    ab = st.take_abandoned();
+    CHECK(ab && ab->version == 6 && st.applied_version() == 3);
+    /* CU outage, and a replay that must not hide it. */
+    const f1::Schedule last = S(7, 200);
+    CHECK(st.on_schedule(last, 160, 1000, ok) == f1::AckStatus::Staged);
+    CHECK(st.cu_alive(1000 + 3000) && !st.cu_alive(1000 + 3001));
+    CHECK(st.on_schedule(last, 170, 3500, ok) == f1::AckStatus::Stale); /* replayed datagram */
+    CHECK(!st.cu_alive(4100));
+    f1::Schedule fresh = last;
+    fresh.seq = ++seq; /* the CU itself, resending (new sequence) */
+    CHECK(st.on_schedule(fresh, 170, 4100, ok) == f1::AckStatus::Staged);
+    CHECK(st.cu_alive(4100));
   }
 
   if (failures == 0)

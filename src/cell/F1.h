@@ -14,8 +14,9 @@
  *            items + capacity positions, relative to its TBTT), its UEs and
  *            their positions, and the OTHER cells' UEs its radio hears (RSSI).
  *   Schedule CU -> DU: version, the network superframe it takes effect in,
- *            and the position of every UE. The CU resends the current
- *            schedule as its keepalive.
+ *            a freshness sequence, and the position of every UE. The CU
+ *            resends the current schedule (with a new sequence) as its
+ *            keepalive.
  *   Ack      DU -> CU: the outcome for one schedule version.
  *
  * The network superframe is floor((PTP time - phase) / period): the same
@@ -34,8 +35,11 @@
  *     position twice) is Invalid and changes nothing;
  *   - a staged schedule whose publish does not succeed in time is abandoned
  *     (Late) rather than applied off its instant;
- *   - no authenticated CU message for `cu_timeout_ms` = the CU is gone: the
- *     DU falls back to autonomous (the M4 mode) until it hears it again.
+ *   - no FRESH authenticated CU message (a sequence above every one seen)
+ *     for `cu_timeout_ms` = the CU is gone: the DU falls back to autonomous
+ *     (the M4 mode) until it hears it again. A replay changes nothing and
+ *     is answered Stale. (A CU restart keeps its sequence moving forward:
+ *     it is the CU's realtime clock.)
  *
  * Pure header; cell_m5 ctest covers encode/decode, tags and the stager. */
 #ifndef DEVOURER_CELL_F1_H
@@ -101,6 +105,10 @@ struct Schedule {
   uint16_t du = 0;
   uint32_t version = 0;
   uint64_t effective_net_sf = 0;
+  /* Freshness: strictly increasing per send (the CU's realtime clock, us),
+   * authenticated with the rest. A replayed datagram never refreshes the
+   * DU's CU contact. */
+  uint64_t seq = 0;
   std::vector<CoordAssign> ues;
   bool operator==(const Schedule &) const = default;
 };
@@ -307,6 +315,7 @@ inline std::vector<uint8_t> encode_schedule(const Schedule &s, const Mac &mac) {
   put(m, s.du, 2);
   put(m, s.version, 4);
   put(m, s.effective_net_sf, 8);
+  put(m, s.seq, 8);
   put_assigns(m, s.ues);
   return seal(std::move(m), mac);
 }
@@ -321,6 +330,7 @@ inline std::optional<Schedule> decode_schedule(const uint8_t *p, size_t n, const
   s.du = static_cast<uint16_t>(r.get(2));
   s.version = static_cast<uint32_t>(r.get(4));
   s.effective_net_sf = r.get(8);
+  s.seq = r.get(8);
   if (!get_assigns(r, s.ues) || !r.ok || r.i != r.n)
     return std::nullopt;
   return s;
@@ -369,16 +379,23 @@ public:
    * it (its UEs, its positions). Any call counts as CU contact. */
   AckStatus on_schedule(const Schedule &s, uint64_t now_net_sf, int64_t now_ms,
                         const std::function<bool(const Schedule &)> &valid) {
+    if (have_seq_ && s.seq <= last_seq_)
+      return AckStatus::Stale; /* a replay (or reordering): not CU contact */
+    have_seq_ = true;
+    last_seq_ = s.seq;
     last_contact_ms_ = now_ms;
     contact_ = true;
-    if (applied_ && s.version == applied_->version)
-      return AckStatus::Applied;
-    if (staged_ && s.version == staged_->version)
-      return AckStatus::Staged;
+    /* Older than anything applied or staged: stale, before any
+     * same-version answer (an old applied version is not "applied" while a
+     * newer one is staged). */
     const uint32_t floor_v = std::max(applied_ ? applied_->version : 0u,
                                       staged_ ? staged_->version : 0u);
     if ((applied_ || staged_) && s.version < floor_v)
       return AckStatus::Stale;
+    if (applied_ && s.version == applied_->version)
+      return AckStatus::Applied;
+    if (staged_ && s.version == staged_->version)
+      return AckStatus::Staged;
     if (s.version <= abandoned_floor_)
       return AckStatus::Stale;
     if (s.effective_net_sf < now_net_sf + cfg_.min_lead_sf)
@@ -413,13 +430,23 @@ public:
     }
     return std::nullopt;
   }
-  /* The grant map carrying the due schedule is on air. */
-  void published() {
-    if (!staged_)
-      return;
+  /* The grant map carrying the due schedule is on air, at network
+   * superframe `now_net_sf`. Only a schedule due() released counts, and only
+   * within its deadline (the UEs need the N+2 lead); a publication that
+   * completes later is abandoned, not applied. Returns whether it applied. */
+  bool published(uint64_t now_net_sf) {
+    if (!staged_ || !publishing_)
+      return false;
+    publishing_ = false;
+    if (now_net_sf + 2 > staged_->effective_net_sf) {
+      abandoned_ = staged_;
+      abandoned_floor_ = std::max(abandoned_floor_, staged_->version);
+      staged_.reset();
+      return false;
+    }
     applied_ = staged_;
     staged_.reset();
-    publishing_ = false;
+    return true;
   }
   std::optional<Schedule> take_abandoned() {
     auto a = abandoned_;
@@ -440,6 +467,8 @@ private:
   uint32_t abandoned_floor_ = 0;
   bool publishing_ = false;
   bool contact_ = false;
+  bool have_seq_ = false;
+  uint64_t last_seq_ = 0;
   int64_t last_contact_ms_ = 0;
 };
 

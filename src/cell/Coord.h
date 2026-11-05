@@ -83,6 +83,10 @@ struct CoordPlan {
   size_t unresolved = 0;     /* UEs left without a conflict-free position */
   size_t fixed_conflicts = 0;
   std::vector<uint16_t> retuned; /* DUs given a spare channel */
+  /* Non-tight DUs that needed frequency separation and got none: their UEs
+   * are placed (so the others avoid them) but count as unresolved — a
+   * coarse-sync DU never counts as resolved by a shared-channel plan. */
+  std::vector<uint16_t> unseparated;
 };
 
 namespace coord_detail {
@@ -230,12 +234,14 @@ inline CoordPlan coord_plan(const std::vector<CoordDu> &dus,
     return false;
   };
   /* 1. Tiers: a non-tight DU never shares a channel with a related DU. */
+  std::set<uint16_t> unseparated;
   for (size_t i = 0; i < dus.size(); ++i) {
     if (dus[i].tier == SyncTier::Tight)
       continue;
     for (size_t j = 0; j < dus.size(); ++j)
       if (j != i && ch[dus[i].du] == ch[dus[j].du] && coord_related(dus[i], dus[j])) {
-        take_spare(dus[i].du);
+        if (!take_spare(dus[i].du))
+          unseparated.insert(dus[i].du);
         break;
       }
   }
@@ -243,6 +249,7 @@ inline CoordPlan coord_plan(const std::vector<CoordDu> &dus,
     CoordPlan plan;
     plan.channel = ch;
     plan.retuned = retuned;
+    plan.unseparated.assign(unseparated.begin(), unseparated.end());
     std::vector<Item> placed;
     for (size_t i = 0; i < dus.size(); ++i)
       fixed_items(dus, i, placed);
@@ -301,9 +308,11 @@ inline CoordPlan coord_plan(const std::vector<CoordDu> &dus,
       }
       if (!pick) {
         ++plan.unresolved;
-        if (!retune)
+        if (!retune && !unseparated.count(d.du))
           retune = d.du;
         pick = first_free ? *first_free : u.pos;
+      } else if (unseparated.count(d.du)) {
+        ++plan.unresolved; /* a time slot is no answer for a coarse-sync DU */
       }
       used[r.di].insert(*pick);
       chosen[{r.di, r.ui}] = *pick;

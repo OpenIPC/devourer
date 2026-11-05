@@ -400,12 +400,27 @@ int main() {
     std::printf("cell_m6: DAPS streams: %d uplinks heard, %d delivered once (%llu duplicates), "
                 "%d after the source died, all via the target\n",
                 heard_any, delivered, (unsigned long long)st->duplicates, after_kill);
+    const auto sid = s.stream_id(tgt);
+    CHECK(sid && s.stats_of_stream(*sid) == st);
     s.forget(src);
-    CHECK(!s.stats(src) && s.stats(tgt));
-    /* The common seq: copies a few us apart (a TSF step) map to one beacon. */
+    CHECK(!s.stats(src) && s.stats(tgt)); /* the stream lives on via the target */
+    s.forget(tgt);
+    CHECK(!s.stats(tgt) && s.streams() == 0 && s.identities() == 0); /* the last one: gone */
+    /* forget_stream drops every identity of it. */
+    UlStreams f;
+    f.deliver({5, 1}, 1, 5);
+    f.alias({6, 2}, {5, 1});
+    f.forget_stream(*f.stream_id({5, 1}));
+    CHECK(f.identities() == 0 && f.streams() == 0);
+    /* A reused identity after forget starts a fresh stream (no inherited window). */
+    f.deliver({5, 1}, 900000, 5);
+    CHECK(f.stats({5, 1})->delivered == 1);
+    /* The common seq: the reception instant in network superframes — two
+     * DUs a few us apart on the fabric agree (away from a boundary). */
     const int64_t P = 102400;
-    CHECK(ul_seq_from_egress(1000 * P + 3, P) == ul_seq_from_egress(1000 * P - 4, P));
-    CHECK(ul_seq_from_egress(1001 * P, P) == ul_seq_from_egress(1000 * P, P) + 1);
+    CHECK(ul_seq_from_network_time(1000 * P + 50000 + 3, P) ==
+          ul_seq_from_network_time(1000 * P + 50000 - 4, P));
+    CHECK(ul_seq_from_network_time(1001 * P + 7, P) == ul_seq_from_network_time(1000 * P + 7, P) + 1);
     /* F1 v5 Uplink round trip. */
     const Mac k = fake_mac(3);
     f1::UplinkFwd u{2, 1, 1, 123456, -61};

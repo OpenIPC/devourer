@@ -571,6 +571,10 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::memcpy(&f1_addr, res->ai_addr, res->ai_addrlen);
     f1_addr_len = static_cast<socklen_t>(res->ai_addrlen);
     f1_fd.fd = socket(res->ai_family, SOCK_DGRAM, 0);
+    /* Non-blocking: sends happen on the radio RX path (DAPS forwarding) and
+     * must never wait on the network; a full socket drops (counted). */
+    if (f1_fd.fd >= 0)
+      fcntl(f1_fd.fd, F_SETFL, fcntl(f1_fd.fd, F_GETFL, 0) | O_NONBLOCK);
     freeaddrinfo(res);
     if (f1_fd.fd < 0) {
       fprintf(stderr, "F1 socket failed\n");
@@ -903,20 +907,28 @@ int run_du(IRadio *dev, const Cfg &c) {
   /* DAPS: the other identities to forward, until a local superframe (f1_mu). */
   const bool daps_on = envl("CELL_DAPS", 1, 0, 1) != 0;
   std::map<std::pair<uint16_t, uint16_t>, int64_t> daps_ids;
-  auto send_f1 = [&](const std::vector<uint8_t> &m) { /* any thread: a UDP sendto */
-    if (f1_on && !m.empty())
-      sendto(f1_fd.fd, m.data(), m.size(), 0, reinterpret_cast<const sockaddr *>(&f1_addr),
-             f1_addr_len);
+  std::atomic<uint64_t> f1_send_drops{0};
+  auto send_f1 = [&](const std::vector<uint8_t> &m) { /* any thread: a non-blocking sendto */
+    if (!f1_on || m.empty())
+      return;
+    if (sendto(f1_fd.fd, m.data(), m.size(), 0, reinterpret_cast<const sockaddr *>(&f1_addr),
+               f1_addr_len) < 0)
+      ++f1_send_drops;
   };
   auto forward_ul = [&](uint16_t cell, uint16_t ue, const Packet &p) {
-    const auto eg = p.TxEgressTsf();
-    if (!eg)
+    /* The common seq is the reception instant on the shared timebase: no
+     * timebase (not locked), no forwarding. */
+    if (!net_ok.load())
+      return;
+    const auto at = rx_tsf(p.RxAtrib.tsfl);
+    if (!at)
       return;
     devourer::cell::f1::UplinkFwd u;
     u.du = c.cell;
     u.cell = cell;
     u.ue = ue;
-    u.seq = devourer::cell::ul_seq_from_egress(*eg, P);
+    u.seq = devourer::cell::ul_seq_from_network_time(
+        *at + static_cast<int64_t>(dc.phase_us) + net_off.load() * P, P);
     u.rssi_dbm = static_cast<int8_t>(static_cast<int>(p.RxAtrib.rssi[0]) - 110);
     send_f1(devourer::cell::f1::encode_uplink(u, f1_mac));
   };
@@ -990,7 +1002,10 @@ int run_du(IRadio *dev, const Cfg &c) {
                             static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
             fwd = daps_on && daps_ids.count({oc, ou}) > 0;
           }
-          if (fwd) /* DAPS: a handing-over UE heard under its other identity */
+          /* DAPS: a handing-over UE heard under its other identity, and only
+           * an authentic one (its tag verifies with the network key; with
+           * per-cell keys this needs the other cell's context pre-staged). */
+          if (fwd && parse_ue_beacon(p.Data.data(), p.Data.size(), oc, auth))
             forward_ul(oc, ou, p);
           return;
         }
@@ -1931,6 +1946,12 @@ int run_du(IRadio *dev, const Cfg &c) {
              (unsigned long long)sync_samples, (unsigned long long)disc.rejected(),
              (unsigned long long)sync_in_state[2], (unsigned long long)sync_in_state[1],
              (unsigned long long)sync_in_state[0], health.transitions());
+    emit(l);
+  }
+  if (f1_on) {
+    char l[120];
+    snprintf(l, sizeof l, "{\"ev\":\"cell.f1.summary\",\"send_drops\":%llu}",
+             (unsigned long long)f1_send_drops.load());
     emit(l);
   }
   emit("{\"ev\":\"cell.du.done\"}");

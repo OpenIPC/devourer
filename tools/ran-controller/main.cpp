@@ -261,8 +261,22 @@ int main() {
   std::map<uint32_t, Cancel> cancels;
   uint32_t ho_last_id = 0;
   devourer::cell::UlStreams ul;
-  std::map<uint32_t, uint32_t> ul_last; /* per stream: the newest seq delivered */
-  std::map<uint32_t, std::pair<uint16_t, uint16_t>> ul_name; /* stream -> latest identity */
+  /* Per stream: the newest seq delivered, its latest identity (labels only),
+   * when it was last fed, and the seqs missing so far with the DU whose
+   * delivery revealed each gap. A gap is reported (ran.ul_gap) only once
+   * kUlReorder newer seqs have passed it: a late copy within the dedup
+   * window recovers it silently. */
+  constexpr uint32_t kUlReorder = 32;
+  std::map<uint32_t, uint32_t> ul_last;
+  std::map<uint32_t, std::pair<uint16_t, uint16_t>> ul_name;
+  std::map<uint32_t, std::chrono::steady_clock::time_point> ul_seen;
+  std::map<uint32_t, std::map<uint32_t, uint16_t>> ul_missing;
+  auto ul_drop_stream = [&](uint32_t s) {
+    ul_last.erase(s);
+    ul_name.erase(s);
+    ul_seen.erase(s);
+    ul_missing.erase(s);
+  };
   auto ms_now = [&] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
         .count();
@@ -293,24 +307,57 @@ int main() {
         const auto ty = f1::peek_type(buf, static_cast<size_t>(n));
         if (ty == f1::Type::Uplink) {
           auto u = f1::decode_uplink(buf, static_cast<size_t>(n), mac);
+          /* Only identities a configured DU reports as its UE, or that an
+           * active handover aliased: no state for anything else. */
+          bool known = false;
           if (u && std::find(expected.begin(), expected.end(), static_cast<long>(u->du)) !=
                        expected.end()) {
+            if (auto d = dus.find(u->cell); d != dus.end())
+              for (const auto &a : d->second.rep.ues)
+                known = known || a.ue == u->ue;
+            for (const auto &fl : flights)
+              known = known || (fl.second.cmd.source == u->cell && fl.second.cmd.ue == u->ue) ||
+                      (fl.second.cmd.target == u->cell && fl.second.cmd.target_ue == u->ue);
+            known = known || ul.stream_id({u->cell, u->ue}).has_value();
+          }
+          if (known) {
             const auto r = ul.deliver({u->cell, u->ue}, u->seq, u->du);
+            ul_seen[r.stream] = std::chrono::steady_clock::now();
+            ul_name[r.stream] = {u->cell, u->ue};
             if (r.fresh) {
+              auto &miss = ul_missing[r.stream];
               auto lit = ul_last.find(r.stream);
-              if (lit != ul_last.end()) {
+              if (miss.erase(u->seq)) {
+                /* a late copy: recovered, never reported */
+              } else if (lit == ul_last.end()) {
+                ul_last[r.stream] = u->seq;
+              } else {
                 const int32_t d = static_cast<int32_t>(u->seq - lit->second);
-                if (d > 1)
-                  emit("{\"ev\":\"ran.ul_gap\",\"cell\":" + std::to_string(u->cell) +
-                       ",\"ue\":" + std::to_string(u->ue) + ",\"after_seq\":" +
-                       std::to_string(lit->second) + ",\"missing\":" + std::to_string(d - 1) +
-                       ",\"resumed_via\":" + std::to_string(u->du) + "}");
+                for (int32_t k = 1; k < d && k <= 512; ++k)
+                  miss[lit->second + static_cast<uint32_t>(k)] = u->du;
                 if (d > 0)
                   lit->second = u->seq;
-              } else {
-                ul_last[r.stream] = u->seq;
               }
-              ul_name[r.stream] = {u->cell, u->ue};
+              /* Confirm what fell kUlReorder behind the newest: runs of
+               * consecutive missing seqs, one event each. */
+              const uint32_t top = ul_last[r.stream];
+              while (!miss.empty()) {
+                /* The oldest run of consecutive missing seqs, reported whole
+                 * once its LAST seq has fallen kUlReorder behind. */
+                const uint32_t first = miss.begin()->first;
+                const uint16_t via = miss.begin()->second;
+                uint32_t n_run = 0;
+                for (auto m = miss.begin(); m != miss.end() && m->first == first + n_run; ++m)
+                  ++n_run;
+                if (static_cast<int32_t>(top - (first + n_run - 1)) <= static_cast<int32_t>(kUlReorder))
+                  break;
+                for (uint32_t k = 0; k < n_run; ++k)
+                  miss.erase(first + k);
+                emit("{\"ev\":\"ran.ul_gap\",\"cell\":" + std::to_string(u->cell) +
+                     ",\"ue\":" + std::to_string(u->ue) + ",\"after_seq\":" +
+                     std::to_string(first - 1) + ",\"missing\":" + std::to_string(n_run) +
+                     ",\"resumed_via\":" + std::to_string(via) + "}");
+              }
             }
           }
         } else if (ty == f1::Type::Report) {
@@ -367,6 +414,7 @@ int main() {
                 /* The target may hold the UE (even a refusing target: its
                  * earlier Staged ack may have been lost): cancel, retried. */
                 cancels[fl.cmd.id] = Cancel{fl.cmd};
+                ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
                 flights.erase(it); /* the A3 fires again later: a fresh command */
               } else if (!was) {
                 emit("{\"ev\":\"ran.ho_ack\",\"id\":" + std::to_string(fl.cmd.id) +
@@ -406,8 +454,31 @@ int main() {
      * uplink streams. */
     if (now >= next_meas) {
       next_meas = now + std::chrono::seconds(10);
+      /* Streams idle 60 s are retired with their identities and records. */
+      for (auto it = ul_seen.begin(); it != ul_seen.end();) {
+        if (now - it->second > std::chrono::seconds(60)) {
+          const uint32_t s = it->first;
+          ++it;
+          ul.forget_stream(s);
+          ul_drop_stream(s);
+          continue;
+        }
+        ++it;
+      }
+      /* Retired source identities (a completed handover) leave the streams. */
+      for (auto r = retired.begin(); r != retired.end();) {
+        if (ms_now() - r->second >= 6000) {
+          const auto s = ul.stream_id(r->first);
+          ul.forget(r->first);
+          if (s && !ul.stats_of_stream(*s))
+            ul_drop_stream(*s);
+          r = retired.erase(r);
+        } else {
+          ++r;
+        }
+      }
       for (const auto &nm : ul_name)
-        if (const auto *st = ul.stats(nm.second)) {
+        if (const auto *st = ul.stats_of_stream(nm.first)) {
           std::string m = "{\"ev\":\"ran.ul\",\"cell\":" + std::to_string(nm.second.first) +
                           ",\"ue\":" + std::to_string(nm.second.second) + ",\"delivered\":" +
                           std::to_string(st->delivered) + ",\"duplicates\":" +
@@ -579,6 +650,7 @@ int main() {
         HoFlight &fl = it->second;
         auto sit = dus.find(fl.cmd.source), tit = dus.find(fl.cmd.target);
         if (sit == dus.end() || tit == dus.end()) {
+          ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
           it = flights.erase(it);
           continue;
         }
@@ -609,6 +681,7 @@ int main() {
         if (tnet > fl.cmd.effective_net_sf + 100) { /* ~10 s past: did not happen */
           emit("{\"ev\":\"ran.ho_timeout\",\"id\":" + std::to_string(fl.cmd.id) + "}");
           cancels[fl.cmd.id] = Cancel{fl.cmd}; /* never committed: free the target */
+          ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* and its provisional alias */
           it = flights.erase(it);
           continue;
         }

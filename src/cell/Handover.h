@@ -21,7 +21,7 @@
  *               the other cells' it hears; what its F1 report carries.
  *   UlStreams   the CU's DAPS uplink delivery: per-UE streams over SeqDedup,
  *               a handover aliasing the target identity onto the source's
- *               stream; ul_seq_from_egress gives the copies' common seq.
+ *               stream; ul_seq_from_network_time gives the copies' common seq.
  *   SeqDedup    sequence duplicate suppression for DAPS: the same uplink
  *               frame arriving over two cells is delivered once. A sliding
  *               window behind the highest sequence seen, in serial-number
@@ -285,15 +285,44 @@ public:
   }
   /* `alias` (the target identity) joins `of`'s stream (the source identity). */
   void alias(Id alias, Id of) { ids_[alias] = stream_of(of); }
-  /* Forget an identity (released); the stream stays reachable via its others. */
-  void forget(Id who) { ids_.erase(who); }
+  /* Forget an identity (released); the stream stays reachable via its
+   * others, and goes with the last of them. */
+  void forget(Id who) {
+    auto it = ids_.find(who);
+    if (it == ids_.end())
+      return;
+    const uint32_t s = it->second;
+    ids_.erase(it);
+    for (const auto &kv : ids_)
+      if (kv.second == s)
+        return;
+    streams_.erase(s);
+  }
   const Stats *stats(Id who) const {
     auto it = ids_.find(who);
     if (it == ids_.end())
       return nullptr;
-    auto st = streams_.find(it->second);
+    return stats_of_stream(it->second);
+  }
+  const Stats *stats_of_stream(uint32_t s) const {
+    auto st = streams_.find(s);
     return st == streams_.end() ? nullptr : &st->second.stats;
   }
+  /* The stream an identity maps to now, if any. */
+  std::optional<uint32_t> stream_id(Id who) const {
+    auto it = ids_.find(who);
+    if (it == ids_.end())
+      return std::nullopt;
+    return it->second;
+  }
+  /* Retire a stream: its state and every identity still mapped to it. */
+  void forget_stream(uint32_t s) {
+    for (auto it = ids_.begin(); it != ids_.end();)
+      it = it->second == s ? ids_.erase(it) : std::next(it);
+    streams_.erase(s);
+  }
+  size_t identities() const { return ids_.size(); }
+  size_t streams() const { return streams_.size(); }
 
 private:
   struct Stream {
@@ -314,12 +343,17 @@ private:
   uint32_t next_ = 1;
 };
 
-/* The uplink sequence both DUs agree on: the UE beacon's egress TSF in
- * superframes (one beacon per superframe; the hardware stamp is the same in
- * every copy). Rounded, so a TSF step of a few us never splits a beacon. */
-inline uint32_t ul_seq_from_egress(uint64_t egress_tsf, int64_t period_us) {
-  return static_cast<uint32_t>((egress_tsf + static_cast<uint64_t>(period_us / 2)) /
-                               static_cast<uint64_t>(period_us));
+/* The uplink sequence every DU agrees on: the RECEPTION instant on the
+ * shared PTP timebase, in superframes (a UE uplinks once per superframe).
+ * `t_net_us` is the DU's TSF at reception mapped to network time: tsf +
+ * phase + net_off * P (src/cell/HoCommand.h). Every DU hears one
+ * transmission at the same instant (to the fabric's ~us), so the copies
+ * share a seq; nothing in the frame sets it, so a forged or replayed frame
+ * cannot move the stream's window (at worst it is one more copy of "now").
+ * A boundary split needs the uplink within the fabric error of a network
+ * superframe boundary. */
+inline uint32_t ul_seq_from_network_time(int64_t t_net_us, int64_t period_us) {
+  return static_cast<uint32_t>(t_net_us / period_us);
 }
 
 } /* namespace devourer::cell */

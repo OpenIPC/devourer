@@ -60,7 +60,9 @@ struct HoCommand {
   uint16_t ue = 0;               /* the UE's id at the source */
   uint16_t source = 0, target = 0;
   uint16_t target_ue = 0;        /* its id at the target */
-  uint8_t target_pos = 0;        /* its capacity position at the target */
+  uint8_t target_pos = 0;        /* its capacity position at the target; 0 =
+                                    CANCEL this id (the target drops the UE it
+                                    pre-admitted for it) */
   uint64_t effective_net_sf = 0; /* the switch instant, network-wide */
   int64_t tsf_delta_us = 0;      /* target TSF - source TSF */
   uint64_t seq = 0;              /* F1 freshness (as Schedule::seq) */

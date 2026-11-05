@@ -102,7 +102,8 @@ inline std::vector<uint8_t> beacon_head(const uint8_t sa[6], int interval_tu) {
 // `rach_rsp` — an encode_rach_responses body — has any entry). Empty if
 // either cannot encode.
 inline std::vector<uint8_t> build_du_beacon(const GrantMap &m,
-                                            const std::vector<uint8_t> &rach_rsp = {}) {
+                                            const std::vector<uint8_t> &rach_rsp = {},
+                                            const std::vector<uint8_t> &extra_ies = {}) {
   uint8_t sa[6];
   cell_mac(sa, m.cell_id, 0);
   auto f = detail::beacon_head(sa, m.period_tu);
@@ -117,6 +118,8 @@ inline std::vector<uint8_t> build_du_beacon(const GrantMap &m,
                        devourer::cell::kGrantOui[1], devourer::cell::kGrantOui[2]});
     f.insert(f.end(), rach_rsp.begin(), rach_rsp.end());
   }
+  /* Complete IEs appended as they are (M6: handover commands). */
+  f.insert(f.end(), extra_ies.begin(), extra_ies.end());
   return f;
 }
 

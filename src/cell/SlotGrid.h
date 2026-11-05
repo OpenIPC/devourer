@@ -90,7 +90,8 @@ inline int64_t slot_len_us(const SlotBudget &b) {
          b.turnaround_us + b.guard_us;
 }
 
-enum class SlotKind : uint8_t { Beacon = 0, Downlink = 1, Turnaround = 2, Uplink = 3, Idle = 4 };
+enum class SlotKind : uint8_t { Beacon = 0, Downlink = 1, Turnaround = 2, Uplink = 3, Idle = 4,
+                                Rach = 5 /* contention: joining UEs (M3, Rach.h) */ };
 
 struct Slot {
   SlotKind kind = SlotKind::Idle;
@@ -165,14 +166,16 @@ private:
 };
 
 /* The M1 layout: beacon slot, one DL slot per UE, a turnaround guard, one UL
- * slot per UE, in UE-list order. nullopt when it does not fit the period, or
- * when there are more UEs than one grant map can advertise (kMaxUesPerCell). */
+ * slot per UE, in UE-list order, then (rach_slot_us > 0, M3) one contention
+ * slot for joining UEs. nullopt when it does not fit the period, or when
+ * there are more UEs than one grant map can advertise (kMaxUesPerCell). */
 inline std::optional<SlotGrid> build_fixed_grid(int period_tu, int64_t offset_us,
                                                 int64_t beacon_slot_us,
                                                 const std::vector<uint16_t> &ues,
                                                 int64_t dl_slot_us,
                                                 int64_t turnaround_us,
-                                                int64_t ul_slot_us) {
+                                                int64_t ul_slot_us,
+                                                int64_t rach_slot_us = 0) {
   if (ues.size() > kMaxUesPerCell)
     return std::nullopt;
   SlotGrid g(period_tu, offset_us);
@@ -186,6 +189,8 @@ inline std::optional<SlotGrid> build_fixed_grid(int period_tu, int64_t offset_us
   for (uint16_t ue : ues)
     if (!g.append(SlotKind::Uplink, ue, ul_slot_us))
       return std::nullopt;
+  if (rach_slot_us > 0 && !g.append(SlotKind::Rach, 0, rach_slot_us))
+    return std::nullopt;
   return g;
 }
 

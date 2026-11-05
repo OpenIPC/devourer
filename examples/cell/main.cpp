@@ -140,7 +140,10 @@ using devourer::cell::LinkAdapt;
 
 namespace {
 
+#if defined(__linux__)
+/* A PTP hardware clock (/dev/ptpN) as a dynamic POSIX clock: Linux only. */
 #define CELL_FD_TO_CLOCKID(fd) ((~(clockid_t)(fd) << 3) | 3)
+#endif
 
 double phc_us(clockid_t c) {
   struct timespec t;
@@ -424,12 +427,17 @@ int run_du(IRadio *dev, const Cfg &c) {
               devourer::sync_tier_name(tier));
       return 2;
     }
+#if defined(__linux__)
     ref_fd.fd = open(ref_ptp, O_RDONLY);
     if (ref_fd.fd < 0) {
       fprintf(stderr, "open %s failed\n", ref_ptp);
       return 1;
     }
     refclk = CELL_FD_TO_CLOCKID(ref_fd.fd);
+#else
+    fprintf(stderr, "CELL_REF_PTP needs a PTP hardware clock (Linux only)\n");
+    return 2;
+#endif
   }
   const int sync_loop_ms = static_cast<int>(envl("CELL_SYNC_LOOP_MS", 500, 50, 10000));
   const int acquire_s = static_cast<int>(envl("CELL_SYNC_ACQUIRE_S", 30, 0, 3600));

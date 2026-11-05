@@ -57,9 +57,15 @@
 //                             feedback IE, the DL body and the RACH; unset = an
 //                             unauthenticated development cell (no RACH).
 //   CELL_UE=0 (role ue)       a JOINING UE: it gets its id through the RACH
+//   CELL_JOINER_MAC           the joiner's MAC (default: derived from the host
+//                             name + DEVOURER_PCIE_BDF, so a restart re-joins
+//                             into the same position instead of a new one)
+//   CELL_RELEASE_SF [50]      DU: release a JOINED UE whose uplink has been
+//                             absent this many superframes (static UEs stay)
 //   CELL_SECS [60]            run time
 //   DEVOURER_CHANNEL [149]
 // Output: JSONL on stdout ("ev":"cell.*").
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <random>
@@ -75,6 +81,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include "RadiotapBuilder.h"
 #include "SelectedChannel.h"
@@ -360,6 +368,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     return 2;
   }
   const CellMac auth = cell_auth(c);
+  const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
   dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
   if (!dev->SetBeaconBackoff(false)) {
@@ -438,7 +447,9 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::map<uint16_t, DlUe> dlue;
   for (uint16_t ue : ues)
     dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
-  std::vector<uint8_t> rar_on_air; /* the RACH answers in the live beacon */
+  std::vector<uint8_t> rar_on_air;                 /* the RACH answers in the live beacon */
+  std::vector<devourer::cell::RachResponse> rar_on_air_set; /* ... as answers, for accounting */
+  std::map<uint16_t, int64_t> last_ul_sf;          /* per UE: superframe of its last uplink (mu) */
 
   char line[384];
   snprintf(line, sizeof line,
@@ -465,7 +476,10 @@ int run_du(IRadio *dev, const Cfg &c) {
           const int64_t at = extend32_near(p.RxAtrib.tsfl, fr_ref.load()) + tsf_minus_fr;
           const auto pos = grid->at(at);
           std::optional<devourer::cell::RachResponse> a;
-          {
+          /* Only a request that arrived inside the RACH slot is considered:
+           * one heard in a data slot or idle air allocates nothing. */
+          const bool in_rach = rach_slot && pos.slot && *pos.slot == *rach_slot;
+          if (in_rach) {
             std::lock_guard<std::mutex> lk(mu);
             a = srv.on_request(rf->msga, rf->msga_len, static_cast<uint64_t>(pos.superframe));
           }
@@ -475,7 +489,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                    "\"joiner\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"answered\":%d,\"status\":%d,"
                    "\"ue\":%u}",
                    (long long)pos.superframe, (long long)pos.into_us,
-                   rach_slot && pos.slot && *pos.slot == *rach_slot ? 1 : 0, rf->joiner[0],
+                   in_rach ? 1 : 0, rf->joiner[0],
                    rf->joiner[1], rf->joiner[2], rf->joiner[3], rf->joiner[4], rf->joiner[5],
                    a ? 1 : 0, a ? static_cast<int>(a->status) : -1, a ? a->ue : 0);
           emit(l);
@@ -502,6 +516,7 @@ int run_du(IRadio *dev, const Cfg &c) {
           ta_now = it->second.ta();
         }
         ue_epoch[ub->ue] = ub->epoch;
+        last_ul_sf[ub->ue] = pos.superframe;
         auto d = dlue.find(ub->ue);
         if (d != dlue.end()) {
           ++d->second.ul_in_window;
@@ -542,11 +557,16 @@ int run_du(IRadio *dev, const Cfg &c) {
   auto next_ta = std::chrono::steady_clock::now() + std::chrono::seconds(ta_every_s);
   int64_t sf = grid->at(static_cast<int64_t>(dev->ReadTsf())).superframe + 1;
   while (std::chrono::steady_clock::now() < deadline) {
+    /* Serve the UEs of the map IN FORCE: a newly admitted UE starts
+     * receiving DL only from its grant's effective superframe, when it
+     * applies that map too. */
+    const GrantMap &serving =
+        static_cast<uint64_t>(sf) >= map.effective_sf || prev_map.grants.empty() ? map : prev_map;
     std::vector<uint16_t> served;
-    for (const Grant &g : map.grants)
+    for (const Grant &g : serving.grants)
       served.push_back(g.ue);
     for (uint16_t ue : served) {
-      const size_t idx = map.find(ue)->dl_slot;
+      const size_t idx = serving.find(ue)->dl_slot;
       const int64_t start = grid->slot_start_tsf(sf, idx);
       /* What to send: a due HARQ retransmission, else new data (or, with
        * HARQ off, a new frame every superframe). */
@@ -606,6 +626,8 @@ int run_du(IRadio *dev, const Cfg &c) {
     GrantMap next = map;
     bool changed = false;
     std::vector<uint8_t> rar_now;
+    std::vector<devourer::cell::RachResponse> rar_sel;
+    std::vector<uint16_t> to_release;
     {
       std::lock_guard<std::mutex> lk(mu);
       /* Joiners the RACH server admitted: a grant, and their per-UE state. */
@@ -614,11 +636,30 @@ int run_du(IRadio *dev, const Cfg &c) {
           next.grants.push_back(grant_for(u));
           ta.emplace(u.ue, TaLoop(ta_gain, P / 4));
           dlue.emplace(u.ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
+          last_ul_sf[u.ue] = sf; /* its silence clock starts at admission */
           changed = true;
         }
-      if (rach_on)
-        rar_now = devourer::cell::encode_rach_responses(c.cell, srv.pending(static_cast<uint64_t>(sf + 1)),
-                                                        rach_mac(c));
+      /* Departure: a JOINED UE (static ones stay) whose uplink has been
+       * absent release_sf superframes gives its position back. */
+      for (auto it = next.grants.begin(); it != next.grants.end();) {
+        const uint16_t ue = it->ue;
+        const bool is_static = std::find(ues.begin(), ues.end(), ue) != ues.end();
+        auto ls = last_ul_sf.find(ue);
+        if (!is_static && ls != last_ul_sf.end() && sf - ls->second > release_sf) {
+          /* dropped from the staged map now; its registry position is freed
+           * only once that map is on air (below), so a new joiner can never
+           * be granted slots the live map still gives the old UE */
+          to_release.push_back(ue);
+          it = next.grants.erase(it);
+          changed = true;
+          continue;
+        }
+        ++it;
+      }
+      if (rach_on) {
+        rar_sel = srv.select(static_cast<uint64_t>(sf + 1));
+        rar_now = devourer::cell::encode_rach_responses(c.cell, rar_sel, rach_mac(c));
+      }
     }
     if (ta_on && std::chrono::steady_clock::now() >= next_ta) {
       next_ta += std::chrono::seconds(ta_every_s);
@@ -681,14 +722,26 @@ int run_du(IRadio *dev, const Cfg &c) {
       }
       const auto nb = build_du_beacon(next, rar_now);
       const bool ok = !nb.empty() && dev->UpdateBeaconPayload(nb.data(), nb.size());
-      if (ok)
+      if (ok) {
         rar_on_air = rar_now;
+        rar_on_air_set = rar_sel;
+      }
       if (changed) {
         if (ok) {
           prev_map = map;
           map = next;
+          std::lock_guard<std::mutex> lk(mu);
+          for (uint16_t ue : to_release) {
+            reg.release_id(ue);
+            last_ul_sf.erase(ue);
+            char l[120];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.release\",\"ue\":%u,\"sf\":%lld}", ue,
+                     (long long)sf);
+            emit(l);
+          }
         } else {
-          /* The old map stays on air: keep its epoch (UEs keep reporting it,
+          /* A release in `next` is retried next pass (its silence clock still
+           * runs). The old map stays on air: keep its epoch (UEs keep reporting it,
            * so sampling continues) and put the loops back on its TAs; the
            * next TA pass retries. */
           std::lock_guard<std::mutex> lk(mu);
@@ -707,6 +760,12 @@ int run_du(IRadio *dev, const Cfg &c) {
           snprintf(l + n, sizeof l - n, "}}");
         emit(l);
       }
+    }
+    /* The answers on air this superframe (after a failed update: the
+     * previous set, still airing) count one publication. */
+    if (rach_on && !rar_on_air_set.empty()) {
+      std::lock_guard<std::mutex> lk(mu);
+      srv.published(rar_on_air_set);
     }
     ++sf;
   }
@@ -778,8 +837,28 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * answers the RX thread finds in DU beacons (mu). */
   std::random_device rd;
   std::mt19937 rng((static_cast<uint64_t>(rd()) << 32) ^ rd());
-  std::array<uint8_t, 6> joiner_mac = {0x02, 0xce, 0xfe, static_cast<uint8_t>(rng()),
-                                       static_cast<uint8_t>(rng()), static_cast<uint8_t>(rng())};
+  /* A STABLE joiner identity: a restarted joiner re-joins into the position
+   * it already holds (UeRegistry is idempotent per MAC) instead of taking a
+   * second one. CELL_JOINER_MAC, else derived from host name + radio. */
+  std::array<uint8_t, 6> joiner_mac{};
+  if (const char *jm = std::getenv("CELL_JOINER_MAC")) {
+    const auto pm = devourer::parse_mac(jm);
+    if (!pm) {
+      fprintf(stderr, "invalid CELL_JOINER_MAC=\"%s\"\n", jm);
+      return 2;
+    }
+    joiner_mac = pm->bytes;
+  } else {
+    char host[256] = {0};
+    gethostname(host, sizeof host - 1);
+    const char *bdf = std::getenv("DEVOURER_PCIE_BDF");
+    uint64_t h = 1469598103934665603ull;
+    for (const char *q : {static_cast<const char *>(host), bdf ? bdf : ""})
+      for (; *q; ++q)
+        h = (h ^ static_cast<uint8_t>(*q)) * 1099511628211ull;
+    joiner_mac = {0x02, 0xce, 0xfe, static_cast<uint8_t>(h >> 16), static_cast<uint8_t>(h >> 8),
+                  static_cast<uint8_t>(h)};
+  }
   const uint64_t nonce = (static_cast<uint64_t>(rng()) << 32) | rng();
   devourer::cell::RachClient rach(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });
   std::vector<devourer::cell::RachResponse> rar_seen;
@@ -911,9 +990,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
         break;
       }
       const int64_t rlen = grid->slots()[*rach_idx].len_us;
-      const int64_t air = devourer::cell::ofdm_airtime_us(24 + 2 + 21 + devourer::cell::kRachTagLen + 4, 6);
+      const int64_t air = devourer::cell::ofdm_airtime_us(
+          24 + 3 + devourer::cell::rach_detail::kReqLen + devourer::cell::kRachTagLen + 4, 6);
       /* the whole msgA, plus the departure guard, must end inside the slot */
-      const auto off = rach.opportunity(static_cast<uint64_t>(sfn + 1), rlen, air + 500);
+      const int64_t tx_us = air + devourer::cell::kRachDepartureGuardUs;
+      const auto off = rach.opportunity(static_cast<uint64_t>(sfn + 1), rlen, tx_us);
       if (!off)
         continue;
       devourer::cell::RachRequest q;
@@ -923,7 +1004,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
       q.attempt = rach.attempt();
       q.fresh_sf = static_cast<uint32_t>(sfn + 1);
       const auto msga = devourer::cell::encode_rach_request(q, mac);
-      auto pkt = build_dl_radiotap(6, 0);
+      auto pkt = build_dl_radiotap(6); /* RATE only: keep the session TX power */
       const auto fr = build_rach_frame(c.cell, joiner_mac.data(), msga);
       pkt.insert(pkt.end(), fr.begin(), fr.end());
       /* The target DU instant -> this UE's free-running counter, then wait. */
@@ -933,6 +1014,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
         std::lock_guard<std::mutex> lk(mu);
         target_local = sync.LocalForRemote(static_cast<uint64_t>(target_du));
       }
+      int64_t late = -1; /* how late the wait ended; -1 = the clock read failed */
       for (;;) {
         uint64_t t2 = 0, f2 = 0;
         if (!dev->ReadTsfAndFreeRun(t2, f2))
@@ -943,12 +1025,27 @@ int run_ue(IRadio *dev, const Cfg &c) {
           now_local = wrap.extend(static_cast<uint32_t>(f2));
         }
         const int64_t left = target_local - now_local;
-        if (left <= 0)
+        if (left <= 0) {
+          late = -left;
           break;
+        }
         if (left > 1500)
           std::this_thread::sleep_for(std::chrono::microseconds(left - 1000));
       }
+      /* Last check before the radio: the whole msgA must still fit the RACH
+       * slot from where we actually are. Missed it (or lost the clock):
+       * no transmission, no attempt spent: the client tries again. */
+      if (late < 0 || *off + late + tx_us > rlen) {
+        rach.unsend(static_cast<uint64_t>(sfn + 1));
+        char l[160];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.ue.rach_skip\",\"sf\":%lld,\"late_us\":%lld}",
+                 (long long)(sfn + 1), (long long)late);
+        emit(l);
+        continue;
+      }
       const bool ok = !msga.empty() && dev->send_packet(pkt.data(), pkt.size());
+      if (!ok)
+        rach.unsend(static_cast<uint64_t>(sfn + 1));
       char l[200];
       snprintf(l, sizeof l,
                "{\"ev\":\"cell.ue.rach\",\"sf\":%lld,\"offset_us\":%lld,\"attempt\":%u,\"ok\":%d}",
@@ -960,8 +1057,28 @@ int run_ue(IRadio *dev, const Cfg &c) {
       continue;
     const int me = me_a.load();
     const Grant *g = mcopy.find(static_cast<uint16_t>(me));
-    if (!g || g->ul_slot >= grid->slots().size())
+    if (!g)
       continue;
+    /* The DU's slot indices must mean the same slots on this UE's grid (the
+     * grid is built from the shared env): a disagreement is a configuration
+     * error. Stop rather than transmit in someone else's slot. */
+    {
+      const auto &sl = grid->slots();
+      const bool ok = g->ul_slot < sl.size() && g->dl_slot < sl.size() &&
+                      sl[g->ul_slot].kind == SlotKind::Uplink && sl[g->ul_slot].ue == me &&
+                      sl[g->dl_slot].kind == SlotKind::Downlink && sl[g->dl_slot].ue == me;
+      if (!ok) {
+        char l[200];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.grid_mismatch\",\"ue\":%d,\"dl_slot\":%u,\"ul_slot\":%u,"
+                 "\"slots\":%zu}",
+                 me, g->dl_slot, g->ul_slot, sl.size());
+        emit(l);
+        fprintf(stderr, "grant slots do not match this UE's grid: check CELL_CAPACITY / "
+                        "CELL_RACH_US / slot lengths against the DU\n");
+        break;
+      }
+    }
     const int64_t ul_off = grid->slots()[g->ul_slot].start_us;
     {
       const int64_t sfn = du_now / P;

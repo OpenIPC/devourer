@@ -54,6 +54,11 @@ int main() {
     CHECK(g->find(SlotKind::Rach, 0).has_value());
     auto h = build_fixed_grid(100, 0, 1500, {1, 2}, 4000, 1000, 2000);
     CHECK(h && !h->find(SlotKind::Rach, 0).has_value());
+    /* A RACH slot that leaves less than kRachTailGapUs before the next beacon
+     * is refused: 1500 + 4x4000 + 1000 + 4x2000 = 26500 used, so a RACH slot
+     * of 102400 - 26500 - 5000 fits exactly and one microsecond more does not. */
+    CHECK(build_fixed_grid(100, 0, 1500, {1, 2, 3, 4}, 4000, 1000, 2000, 102400 - 26500 - kRachTailGapUs));
+    CHECK(!build_fixed_grid(100, 0, 1500, {1, 2, 3, 4}, 4000, 1000, 2000, 102400 - 26500 - kRachTailGapUs + 1));
   }
 
   /* --- Registry: positions never move; admission is idempotent. --- */
@@ -71,6 +76,8 @@ int main() {
     auto d = r.admit(mac_of(4)); /* the freed position, same slots as before */
     CHECK(d && d->ue == 2 && d->dl_slot == 2 && d->ul_slot == 6);
     CHECK(r.admitted().size() == 3 && r.find(mac_of(1))->ue == 1);
+    CHECK(r.release_id(1) && !r.find(mac_of(1)) && !r.release_id(1) && !r.release_id(9));
+    CHECK(r.admit(mac_of(5))->ue == 1); /* the released position, reused */
   }
 
   const Mac key = fake_mac(0x1234), other = fake_mac(0x9999);
@@ -84,7 +91,7 @@ int main() {
     q.attempt = 3;
     q.fresh_sf = 1000;
     const auto p = encode_rach_request(q, key);
-    CHECK(p.size() == 2 + 21 + kRachTagLen);
+    CHECK(p.size() == 3 + 21 + kRachTagLen && p[2] == kRachProtoVersion);
     auto d = decode_rach_request(p.data(), p.size(), 7, key);
     CHECK(d && d->nonce == q.nonce && d->attempt == 3 && d->fresh_sf == 1000 && d->mac == q.mac);
     CHECK(!decode_rach_request(p.data(), p.size(), 8, key));   /* other cell */
@@ -94,6 +101,9 @@ int main() {
     CHECK(!decode_rach_request(bad.data(), bad.size(), 7, key));
     CHECK(!decode_rach_request(p.data(), p.size() - 1, 7, key));
     CHECK(encode_rach_request(q, Mac{}).empty()); /* no primitive: no message */
+    auto v = p;
+    v[2] = kRachProtoVersion + 1; /* another envelope revision: refused outright */
+    CHECK(!decode_rach_request(v.data(), v.size(), 7, key));
   }
 
   /* --- msgB: round trip; forged/foreign entries are dropped one by one. --- */
@@ -204,6 +214,43 @@ int main() {
     const auto p = encode_rach_request(q, key);
     srv.on_request(p.data(), p.size(), 1000);
     CHECK(srv.history() == 1);
+  }
+
+  /* --- select() / published(): a beacon that never aired consumes nothing. --- */
+  {
+    UeRegistry reg({{1, 5}, {2, 6}});
+    RachServerConfig sc;
+    sc.answer_beacons = 2;
+    RachServer srv(7, reg, key, sc);
+    RachRequest q;
+    q.cell_id = 7;
+    q.mac = mac_of(1);
+    q.nonce = 77;
+    q.fresh_sf = 50;
+    const auto p = encode_rach_request(q, key);
+    CHECK(srv.on_request(p.data(), p.size(), 50).has_value());
+    for (int i = 0; i < 5; ++i) /* five failed beacon updates: selected, never aired */
+      CHECK(srv.select(51 + i).size() == 1);
+    const auto sel = srv.select(56);
+    srv.published(sel); /* aired once */
+    CHECK(srv.select(57).size() == 1);
+    srv.published(sel); /* aired twice: done */
+    CHECK(srv.select(58).empty());
+  }
+
+  /* --- Client unsend(): a msgA that never left spends no attempt. --- */
+  {
+    uint32_t seed = 7;
+    auto rnd = [&seed] { seed = seed * 1103515245u + 12345u; return seed >> 8; };
+    RachClient cl(mac_of(3), 99, rnd);
+    uint64_t sf = 0;
+    while (!cl.opportunity(sf, 8000, 700))
+      ++sf;
+    CHECK(cl.attempt() == 1 && cl.state() == RachState::Sent);
+    cl.unsend(sf);
+    CHECK(cl.attempt() == 0 && cl.state() == RachState::Waiting);
+    CHECK(!cl.opportunity(sf, 8000, 700));          /* not the same superframe again */
+    CHECK(cl.opportunity(sf + 1, 8000, 700) && cl.attempt() == 1);
   }
 
   /* --- Registry is capped at what a grid / grant map can carry. --- */

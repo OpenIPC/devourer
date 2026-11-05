@@ -206,6 +206,11 @@ int main() {
     for (int i = 0; i < 9; ++i) o.sample(-420);
     o.sample(39125);
     CHECK(o.update(3) && o.ta() == -210 && o.last_mean() == -420);
+    /* A loop never updated keeps only the newest kMaxWindow samples. */
+    TaLoop idle(0.5, 25600);
+    for (int i = 0; i < 10000; ++i) idle.sample(i);
+    CHECK(idle.pending() == TaLoop::kMaxWindow);
+    CHECK(idle.update(3) && idle.last_mean() >= 10000 - static_cast<double>(TaLoop::kMaxWindow));
     CHECK(t.pending() == 0 && t.ta() == 50);
   }
 

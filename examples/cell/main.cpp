@@ -512,7 +512,8 @@ int run_du(IRadio *dev, const Cfg &c) {
         std::lock_guard<std::mutex> lk(mu);
         auto it = ta.find(ub->ue);
         if (it != ta.end()) {
-          it->second.sample(err);
+          if (ta_on) /* CELL_TA=0: no loop to feed */
+            it->second.sample(err);
           ta_now = it->second.ta();
         }
         ue_epoch[ub->ue] = ub->epoch;

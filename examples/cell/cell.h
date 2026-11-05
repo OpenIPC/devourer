@@ -444,7 +444,14 @@ inline int64_t ue_tsf_step(int64_t ue_tsf, int64_t du_tsf, int64_t ul_off, int64
 class TaLoop {
 public:
   TaLoop(double gain, int64_t max_ta_us) : gain_(gain), max_(max_ta_us) {}
-  void sample(int64_t err_us) { win_.push_back(err_us); }
+  /* The window keeps the newest kMaxWindow samples (a loop that is never
+   * updated, e.g. CELL_TA=0, must not grow without bound). */
+  static constexpr size_t kMaxWindow = 256;
+  void sample(int64_t err_us) {
+    if (win_.size() == kMaxWindow)
+      win_.erase(win_.begin());
+    win_.push_back(err_us);
+  }
   size_t pending() const { return win_.size(); }
   // Drop the window without moving the TA (samples taken under an old map).
   void discard() { win_.clear(); }

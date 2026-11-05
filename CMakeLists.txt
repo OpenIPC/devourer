@@ -1655,8 +1655,10 @@ if(NOT WIN32)
     target_include_directories(cell PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/cell)
-    # CELL_PSK tags the scheduling frames with HMAC-SHA1 (cell.h CellMac takes
-    # the primitive injected); without OpenSSL the cell runs unauthenticated.
+    # CELL_PSK authenticates the cell with HMAC-SHA1 — the scheduling-frame
+    # tags (cell.h CellMac) and the M3 RACH (src/cell/Rach.h) both take the
+    # primitive injected. Without OpenSSL the cell runs unauthenticated and
+    # cannot RACH.
     if(OpenSSL_FOUND)
         target_link_libraries(cell PRIVATE OpenSSL::Crypto)
         target_compile_definitions(cell PRIVATE DEVOURER_CELL_OPENSSL=1)

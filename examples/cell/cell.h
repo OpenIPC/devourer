@@ -23,6 +23,12 @@
 //                 because send_packet has no sub-slot departure control
 //                 (docs/scheduled-mac.md); with SetBeaconBackoff(false) it
 //                 leaves a fixed 22 us after its TBTT.
+//   RACH msgA   — (M3) a joining station's broadcast data frame in the RACH
+//                 slot: addr2 = its own (random) MAC, addr3 = the DU (BSSID),
+//                 body = the src/cell/Rach.h msgA. Broadcast: nothing ACKs
+//                 it, so no contention-window escalation on the joiner.
+//   RACH msgB   — (M3) a second vendor IE in the DU beacon: the Rach.h
+//                 random-access responses ('R' 'B' ...).
 //
 // Clocks. Kestrel stamps RX frames (RxAtrib.tsfl) with the MAC's free-running
 // counter, which TSF writes never move. So a UE fits the DU's TSF against its
@@ -32,12 +38,15 @@
 #ifndef DEVOURER_EXAMPLES_CELL_H
 #define DEVOURER_EXAMPLES_CELL_H
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "cell/GrantMap.h"
@@ -89,8 +98,11 @@ inline std::vector<uint8_t> beacon_head(const uint8_t sa[6], int interval_tu) {
 }
 }  // namespace detail
 
-// The DU beacon: header + the grant map IE. Empty if the map cannot encode.
-inline std::vector<uint8_t> build_du_beacon(const GrantMap &m) {
+// The DU beacon: header + the grant map IE (+ the RACH responses IE when
+// `rach_rsp` — an encode_rach_responses body — has any entry). Empty if
+// either cannot encode.
+inline std::vector<uint8_t> build_du_beacon(const GrantMap &m,
+                                            const std::vector<uint8_t> &rach_rsp = {}) {
   uint8_t sa[6];
   cell_mac(sa, m.cell_id, 0);
   auto f = detail::beacon_head(sa, m.period_tu);
@@ -98,8 +110,68 @@ inline std::vector<uint8_t> build_du_beacon(const GrantMap &m) {
   if (ie.empty())
     return {};
   f.insert(f.end(), ie.begin(), ie.end());
+  if (rach_rsp.size() > 3) { /* 'R' 'B' n, n > 0 */
+    if (rach_rsp.size() + 3 > 255)
+      return {};
+    f.insert(f.end(), {221, static_cast<uint8_t>(3 + rach_rsp.size()), devourer::cell::kGrantOui[0],
+                       devourer::cell::kGrantOui[1], devourer::cell::kGrantOui[2]});
+    f.insert(f.end(), rach_rsp.begin(), rach_rsp.end());
+  }
   return f;
 }
+
+// The RACH responses body ('R' 'B' ...) in a DU beacon, or {nullptr, 0}.
+inline std::pair<const uint8_t *, size_t> find_rach_responses(const uint8_t *mpdu, size_t len) {
+  if (mpdu == nullptr || len < 36 || mpdu[0] != 0x80)
+    return {nullptr, 0};
+  for (size_t off = 36; off + 2 <= len;) {
+    const size_t l = mpdu[off + 1];
+    if (off + 2 + l > len)
+      break;
+    const uint8_t *v = mpdu + off + 2;
+    if (mpdu[off] == 221 && l >= 5 && v[0] == devourer::cell::kGrantOui[0] &&
+        v[1] == devourer::cell::kGrantOui[1] && v[2] == devourer::cell::kGrantOui[2] &&
+        v[3] == 'R' && v[4] == 'B')
+      return {v + 3, l - 3};
+    off += 2 + l;
+  }
+  return {nullptr, 0};
+}
+
+// RACH msgA frame: broadcast data (FC 0x08), addr2 = the joiner's MAC,
+// addr3 = the DU of `cell`, body = a Rach.h msgA payload.
+inline std::vector<uint8_t> build_rach_frame(uint16_t cell, const uint8_t joiner[6],
+                                             const std::vector<uint8_t> &msga) {
+  uint8_t du[6];
+  cell_mac(du, cell, 0);
+  std::vector<uint8_t> f = {0x08, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  f.insert(f.end(), joiner, joiner + 6);
+  f.insert(f.end(), du, du + 6);
+  f.insert(f.end(), {0x00, 0x00});
+  f.insert(f.end(), msga.begin(), msga.end());
+  return f;
+}
+// A RACH frame for `cell`: the joiner MAC and the msgA payload, or nullopt.
+// `len` must EXCLUDE a trailing FCS (Packet::Data carries one when
+// RxAtrib.fcs_present): the msgA decode is length-exact.
+struct RachFrame {
+  std::array<uint8_t, 6> joiner{};
+  const uint8_t *msga = nullptr;
+  size_t msga_len = 0;
+};
+inline std::optional<RachFrame> parse_rach_frame(const uint8_t *p, size_t len, uint16_t cell) {
+  if (p == nullptr || len < 24 + 2 || p[0] != 0x08 || p[24] != 'R' || p[25] != 'A')
+    return std::nullopt;
+  static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+  if (std::memcmp(p + 4, bcast, 6) != 0 || cell_station(p + 16, cell) != 0)
+    return std::nullopt;
+  RachFrame r;
+  std::memcpy(r.joiner.data(), p + 10, 6);
+  r.msga = p + 24;
+  r.msga_len = len - 24;
+  return r;
+}
+
 
 /* --- Scheduling-frame integrity (M2 review) ---------------------------------
  * The UE uplink IE (HARQ feedback) and the DL body carry a protocol version
@@ -372,23 +444,29 @@ inline int64_t ue_tsf_step(int64_t ue_tsf, int64_t du_tsf, int64_t ul_off, int64
 class TaLoop {
 public:
   TaLoop(double gain, int64_t max_ta_us) : gain_(gain), max_(max_ta_us) {}
+  /* The window keeps the newest kMaxWindow samples (a loop that is never
+   * updated, e.g. CELL_TA=0, must not grow without bound). */
+  static constexpr size_t kMaxWindow = 256;
   void sample(int64_t err_us) {
-    sum_ += static_cast<double>(err_us);
-    ++n_;
+    if (win_.size() == kMaxWindow)
+      win_.erase(win_.begin());
+    win_.push_back(err_us);
   }
-  size_t pending() const { return n_; }
+  size_t pending() const { return win_.size(); }
   // Drop the window without moving the TA (samples taken under an old map).
-  void discard() {
-    sum_ = 0;
-    n_ = 0;
-  }
+  void discard() { win_.clear(); }
   // Returns true when the TA changed. min_samples guards a noisy window.
+  // The window's MEDIAN is the estimate: one wild arrival (a UE's beacon
+  // before its first TSF step, a TBTT on the old schedule after one) must
+  // not steer the TA — a mean let a single 39 ms sample push a joining UE
+  // out of its slot on the rig.
   bool update(size_t min_samples) {
-    if (n_ < min_samples || n_ == 0)
+    if (win_.size() < min_samples || win_.empty())
       return false;
-    const double mean = sum_ / static_cast<double>(n_);
-    sum_ = 0;
-    n_ = 0;
+    std::vector<int64_t> v;
+    v.swap(win_);
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(v.size() / 2), v.end());
+    const double mean = static_cast<double>(v[v.size() / 2]); /* the median */
     last_mean_ = mean;
     const int64_t step = static_cast<int64_t>(std::llround(gain_ * mean));
     if (step == 0)
@@ -411,8 +489,7 @@ private:
   double gain_;
   int64_t max_;
   int64_t ta_ = 0;
-  double sum_ = 0;
-  size_t n_ = 0;
+  std::vector<int64_t> win_;
   double last_mean_ = 0;
 };
 

@@ -56,6 +56,15 @@ namespace devourer::cell {
 using Mac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
 
 constexpr size_t kRachTagLen = 8;
+/* msgA envelope version: an unknown version is refused before anything else
+ * (a joiner built against another envelope revision is never half-parsed). */
+constexpr uint8_t kRachProtoVersion = 1;
+/* Departure budget for a msgA inside the RACH slot (M0 on the 8852CE: a
+ * send_packet's p99.9 departure is ~0.46 ms on a clean channel). The rare
+ * multi-ms tail beyond it (max ~4.8 ms measured; one msgA aired 4.7 ms late
+ * on the rig) is what SlotGrid.h's kRachTailGapUs keeps idle before the next
+ * beacon, so a late msgA never lands on it. */
+constexpr int64_t kRachDepartureGuardUs = 500;
 
 enum class RachStatus : uint8_t { Granted = 0, DeniedFull = 1, DeniedBad = 2 };
 
@@ -128,9 +137,11 @@ constexpr size_t kReqLen = 2 + 6 + 8 + 1 + 4;
 constexpr size_t kRspLen = 6 + 8 + 1 + 2 + 1 + 1;
 }  // namespace rach_detail
 
-/* msgA payload ('R' 'A' + body + tag). Empty if the MAC fails. */
+/* msgA payload ('R' 'A' ver + body + tag; the tag covers the version).
+ * Empty if the MAC fails. */
 inline std::vector<uint8_t> encode_rach_request(const RachRequest &r, const Mac &mac) {
-  const auto body = rach_detail::req_body(r);
+  auto body = rach_detail::req_body(r);
+  body.insert(body.begin(), kRachProtoVersion);
   uint8_t t[kRachTagLen];
   if (!rach_detail::tag(mac, 'A', r.cell_id, body, t))
     return {};
@@ -141,15 +152,17 @@ inline std::vector<uint8_t> encode_rach_request(const RachRequest &r, const Mac 
 }
 
 /* Decode + authenticate a msgA payload for `cell`. nullopt for anything
- * malformed, of another cell, or whose tag does not verify. Freshness is the
- * server's check (it knows the current superframe). */
+ * malformed, of another envelope version, of another cell, or whose tag does
+ * not verify. Freshness is the server's check (it knows the current
+ * superframe). */
 inline std::optional<RachRequest> decode_rach_request(const uint8_t *p, size_t len, uint16_t cell,
                                                       const Mac &mac) {
   using namespace rach_detail;
-  if (p == nullptr || len != 2 + kReqLen + kRachTagLen || p[0] != 'R' || p[1] != 'A')
+  if (p == nullptr || len != 3 + kReqLen + kRachTagLen || p[0] != 'R' || p[1] != 'A' ||
+      p[2] != kRachProtoVersion)
     return std::nullopt;
   RachRequest r;
-  const uint8_t *b = p + 2;
+  const uint8_t *b = p + 3;
   r.cell_id = static_cast<uint16_t>(get(b, 2));
   if (r.cell_id != cell)
     return std::nullopt;
@@ -158,7 +171,7 @@ inline std::optional<RachRequest> decode_rach_request(const uint8_t *p, size_t l
   r.attempt = b[16];
   r.fresh_sf = static_cast<uint32_t>(get(b + 17, 4));
   uint8_t t[kRachTagLen];
-  if (!tag(mac, 'A', cell, std::vector<uint8_t>(b, b + kReqLen), t) || !tag_eq(t, b + kReqLen))
+  if (!tag(mac, 'A', cell, std::vector<uint8_t>(p + 2, b + kReqLen), t) || !tag_eq(t, b + kReqLen))
     return std::nullopt;
   return r;
 }
@@ -292,23 +305,37 @@ public:
    * answer still unpublished `answer_max_age_sf` after it was made is
    * dropped (its client has long retried). */
   std::vector<RachResponse> pending(uint64_t sf) {
+    auto out = select(sf);
+    published(out);
+    return out;
+  }
+  /* The two halves of pending(), for a caller whose beacon update can fail:
+   * select() picks the answers for the next beacon WITHOUT counting them;
+   * published() counts a set of answers as having aired once — call it per
+   * superframe with what is actually on air (after a failed update, the
+   * previous set still is), so a failed update never consumes an answer. */
+  std::vector<RachResponse> select(uint64_t sf) {
     expire(sf);
-    std::vector<Live *> v;
-    for (auto &kv : live_)
+    std::vector<const Live *> v;
+    for (const auto &kv : live_)
       v.push_back(&kv.second);
     std::stable_sort(v.begin(), v.end(), [](const Live *a, const Live *b) {
       return a->pubs != b->pubs ? a->pubs < b->pubs : a->made_sf < b->made_sf;
     });
     std::vector<RachResponse> out;
-    for (Live *l : v) {
+    for (const Live *l : v) {
       if (out.size() == kRachMaxPerBeacon)
         break;
       out.push_back(l->r);
-      ++l->pubs;
     }
-    for (auto it = live_.begin(); it != live_.end();)
-      it = it->second.pubs >= cfg_.answer_beacons ? live_.erase(it) : std::next(it);
     return out;
+  }
+  void published(const std::vector<RachResponse> &aired) {
+    for (const RachResponse &r : aired) {
+      auto it = live_.find(Key{r.mac, r.nonce});
+      if (it != live_.end() && ++it->second.pubs >= cfg_.answer_beacons)
+        live_.erase(it);
+    }
   }
   size_t history() const { return answered_.size(); }
   uint64_t rejected() const { return rejected_; }
@@ -403,6 +430,17 @@ public:
     ++attempt_;
     const uint32_t span = static_cast<uint32_t>(slot_len_us - tx_us) + 1;
     return static_cast<int64_t>(rnd_() % span); /* start + tx_us <= slot_len_us */
+  }
+
+  /* The msgA opportunity() granted was NOT transmitted (its deadline passed
+   * before the radio could take it): no attempt spent; try again from the
+   * next superframe. */
+  void unsend(uint64_t sf) {
+    if (state_ != RachState::Sent || attempt_ == 0)
+      return;
+    --attempt_;
+    state_ = RachState::Waiting;
+    next_sf_ = sf + 1;
   }
 
   /* Answers decoded from a DU beacon. Returns true when one was for us

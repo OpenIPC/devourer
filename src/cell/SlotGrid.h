@@ -35,6 +35,9 @@ constexpr int64_t kSlotTimeUs = 9;   /* 5 GHz OFDM */
 /* UEs one cell's grid may carry: the grant map (GrantMap.h) advertises at
  * most this many grants in one beacon IE. */
 constexpr size_t kMaxUesPerCell = 24;
+/* Idle air a RACH slot must leave before the next beacon: a joiner's msgA
+ * can depart up to ~4.8 ms late on Kestrel (src/cell/Rach.h). */
+constexpr int64_t kRachTailGapUs = 5000;
 /* Input bounds that keep slot_len_us's int64 arithmetic exact: an MPDU up to
  * the 802.11ac maximum (11454 bytes), a retry ladder far past any hardware
  * limit, margins up to 10 s. */
@@ -190,6 +193,10 @@ inline std::optional<SlotGrid> build_fixed_grid(int period_tu, int64_t offset_us
     if (!g.append(SlotKind::Uplink, ue, ul_slot_us))
       return std::nullopt;
   if (rach_slot_us > 0 && !g.append(SlotKind::Rach, 0, rach_slot_us))
+    return std::nullopt;
+  /* A RACH slot needs kRachTailGapUs of idle air before the next beacon: a
+   * joiner's msgA can depart that late (Rach.h), and must not hit it. */
+  if (rach_slot_us > 0 && g.used_us() + kRachTailGapUs > g.period_us())
     return std::nullopt;
   return g;
 }

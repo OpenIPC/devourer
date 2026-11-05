@@ -71,6 +71,15 @@ public:
     return true;
   }
 
+  /* Release by UE id (the DU knows a silent UE by its id, not its MAC). */
+  bool release_id(uint16_t ue) {
+    if (ue == 0 || ue > owner_.size() || !owner_[ue - 1])
+      return false;
+    by_mac_.erase(*owner_[ue - 1]);
+    owner_[ue - 1].reset();
+    return true;
+  }
+
   std::optional<UeSlot> find(const std::array<uint8_t, 6> &mac) const {
     auto it = by_mac_.find(mac);
     if (it == by_mac_.end())

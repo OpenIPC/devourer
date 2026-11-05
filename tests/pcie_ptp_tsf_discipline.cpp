@@ -44,6 +44,7 @@
 #include "PcieTransport.h"
 #include "SelectedChannel.h"
 #include "WiFiDriver.h"
+#include "cell/TsfDiscipline.h"
 #include "logger.h"
 
 #define FD_TO_CLOCKID(fd) ((~(clockid_t)(fd) << 3) | 3)
@@ -106,7 +107,6 @@ int main(int argc, char **argv) {
   // BCN_BACKOFF=0: deterministic departure (fixed AIFS after the TBTT) — only
   // with co-channel cells staggered, as the multi-cell tests do via PHASE_US.
   const bool bcn_backoff = envi("BCN_BACKOFF", 1, 0, 1) != 0;
-  std::deque<double> brackets;  // recent accepted+rejected bracket widths
 
   int fd = open(ref, O_RDONLY);
   if (fd < 0) { fprintf(stderr, "open %s failed\n", ref); return 1; }
@@ -153,105 +153,60 @@ int main(int argc, char **argv) {
   fprintf(stderr, "pcie_ptp_tsf_discipline: fit axis = %s\n",
           use_fr ? "free-running counter (steps measured)" : "ledger (steps booked)");
 
-  struct Pt { double x, y; };
-  std::deque<Pt> pts;  // (tsf - S - x0, ref - y0)
-  bool init = false;
-  double x0 = 0, y0 = 0, S = 0, integ = 0;
-  long n = 0, rejected = 0;
+  devourer::cell::TsfDisciplineConfig dc;
+  dc.interval_us = interval;
+  dc.phase_us = phase;
+  dc.gain = gain;
+  dc.ki = ki;
+  dc.capture_us = capture;
+  dc.window = window;
+  dc.bracket_max_us = bracket_max;
+  dc.bracket_slack_us = bracket_slack;
+  dc.step_comp_us = comp;
+  dc.ledger = !use_fr;
+  devourer::cell::TsfDiscipline loop(dc);
+  long n = 0;
   double last_bracket = 0;
-  int write_fail_run = 0;
   std::vector<double> locked;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(secs);
   while (std::chrono::steady_clock::now() < deadline) {
-    // x: the fit's axis — the free-running counter, or (ledger) tsf - S.
-    int64_t tsf = 0;
-    double x = 0, r = 0;
-    if (use_fr) {
-      uint64_t t = 0, f = 0;
-      const double r1 = phc_us(refclk);
-      const bool ok_read = dev->ReadTsfAndFreeRun(t, f);
-      const double r2 = phc_us(refclk);
-      const double br = r2 - r1;
-      double limit = bracket_max;
-      if (limit <= 0) {
-        if (brackets.size() >= 8) {
-          std::vector<double> sb(brackets.begin(), brackets.end());
-          std::nth_element(sb.begin(), sb.begin() + sb.size() / 2, sb.end());
-          limit = sb[sb.size() / 2] + bracket_slack;
-        } else {
-          limit = 1e9;  // learning the baseline
-        }
-      }
-      brackets.push_back(br);
-      if (brackets.size() > 32) brackets.pop_front();
-      if (!ok_read || br > limit) {
-        ++rejected;
-        std::this_thread::sleep_for(std::chrono::milliseconds(loop_ms));
-        continue;
-      }
-      last_bracket = br;
-      tsf = (int64_t)t;
-      x = (double)f;
-      r = 0.5 * (r1 + r2);
-    } else {
-      tsf = (int64_t)dev->ReadTsf();
-      r = phc_us(refclk);
-      x = (double)tsf - S;
+    /* One bracketed sample: PHC, radio (tsf, freerun), PHC. On the ledger
+     * axis the radio read is ReadTsf alone (no free-running counter). */
+    uint64_t t = 0, f = 0;
+    const double r1 = phc_us(refclk);
+    bool ok_read = true;
+    if (use_fr)
+      ok_read = dev->ReadTsfAndFreeRun(t, f);
+    else
+      t = dev->ReadTsf();
+    const double r2 = use_fr ? phc_us(refclk) : r1;
+    const auto d = loop.sample(r1, r2, ok_read, (int64_t)t, (int64_t)f);
+    if (d.accepted) {
+      ++n;
+      last_bracket = d.bracket_us;
     }
-    if (!init) { x0 = x; y0 = r; init = true; }
-    pts.push_back({x - x0, r - y0});
-    if (pts.size() > window) pts.pop_front();
-    ++n;
-    if (pts.size() >= 8) {
-      double sx = 0, sy = 0, sxx = 0, sxy = 0;
-      const double m = (double)pts.size();
-      for (const auto &p : pts) { sx += p.x; sy += p.y; sxx += p.x * p.x; sxy += p.x * p.y; }
-      const double den = m * sxx - sx * sx;
-      const double a = den != 0 ? (m * sxy - sx * sy) / den : 1.0;
-      const double b = (sy - a * sx) / m;
-      // The TBTT sits on the (real) TSF grid: next grid point after now.
-      const int64_t next_tbtt = (tsf / interval + 1) * interval;
-      // the same instant on the fit's axis: tsf - x is the TSF's offset from it
-      const double next_tbtt_x = (double)next_tbtt - ((double)tsf - x);
-      const double tbtt_ref = y0 + a * (next_tbtt_x - x0) + b;
-      double e = std::fmod(tbtt_ref - phase, (double)interval);
-      if (e > interval / 2.0) e -= interval; else if (e < -interval / 2.0) e += interval;
-      if (std::fabs(e) < capture) {
-        integ = std::clamp(integ + e, -1500.0, 1500.0);
-      } else {
-        integ = 0;
-      }
-      // TBTT lands e late in ref time: advance the TSF by u so the grid point
-      // arrives u earlier.
-      const double u = gain * e + ki * integ;
-      const int64_t step = (int64_t)std::llround(u);
+    if (d.acting) {
       bool ok = true;
-      if (step != 0) {
+      if (d.step_us != 0) {
         const uint64_t now = dev->ReadTsf();
-        ok = dev->WriteTsf(now + (uint64_t)(step + (int64_t)std::llround(comp)));
-        if (ok) {
-          if (!use_fr) S += (double)step;  // free-running axis: nothing to book
-          write_fail_run = 0;
-        } else {
+        ok = dev->WriteTsf(now + (uint64_t)d.write_us);
+        loop.wrote(ok);
+        if (!ok) {
           // The counter may be half-updated: its axis is no longer the one the
-          // fit window was built on. Drop the fit and the ledger and re-anchor
-          // from fresh samples; give up if the device keeps refusing.
+          // fit window was built on; the loop dropped the fit and re-anchors
+          // from fresh samples. Give up if the device keeps refusing.
           fprintf(stderr, "WriteTsf failed (TSF now 0x%016llx) — refitting\n",
                   (unsigned long long)dev->ReadTsf());
-          pts.clear();
-          init = false;
-          S = 0;
-          integ = 0;
-          if (++write_fail_run >= 3) {
+          if (loop.write_fail_run() >= 3) {
             fprintf(stderr, "3 consecutive TSF write failures — stopping\n");
             break;
           }
         }
       }
-      if (n > settle) locked.push_back(e);
+      if (n > settle) locked.push_back(d.phase_err_us);
       printf("{\"ev\":\"ptptsf\",\"i\":%ld,\"phase_us\":%.1f,\"step_us\":%lld,"
              "\"ok\":%d,\"ppm\":%.2f,\"bracket_us\":%.1f}\n",
-             n, e, (long long)step, ok ? 1 : 0, (a - 1.0) * 1e6, last_bracket);
+             n, d.phase_err_us, (long long)d.step_us, ok ? 1 : 0, d.ppm, last_bracket);
       fflush(stdout);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(loop_ms));
@@ -263,7 +218,7 @@ int main(int argc, char **argv) {
     std::sort(ab.begin(), ab.end());
     printf("{\"ev\":\"ptptsf.summary\",\"bdf\":\"%s\",\"axis\":\"%s\",\"n\":%zu,"
            "\"rejected\":%ld,\"rms_us\":%.2f,\"p95_abs_us\":%.1f,\"max_abs_us\":%.1f}\n",
-           bdf, use_fr ? "freerun" : "ledger", locked.size(), rejected,
+           bdf, use_fr ? "freerun" : "ledger", locked.size(), (long)loop.rejected(),
            std::sqrt(ss / locked.size()), ab[ab.size() * 95 / 100], ab.back());
     fflush(stdout);
   }

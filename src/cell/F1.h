@@ -79,6 +79,8 @@ constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
 constexpr size_t kMaxUes = kMaxUesPerCell;
 constexpr size_t kMaxHeard = 64;
+/* Every UE of a full cell with a full MR (serving + kMaxNeighbours). */
+constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 256 */
 
 enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
@@ -303,7 +305,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
   using namespace detail;
   if (r.fixed.size() > kMaxFixed || r.positions.size() > kMaxPositions ||
       r.ues.size() > kMaxUes || r.heard.size() > kMaxHeard || r.meas.size() > kMaxUes ||
-      r.ue_meas.size() > kMaxHeard)
+      r.ue_meas.size() > kMaxUeMeas)
     return {};
   auto m = head(Type::Report);
   put(m, r.du, 2);
@@ -412,7 +414,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     x.meas.push_back(q);
   }
   const size_t nu = r.get(1);
-  if (nu > kMaxHeard)
+  if (nu > kMaxUeMeas)
     return std::nullopt;
   for (size_t i = 0; i < nu && r.ok; ++i) {
     UeCellMeas q;

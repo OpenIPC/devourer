@@ -187,8 +187,8 @@ time, and a neighbour's on another channel in a measurement gap
 (`src/cell/MeasGap.h`).
 
 **Where to listen.** The CU sends each DU its neighbours' channels and TBTT
-phases (F1 `Neighbours`, every round). The DU airs them as offsets on its
-own grid, in a tagged NL IE:
+phases (F1 `Neighbours`, every round). Every synced DU airs them as offsets
+on its own grid, in a tagged NL IE with a generation, empty lists included:
 
     offset = (phase_neighbour − phase_serving) mod P
 
@@ -196,35 +196,72 @@ On the shared timebase a neighbour's beacon always falls at that offset of
 the UE's serving superframe, so the UE needs nothing beyond its serving
 clock.
 
-**The gap.** Every `CELL_UE_GAP_SF` (10) superframes, for one other-channel
-neighbour in turn, the UE computes `gap_window()`:
+- **Newer only:** a UE takes only a list generation at least as new as the
+  last it accepted.
+- **Clearing:** it drops a list not heard for 3 s, and clears it on a
+  handover.
+- **Provenance:** the NL's tag is also what lets a UE count a beacon as a
+  measurement of a cell. A frame merely carrying a cell-shaped address is not
+  measured.
+- **Residual risk:** a genuine beacon replayed by someone else, which is
+  only ever the real cell's beacon at the replayer's power.
+
+**The gap.** Each measurable other-channel neighbour is revisited every
+`CELL_UE_GAP_SF` (10) superframes; with several, the gaps are spaced
+accordingly. For each, the UE computes `gap_window()`:
 
     [offset − retune − guard, offset + beacon + retune + guard)
 
 The window must clear the serving beacon and the UE's own DL and UL slots.
-The retune budget is the last measured retune. If the window fits, the UE
-retunes there (`FastRetune`), its RX path hears the neighbour's beacon, and
-it retunes back. If it does not fit, the UE skips that neighbour
-(`cell.ue.gap_skip`): no slot is ever sacrificed.
 
-**Reports.** The UE L3-filters every cell beacon it hears, serving or
-neighbour, and reports the filtered RSSI/SNR in a tagged MR IE in its uplink
-beacon, refreshed each `CELL_UE_MR_MS` (1 s). The serving DU relays it over
-F1 (`Report.ue_meas`, with ages).
+- **Retune bound:** both retunes are planned with a conservative bound,
+  `CELL_UE_GAP_RETUNE_US` (30 ms), raised by any slower retune measured. A
+  band change, which takes the full channel path, never gets a gap.
+- **No fit:** the UE skips that neighbour (`cell.ue.gap_skip`), parks it, and
+  re-checks it rarely. No slot is ever sacrificed.
+- **Late wake-up:** if the UE wakes for a gap later than half the guard, it
+  skips it (`cell.ue.gap_late`).
+- **Outbound overrun:** an overrun shortens the listening, never the return
+  budget.
+- **Failed return:** a return that fails is retried. If it still fails, the
+  beacon is stopped and the normal retune path recovers
+  (`cell.ue.gap_return_fail`).
+- **TSF steps after a gap:** these wait 4 superframes. On the rig, the only
+  uplink losses seen with gaps (twice, two beacons each, in 10 runs) followed
+  a gap with a TA step in the next pass; the 20 gaps without one lost
+  nothing. The mechanism is not established. With the hold, 8 runs and 21
+  gaps lost none.
 
-**The A3 on UE reports.** For a UE that reports, the CU's A3 compares
-downlink with downlink: the serving beacon against the neighbours' (metric
-`ue_rssi`). Otherwise it falls back to what the DUs hear.
+**Reports.** The UE L3-filters every authenticated cell beacon it hears,
+serving or neighbour. It reports the filtered RSSI/SNR, with each entry's
+sample age, in a tagged MR IE in its uplink beacon, refreshed each
+`CELL_UE_MR_MS` (1 s).
+- **Freshness:** the MR's generation is the serving superframe, strictly
+  increasing. The DU takes only a generation newer than the last and near
+  its own count, so a replayed report is refused.
+- **Relay:** the DU forwards it over F1 (`Report.ue_meas`). Ages are sample
+  age plus report age, each UE's serving entry goes first, and the cap is
+  216, whole UEs only.
 
-**Rig result** (testrig `scripts/m6_measgap.sh`, 5 runs). Cell 1 is on
+**The A3 on UE reports.** For each neighbour, the CU's A3 uses one
+comparable pair:
+- the UE's own (serving beacon, neighbour beacon) when the MR has both
+  (metric `ue_rssi`);
+- otherwise the DUs' (serving uplink, neighbour-heard uplink).
+
+The A3 runs on the margins, so a neighbour the UE did not report keeps its
+DU-heard evidence.
+
+**Rig result** (testrig `scripts/m6_measgap.sh`; 5 runs, and 8 on the final
+code). Cell 1 is on
 ch149 at phase 0; cell 2 is on ch157 at phase 60000 µs, so its beacon falls
 in an idle part of cell 1's grid. The A3 runs at its **defaults** (offset
-3 dB, hysteresis 1 dB, time-to-trigger 640 ms), with nothing forced. All 5
-runs pass.
+3 dB, hysteresis 1 dB, time-to-trigger 640 ms), with nothing forced. All
+pass.
 
 | KPI | min | median | max |
 |---|---|---|---|
-| gap deaf time (14 gaps) | 53.7 ms | 53.9 ms | 56.6 ms |
+| gap deaf time (21 gaps, final code: 30 ms retune bound + 3 ms guard) | 60.0 ms | 60.1 ms | 60.2 ms |
 | neighbour beacon in gaps | −46 dBm | −46 dBm | −46 dBm |
 | A3 held before firing | 1002 ms | 1024 ms | 1024 ms |
 | switch after the network instant (the UE's poll latency) | 21 ms | 21 ms | 28 ms |
@@ -352,6 +389,11 @@ superframe when there is nothing to serve.
 - **Measurement-gap scheduling:** a gap goes only where it clears the UE's
   own slots, so some phase layouts leave a neighbour unmeasurable. Placing
   cells' phases so every pair can measure each other is a CU planning task.
+- **No crossing test:** every handover result here is from stationary UEs.
+  The trigger is either forced or the measured standing difference between
+  two cells. No A→B path-loss ramp has been run, so none of these numbers
+  validates a crossing. An emulated crossing (the source DU ramping its TX
+  power, which its beacons follow) is the way to get one.
 - **Security context:** the cells share one key on the rig (`CELL_PSK`).
   Pre-staging a per-cell context (802.11r-style) is open.
 - **EVM:** not in the measurement reports.

@@ -906,11 +906,13 @@ int run_du(IRadio *dev, const Cfg &c) {
    * grid (aired in the NL IE), and what each own UE reported measuring (its
    * MR IE), relayed in Report.ue_meas. */
   std::vector<devourer::cell::Neighbour> nb_list;
+  uint32_t nl_gen = 1; /* bumped whenever the list changes (UEs refuse older) */
   bool have_nb_seq = false;
   uint64_t last_nb_seq = 0;
   struct UeReport {
     std::vector<devourer::cell::MeasEntryUe> m;
     int64_t at_ms = 0;
+    uint32_t gen = 0;
   };
   std::map<uint16_t, UeReport> ue_reports;
   std::map<uint16_t, HoOut> ho_out; /* by (source) UE id */
@@ -1033,8 +1035,17 @@ int run_du(IRadio *dev, const Cfg &c) {
         }
         forward_ul(c.cell, ub->ue, p); /* the serving path: always (F1 on) */
         if (auto mr = devourer::cell::find_mr_ie(p.Data.data(), p.Data.size(), c.cell, ub->ue, auth)) {
+          /* Fresh only: a generation newer than the last one taken from this
+           * UE, and near this DU's own superframe count (a replayed old
+           * report is refused). */
+          const auto at = rx_tsf(p.RxAtrib.tsfl);
+          const uint32_t sf_now = at ? static_cast<uint32_t>(*at / P) : 0;
           std::lock_guard<std::mutex> lk(f1_mu);
-          ue_reports[ub->ue] = {*mr, now_ms()};
+          auto &ur = ue_reports[ub->ue];
+          const bool newer = ur.at_ms == 0 || static_cast<int32_t>(mr->gen - ur.gen) > 0;
+          const bool near = at && std::abs(static_cast<int32_t>(mr->gen - sf_now)) < 100;
+          if (newer && near)
+            ur = {mr->cells, now_ms(), mr->gen};
         }
       }
       /* The UL slot of the grant the UE runs (by the epoch it reports). */
@@ -1153,19 +1164,33 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.positions = layout.positions;
             r.ues = f1_view.ues;
             f1::fill_report_measurements(r, c.cell, meas_tab.snapshot(now_ms()));
-            /* The UEs' own measurements (their MR IEs), with the report age. */
+            /* The UEs' own measurements (their MR IEs): each entry's age is its
+             * sample's plus the report's since; each UE's serving entry first,
+             * whole UEs only against the cap (a truncation is logged). */
+            size_t dropped_ues = 0;
             for (auto it = ue_reports.begin(); it != ue_reports.end();) {
-              const int64_t age = now_ms() - it->second.at_ms;
-              if (age > 10000) {
+              const int64_t rep_age = now_ms() - it->second.at_ms;
+              if (it->second.at_ms == 0 || rep_age > 10000) {
                 it = ue_reports.erase(it);
                 continue;
               }
-              for (const auto &e : it->second.m)
-                if (r.ue_meas.size() < f1::kMaxHeard)
-                  r.ue_meas.push_back({it->first, e.cell, static_cast<int16_t>(e.rssi_dbm * 4),
-                                       static_cast<int16_t>(e.snr_db * 4),
-                                       static_cast<uint16_t>(std::min<int64_t>(age, 65535))});
+              std::vector<f1::UeCellMeas> mine;
+              for (int serving_pass = 1; serving_pass >= 0; --serving_pass)
+                for (const auto &e : it->second.m)
+                  if ((e.cell == c.cell) == (serving_pass == 1))
+                    mine.push_back({it->first, e.cell, static_cast<int16_t>(e.rssi_dbm * 4),
+                                    static_cast<int16_t>(e.snr_db * 4),
+                                    static_cast<uint16_t>(std::min<int64_t>(e.age_ms + rep_age, 65535))});
+              if (r.ue_meas.size() + mine.size() <= f1::kMaxUeMeas)
+                r.ue_meas.insert(r.ue_meas.end(), mine.begin(), mine.end());
+              else
+                ++dropped_ues;
               ++it;
+            }
+            if (dropped_ues) {
+              char l[120];
+              snprintf(l, sizeof l, "{\"ev\":\"cell.f1.ue_meas_truncated\",\"ues\":%zu}", dropped_ues);
+              emit(l);
             }
             if (f1_view.net_sf < 0) /* no network superframe yet: nothing to plan on */
               r.ues.clear();
@@ -1214,7 +1239,10 @@ int run_du(IRadio *dev, const Cfg &c) {
             continue; /* a replay or reordering */
           have_nb_seq = true;
           last_nb_seq = nb->seq;
-          nb_list = std::move(v);
+          if (v != nb_list) {
+            nb_list = std::move(v);
+            ++nl_gen;
+          }
           continue;
         }
         if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::Handover) {
@@ -1521,6 +1549,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     bool cu_alive = true;
     std::optional<devourer::cell::f1::Schedule> f1_due;
     std::vector<devourer::cell::Neighbour> nb_snap;
+    uint32_t nl_gen_snap = 0;
     std::map<uint16_t, HoIn> ho_in_snap;
     std::map<uint16_t, HoOut> ho_out_snap;
     std::set<uint16_t> ho_cancel_snap;
@@ -1534,6 +1563,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       for (auto it = daps_ids.begin(); it != daps_ids.end();)
         it = it->second < sf ? daps_ids.erase(it) : std::next(it);
       nb_snap = nb_list;
+      nl_gen_snap = nl_gen;
       ho_in_snap = ho_in;
       ho_out_snap = ho_out;
       /* Kept until the live map no longer has the UE (a deferred or failed
@@ -1859,10 +1889,12 @@ int run_du(IRadio *dev, const Cfg &c) {
         emit(l);
       }
     }
-    /* The neighbour list rides the beacon too (only on the shared timebase:
-     * its offsets are network-time facts). */
-    if (synced && !nb_snap.empty()) {
-      const auto nl = devourer::cell::encode_nl_ie(c.cell, nb_snap, auth);
+    /* The neighbour list rides every beacon on the shared timebase (its
+     * offsets are network-time facts), with zero entries too: it is how UEs
+     * learn a list went away, and its tag is what proves a beacon is this
+     * cell's to anyone measuring it. */
+    if (synced && f1_on) {
+      const auto nl = devourer::cell::encode_nl_ie(c.cell, nl_gen_snap, nb_snap, auth);
       ho_ies.insert(ho_ies.end(), nl.begin(), nl.end());
     }
     if (changed || rar_now != rar_on_air || ho_ies != ho_on_air) {
@@ -2075,6 +2107,17 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * the serving DU airs, and the UE's own filtered beacon measurements
    * (serving and neighbours), reported in its uplink beacon (MR IE). */
   std::vector<devourer::cell::Neighbour> nbrs;
+  int64_t nbrs_ms = 0;    /* when the serving DU's NL was last heard */
+  uint32_t nbrs_gen = 0;  /* the newest NL generation accepted (this serving cell) */
+  bool have_nbrs_gen = false;
+  uint32_t mr_gen = 0;    /* the MR generation (strictly increasing) */
+  /* Gap scheduling: the retune bound both retunes are planned with (the
+   * configured floor, raised by any slower retune measured), and neighbours
+   * parked after skipping (no slot clear for them) until a superframe. */
+  const int64_t gap_retune_floor_us = envl("CELL_UE_GAP_RETUNE_US", 30000, 1000, 500000);
+  int64_t gap_retune_us = gap_retune_floor_us;
+  std::map<uint16_t, int64_t> gap_parked;
+  int64_t no_step_until_sf = -1; /* hold TSF steps until this superframe (after a gap) */
   devourer::cell::MeasTable ue_meas(devourer::cell::L3FilterConfig{
       static_cast<int>(envl("CELL_MEAS_L3_K", 4, 0, 19)), envl("CELL_MEAS_STALE_MS", 3000, 100, 60000)});
   const int64_t gap_every_sf = envl("CELL_UE_GAP_SF", 10, 0, 100000); /* 0 = no gaps */
@@ -2142,10 +2185,23 @@ int run_ue(IRadio *dev, const Cfg &c) {
         /* Any cell DU's beacon (02:ce:11:<cell>:00): the UE's measurement of
          * that cell — its serving one, a same-channel neighbour, or one heard
          * in a measurement gap. */
-        if (p.Data[10] == 0x02 && p.Data[11] == 0xce && p.Data[12] == 0x11 && p.Data[15] == 0)
-          ue_meas.update(static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]), 0,
-                         static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
-                         static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, ue_ms());
+        /* Only a beacon that proves it is that cell's (its tagged NL IE) is
+         * measured: a frame merely carrying a cell-shaped address is not. */
+        if (p.Data[10] == 0x02 && p.Data[11] == 0xce && p.Data[12] == 0x11 && p.Data[15] == 0) {
+          const uint16_t bc = static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]);
+          if (auto nl = devourer::cell::find_nl_ie(p.Data.data(), p.Data.size(), bc, auth)) {
+            ue_meas.update(bc, 0, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
+                           static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, ue_ms());
+            /* The serving cell's list: only a generation not older than the
+             * one accepted (a replayed older list is refused). */
+            if (bc == cell_a.load() && (!have_nbrs_gen || nl->gen >= nbrs_gen)) {
+              nbrs = nl->cells;
+              nbrs_gen = nl->gen;
+              have_nbrs_gen = true;
+              nbrs_ms = ue_ms();
+            }
+          }
+        }
         if (std::memcmp(p.Data.data() + 10, du_mac, 6) != 0) {
           /* The handover target's beacons: its grant maps, buffered for the
            * switch (they do not feed the clock: that is the source's until
@@ -2169,8 +2225,6 @@ int run_ue(IRadio *dev, const Cfg &c) {
           emit(l);
         }
         sync.Add(*eg, p.RxAtrib.tsfl);
-        if (auto nl = devourer::cell::find_nl_ie(p.Data.data(), p.Data.size(), cell_a.load(), auth))
-          nbrs = *nl;
         if (me_a > 0)
           if (auto h = devourer::cell::find_ho_ie(p.Data.data(), p.Data.size(), cell_a.load(),
                                                   static_cast<uint16_t>(me_a.load()), auth))
@@ -2248,7 +2302,6 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int64_t next_mr_ms = 0;
   int64_t next_gap_sf = -1; /* the superframe of the next measurement gap */
   size_t gap_rr = 0;        /* round-robin over the other-channel neighbours */
-  int64_t last_retune_us = 25000; /* the gap budget: the last measured retune */
   while (std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     uint64_t t = 0, f = 0;
@@ -2295,6 +2348,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
         rxr_source = rxr;
         rxr = *rxr_target;
         rxr_target.reset();
+        nbrs.clear(); /* the new serving cell airs its own list */
+        have_nbrs_gen = false;
+        gap_parked.clear();
         ho_pending.reset();
         hrx = HarqReceiver{}; /* the target's DL sequence space */
         force_beacon = true;
@@ -2333,6 +2389,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
           if (rxr_source)
             rxr = *rxr_source;
           rxr_source.reset();
+          nbrs.clear();
+          have_nbrs_gen = false;
+          gap_parked.clear();
           ho_back.reset();
           hrx = HarqReceiver{};
           force_beacon = true;
@@ -2586,10 +2645,15 @@ int run_ue(IRadio *dev, const Cfg &c) {
           for (const auto &e : ue_meas.snapshot(ue_ms()))
             if (mr.size() < devourer::cell::kMaxNeighbours + 1)
               mr.push_back({e.cell, static_cast<int8_t>(std::lround(std::clamp(e.rssi_dbm, -128.0, 127.0))),
-                            static_cast<int8_t>(std::lround(std::clamp(e.snr_db, -128.0, 127.0)))});
+                            static_cast<int8_t>(std::lround(std::clamp(e.snr_db, -128.0, 127.0))),
+                            static_cast<uint16_t>(std::clamp<int64_t>(e.age_ms, 0, 65535))});
         }
         if (!mr.empty()) {
-          const auto ie = devourer::cell::encode_mr_ie(cell_a.load(), static_cast<uint16_t>(me), mr, auth);
+          /* Its generation: the serving superframe, strictly increasing (the
+           * DU refuses anything not newer, and far from its own count). */
+          mr_gen = std::max(mr_gen + 1, static_cast<uint32_t>(du_now / P));
+          const auto ie =
+              devourer::cell::encode_mr_ie(cell_a.load(), static_cast<uint16_t>(me), mr_gen, mr, auth);
           b.insert(b.end(), ie.begin(), ie.end());
         }
       }
@@ -2614,7 +2678,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
       }
     }
     const int64_t step = ue_tsf_step(static_cast<int64_t>(t), du_now, ul_off, g->ta_us, P, 2);
-    if (step != 0) {
+    /* No TSF step right after a measurement gap: on the rig, both uplink
+     * losses seen with gaps (two beacons each) followed a gap with a step
+     * in the next pass; 20 gaps without one lost nothing. The mechanism is
+     * not established; the step simply waits a few superframes. */
+    if (step != 0 && du_now / P < no_step_until_sf) {
+    } else if (step != 0) {
       /* The offset changes only on a write, so the loop's (t, f) pair gives
        * the offset this step must produce. */
       const int64_t want_off = static_cast<int64_t>(t) - static_cast<int64_t>(f) + step;
@@ -2653,80 +2722,133 @@ int run_ue(IRadio *dev, const Cfg &c) {
       emit(l);
     }
     /* A measurement gap (MeasGap.h): for a neighbour on ANOTHER channel,
-     * every gap_every_sf superframes, if a window around its beacon fits
-     * clear of the serving beacon and this UE's own DL/UL slots. The UE
+     * each revisited every gap_every_sf superframes, if a window around its
+     * beacon fits clear of the serving beacon and this UE's own DL/UL slots
+     * — planned with a CONSERVATIVE retune bound for both retunes. The UE
      * retunes there, hears the beacon (the RX path measures it), retunes
-     * back. Never during a handover. */
+     * back. Never during a handover; never across bands (the full channel
+     * path); skipped if it wakes late; listening cut short if the outbound
+     * retune overran into the return budget. */
     if (gap_every_sf > 0 && !ho_pending && !ho_back) {
       std::vector<devourer::cell::Neighbour> other;
+      const int64_t sfn = du_now / P;
       {
         std::lock_guard<std::mutex> lk(mu);
-        for (const auto &n : nbrs)
-          if (n.channel != 0 && n.channel != cur_ch)
+        if (ue_ms() - nbrs_ms > 3000) /* no list heard lately: none */
+          nbrs.clear();
+        for (const auto &n : nbrs) {
+          auto pk = gap_parked.find(n.cell);
+          if (n.channel != 0 && n.channel != cur_ch && (pk == gap_parked.end() || sfn >= pk->second))
             other.push_back(n);
+        }
       }
-      const int64_t sfn = du_now / P;
+      /* Each measurable neighbour every gap_every_sf: one gap per
+       * gap_every_sf / n superframes (at least 2 apart). */
+      const int64_t every =
+          std::max<int64_t>(2, gap_every_sf / static_cast<int64_t>(std::max<size_t>(1, other.size())));
       if (next_gap_sf < 0)
-        next_gap_sf = sfn + gap_every_sf;
+        next_gap_sf = sfn + every;
       if (!other.empty() && sfn >= next_gap_sf) {
-        next_gap_sf = sfn + gap_every_sf;
-        const auto &n = other[gap_rr++ % other.size()];
+        next_gap_sf = sfn + every;
+        const auto n = other[gap_rr++ % other.size()];
         const auto &sl = grid->slots();
         const std::vector<devourer::cell::GridSpan> busy = {
             {0, c.bcn_us},
             {sl[g->dl_slot].start_us, sl[g->dl_slot].len_us},
             {sl[g->ul_slot].start_us, sl[g->ul_slot].len_us}};
-        const auto w = devourer::cell::gap_window(n.offset_us, 500, last_retune_us, gap_guard_us, P, busy);
-        char l[240];
+        const bool cross_band = (cur_ch <= 14) != (n.channel <= 14);
+        const auto w = cross_band ? std::nullopt
+                                  : devourer::cell::gap_window(n.offset_us, 500, gap_retune_us,
+                                                               gap_guard_us, P, busy);
+        char l[300];
         if (!w) {
+          gap_parked[n.cell] = sfn + 50 * every; /* rarely re-checked */
           snprintf(l, sizeof l,
-                   "{\"ev\":\"cell.ue.gap_skip\",\"ue\":%d,\"cell\":%u,\"offset_us\":%d}",
-                   me, n.cell, n.offset_us);
+                   "{\"ev\":\"cell.ue.gap_skip\",\"ue\":%d,\"cell\":%u,\"offset_us\":%d,"
+                   "\"why\":\"%s\"}",
+                   me, n.cell, n.offset_us, cross_band ? "band" : "slots");
           emit(l);
         } else {
-          /* The window in the NEXT superframe, on the serving clock. */
+          gap_parked.erase(n.cell);
           const int64_t start = (sfn + 1) * P + w->start;
-          /* The serving clock NOW (this pass has spent time since du_now). */
-          int64_t now_du = du_now;
-          if (uint64_t t3 = 0, f3 = 0; dev->ReadTsfAndFreeRun(t3, f3)) {
+          auto serving_now = [&]() -> std::optional<int64_t> {
+            uint64_t t3 = 0, f3 = 0;
+            if (!dev->ReadTsfAndFreeRun(t3, f3))
+              return std::nullopt;
             std::lock_guard<std::mutex> lk(mu);
-            now_du = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f3))));
-          }
-          const int64_t wait = start - now_du;
+            return sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f3))));
+          };
+          const auto now_du = serving_now();
+          const int64_t wait = now_du ? start - *now_du : -1;
           if (wait > 0 && wait < 2 * P) {
             std::this_thread::sleep_for(std::chrono::microseconds(wait));
-            const auto g0 = std::chrono::steady_clock::now();
-            bool ok = true;
-            try {
-              dev->FastRetune(n.channel);
-            } catch (const std::exception &) {
-              ok = false;
+            /* Woke late? The window was checked for its planned start only. */
+            const auto woke = serving_now();
+            const int64_t late = woke ? *woke - start : gap_guard_us;
+            if (late > gap_guard_us / 2) {
+              snprintf(l, sizeof l,
+                       "{\"ev\":\"cell.ue.gap_late\",\"ue\":%d,\"cell\":%u,\"late_us\":%lld}",
+                       me, n.cell, (long long)late);
+              emit(l);
+            } else {
+              const auto g0 = std::chrono::steady_clock::now();
+              /* The window's end on this clock: the radio must be back by it. */
+              const auto win_end = g0 + std::chrono::microseconds(w->len - std::max<int64_t>(0, late));
+              bool out_ok = true;
+              try {
+                dev->FastRetune(n.channel);
+              } catch (const std::exception &) {
+                out_ok = false;
+              }
+              const auto g1 = std::chrono::steady_clock::now();
+              /* Listen until the beacon has passed, but never into the return
+               * budget (an outbound overrun shortens the listening). */
+              const auto listen_until = win_end - std::chrono::microseconds(gap_retune_us);
+              if (out_ok && g1 < listen_until)
+                std::this_thread::sleep_until(listen_until);
+              const auto g1b = std::chrono::steady_clock::now();
+              /* Back: retried; a radio that will not return is handed to the
+               * normal retune path (beacon stopped, never on the wrong channel). */
+              bool back_ok = false;
+              for (int k = 0; k < 3 && !back_ok; ++k) {
+                try {
+                  dev->FastRetune(cur_ch);
+                  back_ok = true;
+                } catch (const std::exception &) {
+                }
+              }
+              const auto g2 = std::chrono::steady_clock::now();
+              if (!back_ok) {
+                if (beaconing && dev->StopBeacon())
+                  beaconing = false;
+                retune_to = cur_ch;
+                snprintf(l, sizeof l, "{\"ev\":\"cell.ue.gap_return_fail\",\"ue\":%d,\"ch\":%u}",
+                         me, cur_ch);
+                emit(l);
+              }
+              const int64_t out_us = std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count();
+              const int64_t back_us = std::chrono::duration_cast<std::chrono::microseconds>(g2 - g1b).count();
+              no_step_until_sf = du_now / P + 4; /* see the TSF step below */
+              /* The bound only grows with what was measured (never below the floor). */
+              gap_retune_us = std::max({gap_retune_floor_us, gap_retune_us, out_us, back_us});
+              std::optional<devourer::cell::MeasEntry> got;
+              {
+                std::lock_guard<std::mutex> lk(mu);
+                for (const auto &e : ue_meas.snapshot(ue_ms()))
+                  if (e.cell == n.cell && e.age_ms <= (g2 - g0) / std::chrono::milliseconds(1) + 1)
+                    got = e;
+              }
+              snprintf(l, sizeof l,
+                       "{\"ev\":\"cell.ue.gap\",\"ue\":%d,\"cell\":%u,\"channel\":%u,"
+                       "\"heard\":%d,\"rssi\":%.1f,\"deaf_us\":%lld,\"out_us\":%lld,"
+                       "\"back_us\":%lld,\"over_us\":%lld,\"ok\":%d}",
+                       me, n.cell, n.channel, got ? 1 : 0, got ? got->rssi_dbm : 0.0,
+                       (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - g0).count(),
+                       (long long)out_us, (long long)back_us,
+                       (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - win_end).count(),
+                       out_ok && back_ok ? 1 : 0);
+              emit(l);
             }
-            const auto g1 = std::chrono::steady_clock::now();
-            if (ok)
-              last_retune_us = std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count();
-            /* Listen until the beacon has passed (+ the guard). */
-            std::this_thread::sleep_until(g0 + std::chrono::microseconds(w->len - last_retune_us));
-            try {
-              dev->FastRetune(cur_ch);
-            } catch (const std::exception &) {
-              ok = false;
-            }
-            const auto g2 = std::chrono::steady_clock::now();
-            std::optional<devourer::cell::MeasEntry> got;
-            {
-              std::lock_guard<std::mutex> lk(mu);
-              for (const auto &e : ue_meas.snapshot(ue_ms()))
-                if (e.cell == n.cell && e.age_ms <= (g2 - g0) / std::chrono::milliseconds(1) + 1)
-                  got = e;
-            }
-            snprintf(l, sizeof l,
-                     "{\"ev\":\"cell.ue.gap\",\"ue\":%d,\"cell\":%u,\"channel\":%u,"
-                     "\"heard\":%d,\"rssi\":%.1f,\"deaf_us\":%lld,\"ok\":%d}",
-                     me, n.cell, n.channel, got ? 1 : 0, got ? got->rssi_dbm : 0.0,
-                     (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - g0).count(),
-                     ok ? 1 : 0);
-            emit(l);
           }
         }
       }

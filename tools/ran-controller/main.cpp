@@ -572,40 +572,48 @@ int main() {
         for (const f1::UeMeas &q : dit->second.rep.meas) {
           if (!live(dit->second, q.age_ms))
             continue; /* no valid serving measurement: handled below */
-          double serving = metric == "rssi" ? q.rssi_qdbm / 4.0 : q.snr_qdb / 4.0;
-          std::map<uint16_t, std::optional<double>> neigh;
-          /* The UE's own measurements (its MR IE, relayed by this DU) when it
-           * reports them: the serving cell's beacon against the neighbours'
-           * (heard in measurement gaps on other channels) — comparable, and
-           * the only evidence across channels. Else what the DUs hear. */
-          bool ue_reported = false;
+          /* Per neighbour, ONE comparable pair: the UE's own (serving beacon,
+           * neighbour beacon) when its MR has both, else the DUs' (serving
+           * uplink, neighbour-heard uplink). The A3 sees margins (neighbour -
+           * serving; the A3 condition depends on the difference only), so a
+           * neighbour the UE did not report keeps its DU-heard evidence. */
+          auto val = [&](int16_t qdb_rssi, int16_t qdb_snr) {
+            return metric == "rssi" ? qdb_rssi / 4.0 : qdb_snr / 4.0;
+          };
+          const double serving_du = val(q.rssi_qdbm, q.snr_qdb);
+          std::optional<double> serving_ue;
           for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
-            if (m.ue == q.ue && m.cell == cell && live(dit->second, m.age_ms)) {
-              serving = metric == "rssi" ? m.rssi_qdbm / 4.0 : m.snr_qdb / 4.0;
-              ue_reported = true;
-            }
-          if (ue_reported) {
-            for (long oid : expected)
-              if (oid != cell)
-                neigh[static_cast<uint16_t>(oid)] = std::nullopt;
-            for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
-              if (m.ue == q.ue && m.cell != cell && neigh.count(m.cell) &&
-                  live(dit->second, m.age_ms))
-                neigh[m.cell] = metric == "rssi" ? m.rssi_qdbm / 4.0 : m.snr_qdb / 4.0;
-          }
+            if (m.ue == q.ue && m.cell == cell && live(dit->second, m.age_ms))
+              serving_ue = val(m.rssi_qdbm, m.snr_qdb);
+          struct Pair {
+            double s, t;
+            bool ue;
+          };
+          std::map<uint16_t, Pair> pairs;
+          std::map<uint16_t, std::optional<double>> neigh;
           for (long oid : expected) {
-            if (ue_reported)
-              break;
             if (oid == cell)
               continue;
-            std::optional<double> v;
-            auto oit = dus.find(static_cast<uint16_t>(oid));
-            if (oit != dus.end())
+            const auto o = static_cast<uint16_t>(oid);
+            std::optional<double> ue_v, du_v;
+            if (serving_ue)
+              for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
+                if (m.ue == q.ue && m.cell == o && live(dit->second, m.age_ms))
+                  ue_v = val(m.rssi_qdbm, m.snr_qdb);
+            if (auto oit = dus.find(o); oit != dus.end())
               for (const f1::HeardUe &h : oit->second.rep.heard)
                 if (h.cell == cell && h.ue == q.ue && live(oit->second, h.age_ms))
-                  v = metric == "rssi" ? h.rssi_dbm : h.snr_db;
-            neigh[static_cast<uint16_t>(oid)] = v; /* absent or expired: no evidence */
+                  du_v = metric == "rssi" ? h.rssi_dbm : h.snr_db;
+            if (ue_v)
+              pairs[o] = {*serving_ue, *ue_v, true};
+            else if (du_v)
+              pairs[o] = {serving_du, *du_v, false};
+            if (pairs.count(o))
+              neigh[o] = pairs[o].t - pairs[o].s;
+            else
+              neigh[o] = std::nullopt; /* absent or expired: no evidence */
           }
+          const double serving = 0.0; /* margins */
           const auto key = std::make_pair(cell, q.ue);
           /* A just-moved UE's old key: the source's last (stale) reports must
            * not trigger again. Time-bound (stale window + release + a report),
@@ -630,8 +638,8 @@ int main() {
               log_clear(q.ue, cell, *st.firing, tgt ? "retarget" : "condition");
             if (tgt) {
               const auto since = st.a3.holding_since(*tgt);
-              log_candidate(q.ue, cell, *tgt, serving, neigh.at(*tgt).value_or(0),
-                            since ? tms - *since : 0, ue_reported);
+              const Pair &pp = pairs.at(*tgt);
+              log_candidate(q.ue, cell, *tgt, pp.s, pp.t, since ? tms - *since : 0, pp.ue);
             }
           }
           st.firing = tgt;

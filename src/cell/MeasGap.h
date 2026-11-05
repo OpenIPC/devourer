@@ -10,15 +10,21 @@
  *     offset = (phase_neighbour - phase_serving) mod P,
  * so the UE needs nothing beyond its serving clock.
  *
- *   NL IE (the serving DU's beacon; the CU's neighbour list, F1 Neighbours):
- *     'N' 'L' ver(1)=1 cell(2) n(1) n x {cell(2) channel(1) offset_us(4)}
- *     crc16(2) tag(8)
+ *   NL IE (every synced DU beacon, also with zero entries; the CU's list):
+ *     'N' 'L' ver(1)=2 cell(2) gen(4) n(1) n x {cell(2) channel(1)
+ *     offset_us(4)} crc16(2) tag(8)
  *   MR IE (the UE's uplink beacon; relayed by the serving DU over F1):
- *     'M' 'R' ver(1)=1 cell(2) ue(2) n(1) n x {cell(2) rssi_dbm(1, signed)
- *     snr_db(1, signed)} crc16(2) tag(8)
+ *     'M' 'R' ver(1)=2 cell(2) ue(2) gen(4) n(1) n x {cell(2)
+ *     rssi_dbm(1, signed) snr_db(1, signed) age_ms(2)} crc16(2) tag(8)
  * Both carry the CRC (a torn body) and the cell key's tag (labels 'N' / 'M',
- * as the other scheduling frames), so a forged list cannot send UEs deaf, and
- * a forged report cannot steer a handover.
+ * as the other scheduling frames): a forged list or report is inert.
+ * Freshness: `gen` is covered by the tag and only moves forward — the NL's
+ * per DU (a new list), the MR's per UE (each report, its serving superframe)
+ * — so a replayed older list or report is refused by its receiver; an MR
+ * entry's age is its sample's, so the CU never takes an expired sample for
+ * a fresh one. Provenance: a UE counts a beacon as a measurement of a cell
+ * only if it carries that cell's valid NL IE. The residual: a genuine beacon
+ * replayed by someone else (only the real cell's, at the replayer's power).
  *
  * gap_window(): where in its superframe a UE may go deaf for one neighbour
  * beacon — [offset - retune - guard, offset + beacon + retune + guard) — or
@@ -41,8 +47,8 @@
 
 namespace devourer::cell {
 
-constexpr uint8_t kNlVersion = 1;
-constexpr uint8_t kMrVersion = 1;
+constexpr uint8_t kNlVersion = 2;
+constexpr uint8_t kMrVersion = 2;
 constexpr size_t kMgTagLen = 8;
 constexpr size_t kMaxNeighbours = 8;
 
@@ -57,7 +63,18 @@ struct MeasEntryUe {
   uint16_t cell = 0;
   int8_t rssi_dbm = 0;
   int8_t snr_db = 0;
+  uint16_t age_ms = 0; /* the sample's, at report time (saturates) */
   bool operator==(const MeasEntryUe &) const = default;
+};
+struct NlIe {
+  uint32_t gen = 0;
+  std::vector<Neighbour> cells;
+  bool operator==(const NlIe &) const = default;
+};
+struct MrIe {
+  uint32_t gen = 0;
+  std::vector<MeasEntryUe> cells;
+  bool operator==(const MrIe &) const = default;
 };
 
 /* A neighbour's TBTT on the serving grid. */
@@ -142,12 +159,14 @@ inline void for_each_ie(const uint8_t *mpdu, size_t len, uint8_t m0, uint8_t m1,
 }
 } /* namespace mg_detail */
 
-inline std::vector<uint8_t> encode_nl_ie(uint16_t cell, const std::vector<Neighbour> &n, const Mac &mac) {
+inline std::vector<uint8_t> encode_nl_ie(uint16_t cell, uint32_t gen, const std::vector<Neighbour> &n,
+                                         const Mac &mac) {
   using namespace mg_detail;
   if (n.size() > kMaxNeighbours)
     return {};
   std::vector<uint8_t> b = {'N', 'L', kNlVersion};
   put(b, cell, 2);
+  put(b, gen, 4);
   b.push_back(static_cast<uint8_t>(n.size()));
   for (const Neighbour &x : n) {
     put(b, x.cell, 2);
@@ -157,65 +176,69 @@ inline std::vector<uint8_t> encode_nl_ie(uint16_t cell, const std::vector<Neighb
   return seal_ie(std::move(b), 'N', mac);
 }
 
-/* The neighbour list in cell `cell`'s beacon (nullopt: none / not authentic). */
-inline std::optional<std::vector<Neighbour>> find_nl_ie(const uint8_t *mpdu, size_t len, uint16_t cell,
-                                                        const Mac &mac) {
+/* The neighbour list in cell `cell`'s beacon (nullopt: none / not authentic).
+ * Its presence also authenticates the beacon as that cell's. */
+inline std::optional<NlIe> find_nl_ie(const uint8_t *mpdu, size_t len, uint16_t cell, const Mac &mac) {
   using namespace mg_detail;
-  std::optional<std::vector<Neighbour>> out;
+  std::optional<NlIe> out;
   for_each_ie(mpdu, len, 'N', 'L', [&](const uint8_t *b, size_t n) {
     const size_t body = open_ie(b, n, 'N', mac);
-    if (body < 6 || b[2] != kNlVersion || get(b + 3, 2) != cell)
+    if (body < 10 || b[2] != kNlVersion || get(b + 3, 2) != cell)
       return;
-    const size_t cnt = b[5];
-    if (cnt > kMaxNeighbours || body != 6 + cnt * 7)
+    const size_t cnt = b[9];
+    if (cnt > kMaxNeighbours || body != 10 + cnt * 7)
       return;
-    std::vector<Neighbour> v;
+    NlIe x;
+    x.gen = static_cast<uint32_t>(get(b + 5, 4));
     for (size_t i = 0; i < cnt; ++i) {
-      const uint8_t *e = b + 6 + i * 7;
-      v.push_back({static_cast<uint16_t>(get(e, 2)), e[2],
-                   static_cast<int32_t>(static_cast<uint32_t>(get(e + 3, 4)))});
+      const uint8_t *e = b + 10 + i * 7;
+      x.cells.push_back({static_cast<uint16_t>(get(e, 2)), e[2],
+                         static_cast<int32_t>(static_cast<uint32_t>(get(e + 3, 4)))});
     }
-    out = std::move(v);
+    out = std::move(x);
   });
   return out;
 }
 
-inline std::vector<uint8_t> encode_mr_ie(uint16_t cell, uint16_t ue, const std::vector<MeasEntryUe> &m,
-                                         const Mac &mac) {
+inline std::vector<uint8_t> encode_mr_ie(uint16_t cell, uint16_t ue, uint32_t gen,
+                                         const std::vector<MeasEntryUe> &m, const Mac &mac) {
   using namespace mg_detail;
   if (m.size() > kMaxNeighbours + 1)
     return {};
   std::vector<uint8_t> b = {'M', 'R', kMrVersion};
   put(b, cell, 2);
   put(b, ue, 2);
+  put(b, gen, 4);
   b.push_back(static_cast<uint8_t>(m.size()));
   for (const MeasEntryUe &x : m) {
     put(b, x.cell, 2);
     b.push_back(static_cast<uint8_t>(x.rssi_dbm));
     b.push_back(static_cast<uint8_t>(x.snr_db));
+    put(b, x.age_ms, 2);
   }
   return seal_ie(std::move(b), 'M', mac);
 }
 
 /* The measurement report in a UE beacon of cell `cell`'s UE `ue`. */
-inline std::optional<std::vector<MeasEntryUe>> find_mr_ie(const uint8_t *mpdu, size_t len, uint16_t cell,
-                                                          uint16_t ue, const Mac &mac) {
+inline std::optional<MrIe> find_mr_ie(const uint8_t *mpdu, size_t len, uint16_t cell, uint16_t ue,
+                                      const Mac &mac) {
   using namespace mg_detail;
-  std::optional<std::vector<MeasEntryUe>> out;
+  std::optional<MrIe> out;
   for_each_ie(mpdu, len, 'M', 'R', [&](const uint8_t *b, size_t n) {
     const size_t body = open_ie(b, n, 'M', mac);
-    if (body < 8 || b[2] != kMrVersion || get(b + 3, 2) != cell || get(b + 5, 2) != ue)
+    if (body < 12 || b[2] != kMrVersion || get(b + 3, 2) != cell || get(b + 5, 2) != ue)
       return;
-    const size_t cnt = b[7];
-    if (cnt > kMaxNeighbours + 1 || body != 8 + cnt * 4)
+    const size_t cnt = b[11];
+    if (cnt > kMaxNeighbours + 1 || body != 12 + cnt * 6)
       return;
-    std::vector<MeasEntryUe> v;
+    MrIe x;
+    x.gen = static_cast<uint32_t>(get(b + 7, 4));
     for (size_t i = 0; i < cnt; ++i) {
-      const uint8_t *e = b + 8 + i * 4;
-      v.push_back({static_cast<uint16_t>(get(e, 2)), static_cast<int8_t>(e[2]),
-                   static_cast<int8_t>(e[3])});
+      const uint8_t *e = b + 12 + i * 6;
+      x.cells.push_back({static_cast<uint16_t>(get(e, 2)), static_cast<int8_t>(e[2]),
+                         static_cast<int8_t>(e[3]), static_cast<uint16_t>(get(e + 4, 2))});
     }
-    out = std::move(v);
+    out = std::move(x);
   });
   return out;
 }

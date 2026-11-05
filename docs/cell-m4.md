@@ -82,14 +82,24 @@ minute until this rule was added.
 The checks behind those inputs:
 
 - **Reference:** `CELL_REF_CHECK` is a command whose exit 0 means the
-  reference is good. It runs every `CELL_REF_CHECK_S` (2 s), off the radio
-  path. The rig uses `pmc` to require ptp4l's port in SLAVE.
+  reference is good. Service mode requires it, because a readable PHC is not
+  proof of sync: it free-runs on after ptp4l stops.
+  - It runs every `CELL_REF_CHECK_S` (2 s), off the radio path.
+  - A check still running after `CELL_REF_CHECK_TIMEOUT_MS` (1.5 s) is killed
+    and counts as a failure.
+  - A failed PHC read is a failure too.
+  - The rig uses `pmc` to require ptp4l's port in SLAVE.
 - **Beacon engine:** there is no beacon TX counter on this path, so the DU
   uses a proxy. Once a UE in the live map has been heard, the check fails if
   all of them go silent for `CELL_SYNC_UL_SF` (30) superframes. Three failed
   beacon updates in a row also fail it.
   - The proxy cannot tell a stalled beacon from all UEs leaving. Either way
     the cell suspends, which is the conservative reading.
+  - A stall **before any UE has been heard** goes undetected. Closing that
+    gap needs a direct beacon-TX signal from the radio.
+- **TSF write:** a failed write is a timing failure (Lost), and so is a
+  failed read-back of the new offset. Until the next superframe's refresh,
+  RX attributes no uplink or RACH frame.
 
 ## Coordinated vs autonomous
 
@@ -101,8 +111,11 @@ The checks behind those inputs:
 
 **The DU** starts autonomous. It acquires lock before serving, for up to
 `CELL_SYNC_ACQUIRE_S` (30 s), because the first steps can move the grid by up
-to half a superframe. It switches at once on every health change and logs
-`cell.mode`.
+to half a superframe. It logs every switch as `cell.mode`.
+
+- **Suspend** is immediate. The desynced DU is the side that must defer.
+- **Resume** waits until the map that clears the flag is on air and in force.
+  So the DU is never deterministic while its UEs are told to defer.
 
 **The UEs** apply the flag from the map in force. That is the publish
 superframe + 3, about 300 ms later, and they log `cell.ue.mode`.
@@ -116,17 +129,26 @@ Measured with testrig `scripts/m4_cell_sync.sh`:
 
 - **Roles:** the DU on j6412-1 (8852CE, PTP slave of the n300 hub), two UEs
   and a witness.
-- **Run:** 180 s. ptp4l on the DU node was stopped for 30 s at +72 s, then
+- **Run:** 180 s. ptp4l on the DU node was stopped for 30 s at +71 s, then
   started again.
+- **Bounded check:** with a hung check (`CELL_REF_CHECK='sleep 60'`), the DU
+  stays autonomous and exits on time, with no process left behind. Without a
+  check, service mode refuses to start.
 
 | | |
 |---|---|
-| acquisition | Locked after 18 samples (~9 s) |
-| phase while locked | rms 1.6 µs, p95 3.2 µs, max 6.0 µs (271 samples, 5 rejected reads) |
-| PTP stop | Lost at the first failed check (`ref_ok=0`) → autonomous; flag published sf 684, both UEs autonomous |
-| PTP back | ptp4l SLAVE again at sample 214, Locked 7 samples later → coordinated; both UEs followed |
-| flaps | none: 4 transitions in total (acquire, outage, recovery, and the UEs leaving at the end) |
+| acquisition | Locked after 30 samples (~15 s); coordinated from sf 152, when the flag-clear map was in force |
+| phase while locked | rms 1.6 µs, p95 3.5 µs, max 6.8 µs (261 samples, 5 rejected reads) |
+| PTP stop | Lost at the first failed check (`ref_ok=0`, sf 688) → autonomous; both UEs followed |
+| PTP back | ptp4l SLAVE again at sample 212, Locked 7 samples later; DU coordinated at sf 1101, once that map was in force; both UEs followed |
+| flaps | none: 4 DU mode switches in total (lock, outage, recovery, and the UEs leaving at the end) |
 | slots | `cell_2ue_analyze` pass: UL and DL in slot, no overlaps |
 
 The final transition is the beacon proxy firing when the UEs' runs ended
 20 s before the DU's. No beacon stall was injected.
+
+**Not yet measured: the multi-DU test with a USB DU** (#258's
+`cell_ptp_multi.sh`). The rig's DUs are all PCIe 8852CEs, so only the tight
+tier is measured here. The coarse tier's ~0.5–1.5 ms is the USB actuator
+figure from `docs/time-distribution.md`, not a measurement made with this
+mode.

@@ -79,8 +79,10 @@
 //   CELL_SYNC_LOCK_ITERS [8] CELL_SYNC_LOST_ITERS [20]
 //   CELL_REF_CHECK            a shell command; exit 0 = the reference is good
 //                             (e.g. ptp4l in SLAVE, checked with pmc); run
-//                             every CELL_REF_CHECK_S [2]. Unset: the PHC read
-//                             alone.
+//                             every CELL_REF_CHECK_S [2], killed after
+//                             CELL_REF_CHECK_TIMEOUT_MS [1500] (a failure).
+//                             Required with CELL_REF_PTP: a readable PHC is
+//                             not proof of sync.
 //   CELL_SYNC_UL_SF [30]      beacon-engine proxy: once UEs in the map have
 //                             been heard, all of them silent this many
 //                             superframes = the DU's beacon is not reaching
@@ -106,6 +108,8 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -145,10 +149,42 @@ namespace {
 #define CELL_FD_TO_CLOCKID(fd) ((~(clockid_t)(fd) << 3) | 3)
 #endif
 
-double phc_us(clockid_t c) {
+bool phc_us(clockid_t c, double &us) {
   struct timespec t;
-  clock_gettime(c, &t);
-  return static_cast<double>(t.tv_sec) * 1e6 + static_cast<double>(t.tv_nsec) / 1e3;
+  if (clock_gettime(c, &t) != 0)
+    return false;
+  us = static_cast<double>(t.tv_sec) * 1e6 + static_cast<double>(t.tv_nsec) / 1e3;
+  return true;
+}
+
+/* Run `sh -c cmd` with a deadline: true only when it exits 0 in time. A
+ * check that hangs, or is still running when `stop` is raised, is killed
+ * (its whole process group) and reaped, and counts as a failure. */
+bool run_check(const char *cmd, int timeout_ms, const std::atomic<bool> &stop) {
+  const pid_t pid = fork();
+  if (pid < 0)
+    return false;
+  if (pid == 0) {
+    setpgid(0, 0);
+    execl("/bin/sh", "sh", "-c", cmd, static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  setpgid(pid, pid); /* both sides: no race with the child's exec */
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  int status = 0;
+  for (;;) {
+    const pid_t r = waitpid(pid, &status, WNOHANG);
+    if (r == pid)
+      return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (r < 0)
+      return false;
+    if (stop.load() || std::chrono::steady_clock::now() >= until) {
+      kill(-pid, SIGKILL);
+      waitpid(pid, &status, 0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
 }
 
 long envl(const char *k, long d, long lo, long hi) {
@@ -444,6 +480,15 @@ int run_du(IRadio *dev, const Cfg &c) {
   const int64_t sync_ul_sf = envl("CELL_SYNC_UL_SF", 30, 2, 100000);
   const int ref_check_s = static_cast<int>(envl("CELL_REF_CHECK_S", 2, 1, 600));
   const char *ref_cmd = std::getenv("CELL_REF_CHECK");
+  const int ref_timeout_ms =
+      static_cast<int>(envl("CELL_REF_CHECK_TIMEOUT_MS", 1500, 50, 600000));
+  if (svc && !(ref_cmd && *ref_cmd)) {
+    /* A readable PHC is not proof of sync: it free-runs on after ptp4l
+     * stops, and the loop would stay locked to it. */
+    fprintf(stderr, "CELL_REF_PTP needs CELL_REF_CHECK (e.g. a pmc check that ptp4l is "
+                    "SLAVE)\n");
+    return 2;
+  }
   devourer::cell::TsfDisciplineConfig dc;
   dc.interval_us = P;
   dc.phase_us = static_cast<double>(envl("CELL_PHASE_US", 0, 0, P - 1));
@@ -515,22 +560,41 @@ int run_du(IRadio *dev, const Cfg &c) {
     fprintf(stderr, "ReadTsfAndFreeRun unsupported\n");
     return 1;
   }
-  // DU tsf - freerun: constant between TSF writes, which only the DU service
-  // mode's discipline makes (it re-reads the pair after each one).
-  std::atomic<int64_t> tsf_minus_fr{static_cast<int64_t>(t0) - static_cast<int64_t>(f0)};
-  std::atomic<int64_t> fr_ref{static_cast<int64_t>(f0)};
+  /* The RX timestamp mapping, one snapshot: a free-running reference near
+   * now and DU tsf - freerun (constant between TSF writes, which only the
+   * DU service mode's discipline makes). Published together from one radio
+   * read: every superframe, and after each step. `valid` is false while a
+   * step's read-back has failed, and RX then attributes nothing. */
+  struct ClockSnap {
+    int64_t fr_ref = 0, tsf_minus_fr = 0;
+    bool valid = false;
+  };
+  std::mutex clk_mu;
+  ClockSnap clk{static_cast<int64_t>(f0), static_cast<int64_t>(t0) - static_cast<int64_t>(f0), true};
+  auto publish_clock = [&](uint64_t t, uint64_t f) {
+    std::lock_guard<std::mutex> lk(clk_mu);
+    clk = {static_cast<int64_t>(f), static_cast<int64_t>(t) - static_cast<int64_t>(f), true};
+  };
+  /* An RX tsfl (32-bit free-running stamp) as DU tsf; nullopt while stale. */
+  auto rx_tsf = [&](uint32_t tsfl) -> std::optional<int64_t> {
+    std::lock_guard<std::mutex> lk(clk_mu);
+    if (!clk.valid)
+      return std::nullopt;
+    return extend32_near(tsfl, clk.fr_ref) + clk.tsf_minus_fr;
+  };
 
   /* The reference check: a command, off the radio path (it may take tens of
-   * ms), its verdict an atomic the discipline reads. */
+   * ms) and bounded by CELL_REF_CHECK_TIMEOUT_MS, its verdict an atomic the
+   * discipline reads. */
   std::atomic<bool> ref_ok{true};
   std::atomic<bool> ref_stop{false};
   auto run_ref_check = [&] {
-    if (svc && ref_cmd && *ref_cmd)
-      ref_ok.store(std::system(ref_cmd) == 0);
+    if (svc)
+      ref_ok.store(run_check(ref_cmd, ref_timeout_ms, ref_stop));
   };
   run_ref_check();
   std::thread ref_thr;
-  if (svc && ref_cmd && *ref_cmd)
+  if (svc)
     ref_thr = std::thread([&] {
       while (!ref_stop.load()) {
         for (int i = 0; i < ref_check_s * 10 && !ref_stop.load(); ++i)
@@ -555,21 +619,30 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::array<uint64_t, 3> sync_in_state{};
   auto sync_once = [&](int64_t sf_now, bool beacon_ok) {
     uint64_t t = 0, f = 0;
-    const double r1 = phc_us(refclk);
+    double r1 = 0, r2 = 0;
+    const bool p1 = phc_us(refclk, r1);
     const bool rd = dev->ReadTsfAndFreeRun(t, f);
-    const double r2 = phc_us(refclk);
-    const auto d = disc.sample(r1, r2, rd, static_cast<int64_t>(t), static_cast<int64_t>(f));
+    const bool p2 = phc_us(refclk, r2);
+    /* A failed PHC read is a rejected sample and an unhealthy reference. */
+    const auto d = disc.sample(r1, r2, rd && p1 && p2, static_cast<int64_t>(t),
+                               static_cast<int64_t>(f));
     bool wok = true;
     if (d.step_us != 0) {
       wok = dev->WriteTsf(dev->ReadTsf() + static_cast<uint64_t>(d.write_us));
       disc.wrote(wok);
+      /* After any write attempt the RX offset must be re-read before it is
+       * trusted again: a failed read-back is a timing failure too (Lost),
+       * and RX attributes nothing until the next superframe's refresh. */
       uint64_t t2 = 0, f2 = 0;
       if (dev->ReadTsfAndFreeRun(t2, f2)) {
-        tsf_minus_fr.store(static_cast<int64_t>(t2) - static_cast<int64_t>(f2));
-        fr_ref.store(static_cast<int64_t>(f2));
+        publish_clock(t2, f2);
+      } else {
+        std::lock_guard<std::mutex> lk(clk_mu);
+        clk.valid = false;
+        wok = false;
       }
     }
-    const bool rok = ref_ok.load();
+    const bool rok = ref_ok.load() && p1 && p2;
     const auto st = health.update(d, rok, beacon_ok, wok);
     ++sync_samples;
     ++sync_in_state[static_cast<size_t>(st)];
@@ -600,7 +673,8 @@ int run_du(IRadio *dev, const Cfg &c) {
       sync_once(-1, true);
       std::this_thread::sleep_for(std::chrono::milliseconds(sync_loop_ms));
     }
-    set_mode(health.coordinated(), -1);
+    /* The DU stays autonomous until the map clearing the flag is in force
+     * (the main loop's mode rule). */
     char l[160];
     snprintf(l, sizeof l, "{\"ev\":\"cell.sync.acquire\",\"locked\":%d,\"samples\":%llu}",
              health.coordinated() ? 1 : 0, (unsigned long long)sync_samples);
@@ -642,7 +716,8 @@ int run_du(IRadio *dev, const Cfg &c) {
   snprintf(line, sizeof line,
            "{\"ev\":\"cell.du.start\",\"cell\":%u,\"period_us\":%lld,\"ues\":%zu,\"ch\":%u,"
            "\"tsf_minus_fr\":%lld,\"tier\":\"%s\",\"svc\":%d}",
-           c.cell, (long long)P, ues.size(), c.ch, (long long)tsf_minus_fr.load(),
+           c.cell, (long long)P, ues.size(), c.ch,
+           (long long)(static_cast<int64_t>(t0) - static_cast<int64_t>(f0)),
            devourer::sync_tier_name(tier), svc ? 1 : 0);
   emit(line);
   for (size_t i = 0; i < grid->slots().size(); ++i) {
@@ -661,8 +736,10 @@ int run_du(IRadio *dev, const Cfg &c) {
       if (rach_on) {
         const size_t mlen = p.Data.size() - (p.RxAtrib.fcs_present && p.Data.size() >= 4 ? 4 : 0);
         if (auto rf = parse_rach_frame(p.Data.data(), mlen, c.cell)) {
-          const int64_t at = extend32_near(p.RxAtrib.tsfl, fr_ref.load()) + tsf_minus_fr.load();
-          const auto pos = grid->at(at);
+          const auto at_o = rx_tsf(p.RxAtrib.tsfl);
+          if (!at_o)
+            return;
+          const auto pos = grid->at(*at_o);
           std::optional<devourer::cell::RachResponse> a;
           /* Only a request that arrived inside the RACH slot is considered:
            * one heard in a data slot or idle air allocates nothing. */
@@ -690,9 +767,10 @@ int run_du(IRadio *dev, const Cfg &c) {
       const auto slot = grid->find(SlotKind::Uplink, ub->ue);
       if (!slot)
         return;
-      const int64_t fr = extend32_near(p.RxAtrib.tsfl, fr_ref.load());
-      const int64_t at = fr + tsf_minus_fr.load();  // DU tsf at RX
-      const auto pos = grid->at(at);
+      const auto at_o = rx_tsf(p.RxAtrib.tsfl);  // DU tsf at RX
+      if (!at_o)
+        return;
+      const auto pos = grid->at(*at_o);
       const int64_t target = grid->slots()[*slot].start_us + c.ul_target_us;
       const int64_t err = wrap_phase(pos.into_us - target, P);
       int64_t ta_now = 0;
@@ -812,7 +890,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     // loop, republish the map when a TA moved.
     uint64_t t = 0, f = 0;
     if (dev->ReadTsfAndFreeRun(t, f))
-      fr_ref.store(static_cast<int64_t>(f));
+      publish_clock(t, f);
     if (svc && std::chrono::steady_clock::now() >= next_sync) {
       next_sync = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_loop_ms);
       /* The beacon-engine proxy (no beacon TX counter on this path): the
@@ -830,13 +908,25 @@ int run_du(IRadio *dev, const Cfg &c) {
           beacon_ok = false;
       }
       sync_once(sf, beacon_ok);
-      set_mode(health.coordinated(), sf);
+    }
+    /* The DU's own access mode. Suspending is immediate: the desynced DU
+     * is the side that must defer (its UEs follow ~3 superframes later,
+     * when the flagged map is in force). Resuming waits until the map
+     * telling the UEs so is on air AND in force, so the DU is never
+     * deterministic while its UEs are told to defer, or vice versa. */
+    if (svc) {
+      /* The map in force (as the UEs see it): the live one from its
+       * effective superframe, the previous one until then. */
+      const GrantMap &in_force = static_cast<uint64_t>(sf) >= map.effective_sf ? map : prev_map;
+      set_mode(health.coordinated() && in_force.flags == 0, sf);
     }
     /* Stage the next map; it replaces `map` only once it is on air. */
     GrantMap next = map;
     bool changed = false;
-    /* The mode the UEs must follow (retried while a publish fails). */
-    const uint8_t want_flags = coordinated ? 0 : devourer::cell::kGrantAutonomous;
+    /* The mode the UEs must follow: the health's verdict (retried while a
+     * publish fails). */
+    const uint8_t want_flags =
+        !svc || health.coordinated() ? 0 : devourer::cell::kGrantAutonomous;
     if (next.flags != want_flags) {
       next.flags = want_flags;
       changed = true;

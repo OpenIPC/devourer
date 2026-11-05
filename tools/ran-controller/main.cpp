@@ -282,7 +282,8 @@ int main() {
             auto it = dus.find(a->du);
             const bool bad = a->status == f1::AckStatus::Stale || a->status == f1::AckStatus::Late ||
                              a->status == f1::AckStatus::Invalid;
-            if (it != dus.end() && it->second.sched && it->second.sched->version == a->version && bad)
+            if (a->kind == f1::AckKind::Schedule && it != dus.end() && it->second.sched &&
+                it->second.sched->version == a->version && bad)
               it->second.sched.reset(); /* re-issue a fresh version next round */
             static std::map<uint16_t, std::pair<uint32_t, int>> last; /* log changes only */
             auto &l = last[a->du];

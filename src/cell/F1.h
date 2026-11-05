@@ -57,6 +57,7 @@
 #include <vector>
 
 #include "cell/Coord.h"
+#include "cell/HoCommand.h"
 #include "cell/Handover.h"
 #include "cell/Rach.h"
 
@@ -65,14 +66,16 @@ namespace devourer::cell::f1 {
 /* 2 (M6): Report carries the DU's filtered measurements of its own UEs, and
  * the SNR of the other cells' UEs it hears. 3: every measurement carries its
  * sample age, so the CU can tell when it expires. */
-constexpr uint8_t kVersion = 3;
+/* 4: Handover messages; Report carries the DU's network-superframe offset
+ * (for the TSF delta, HoCommand.h); Ack names what it acknowledges. */
+constexpr uint8_t kVersion = 4;
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
 constexpr size_t kMaxUes = kMaxUesPerCell;
 constexpr size_t kMaxHeard = 64;
 
-enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3 };
+enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
 
 inline const char *ack_status_name(AckStatus s) {
@@ -111,6 +114,9 @@ struct Report {
   int64_t phase_us = 0;
   int64_t period_us = 0;
   uint64_t net_sf = 0;
+  /* Network superframe - local superframe (valid with net_sf != 0): with
+   * the phase, what fixes this DU's TSF against every other's. */
+  int64_t net_off = 0;
   /* Freshness, as Schedule::seq (the DU's realtime clock, us): the CU
    * accepts a report only above the last one it took from this DU, so a
    * replayed report can neither refresh the DU's state nor move the address
@@ -137,9 +143,13 @@ struct Schedule {
   bool operator==(const Schedule &) const = default;
 };
 
+/* What an Ack acknowledges. */
+enum class AckKind : uint8_t { Schedule = 0, Handover = 1 };
+
 struct Ack {
   uint16_t du = 0;
-  uint32_t version = 0;
+  AckKind kind = AckKind::Schedule;
+  uint32_t version = 0; /* the schedule version, or the handover id */
   AckStatus status = AckStatus::Staged;
   uint64_t net_sf = 0;
   bool operator==(const Ack &) const = default;
@@ -268,7 +278,7 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {
   if (p == nullptr || n < 4 + kTagLen || p[0] != 'F' || p[1] != '1' || p[2] != kVersion)
     return std::nullopt;
-  if (p[3] < 1 || p[3] > 3)
+  if (p[3] < 1 || p[3] > 4)
     return std::nullopt;
   return static_cast<Type>(p[3]);
 }
@@ -288,6 +298,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
   put(m, static_cast<uint64_t>(r.phase_us), 8);
   put(m, static_cast<uint64_t>(r.period_us), 8);
   put(m, r.net_sf, 8);
+  put(m, static_cast<uint64_t>(r.net_off), 8);
   put(m, r.seq, 8);
   put(m, r.applied_version, 4);
   put(m, r.staged_version, 4);
@@ -333,6 +344,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
   x.phase_us = static_cast<int64_t>(r.get(8));
   x.period_us = static_cast<int64_t>(r.get(8));
   x.net_sf = r.get(8);
+  x.net_off = static_cast<int64_t>(r.get(8));
   x.seq = r.get(8);
   x.applied_version = static_cast<uint32_t>(r.get(4));
   x.staged_version = static_cast<uint32_t>(r.get(4));
@@ -413,6 +425,7 @@ inline std::vector<uint8_t> encode_ack(const Ack &a, const Mac &mac) {
   using namespace detail;
   auto m = head(Type::Ack);
   put(m, a.du, 2);
+  m.push_back(static_cast<uint8_t>(a.kind));
   put(m, a.version, 4);
   m.push_back(static_cast<uint8_t>(a.status));
   put(m, a.net_sf, 8);
@@ -427,6 +440,10 @@ inline std::optional<Ack> decode_ack(const uint8_t *p, size_t n, const Mac &mac)
   Rd &r = *o;
   Ack a;
   a.du = static_cast<uint16_t>(r.get(2));
+  const uint8_t kind = static_cast<uint8_t>(r.get(1));
+  if (kind > static_cast<uint8_t>(AckKind::Handover))
+    return std::nullopt;
+  a.kind = static_cast<AckKind>(kind);
   a.version = static_cast<uint32_t>(r.get(4));
   const uint8_t st = static_cast<uint8_t>(r.get(1));
   a.net_sf = r.get(8);
@@ -434,6 +451,48 @@ inline std::optional<Ack> decode_ack(const uint8_t *p, size_t n, const Mac &mac)
     return std::nullopt;
   a.status = static_cast<AckStatus>(st);
   return a;
+}
+
+/* The handover command (HoCommand.h), CU -> both DUs; `du` addresses the
+ * DU this copy is for. */
+inline std::vector<uint8_t> encode_handover(uint16_t du, const HoCommand &h, const Mac &mac) {
+  using namespace detail;
+  auto m = head(Type::Handover);
+  put(m, du, 2);
+  put(m, h.id, 4);
+  put(m, h.ue, 2);
+  put(m, h.source, 2);
+  put(m, h.target, 2);
+  put(m, h.target_ue, 2);
+  m.push_back(h.target_pos);
+  put(m, h.effective_net_sf, 8);
+  put(m, static_cast<uint64_t>(h.tsf_delta_us), 8);
+  put(m, h.seq, 8);
+  return seal(std::move(m), mac);
+}
+
+/* {addressed DU, command}; nullopt for another type or a bad tag. */
+inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8_t *p, size_t n,
+                                                                     const Mac &mac) {
+  using namespace detail;
+  auto o = open(p, n, Type::Handover, mac);
+  if (!o)
+    return std::nullopt;
+  Rd &r = *o;
+  const uint16_t du = static_cast<uint16_t>(r.get(2));
+  HoCommand h;
+  h.id = static_cast<uint32_t>(r.get(4));
+  h.ue = static_cast<uint16_t>(r.get(2));
+  h.source = static_cast<uint16_t>(r.get(2));
+  h.target = static_cast<uint16_t>(r.get(2));
+  h.target_ue = static_cast<uint16_t>(r.get(2));
+  h.target_pos = static_cast<uint8_t>(r.get(1));
+  h.effective_net_sf = r.get(8);
+  h.tsf_delta_us = static_cast<int64_t>(r.get(8));
+  h.seq = r.get(8);
+  if (!r.ok || r.i != r.n)
+    return std::nullopt;
+  return std::make_pair(du, h);
 }
 
 struct StagerConfig {

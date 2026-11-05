@@ -1044,6 +1044,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.phase_us = static_cast<int64_t>(dc.phase_us);
             r.period_us = P;
             r.net_sf = f1_view.net_sf >= 0 ? static_cast<uint64_t>(f1_view.net_sf) : 0;
+            r.net_off = f1_view.net_sf >= 0 ? net_off.load() : 0;
             const uint64_t rt = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
@@ -1127,7 +1128,8 @@ int run_du(IRadio *dev, const Cfg &c) {
           else
             st = f1::AckStatus::Late;
         }
-        send(f1::encode_ack({c.cell, s->version, st, net_now < 0 ? 0 : static_cast<uint64_t>(net_now)},
+        send(f1::encode_ack({c.cell, f1::AckKind::Schedule, s->version, st,
+                             net_now < 0 ? 0 : static_cast<uint64_t>(net_now)},
                             f1_mac));
         if (st != f1::AckStatus::Applied && st != f1::AckStatus::Staged) {
           char l[200];

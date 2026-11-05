@@ -16,6 +16,7 @@
 #include "cell/F1.h"
 #include "cell/Handover.h"
 #include "cell/HoCommand.h"
+#include "cell/MeasGap.h"
 
 using namespace devourer::cell;
 
@@ -432,6 +433,84 @@ int main() {
     CHECK(!f1::decode_uplink(w.data(), w.size(), fake_mac(4)));
     for (size_t cut = 0; cut < w.size(); ++cut)
       CHECK(!f1::decode_uplink(w.data(), cut, k));
+  }
+
+  /* --- Measurement gaps (MeasGap.h): the neighbour offset, the NL and MR
+   * IEs, and where a gap fits. --- */
+  {
+    const int64_t P = 102400;
+    CHECK(neighbour_offset_us(60000, 0, P) == 60000);
+    CHECK(neighbour_offset_us(0, 13450, P) == P - 13450); /* the other way round wraps */
+    CHECK(neighbour_offset_us(13450 + 3 * P, 13450, P) == 0);
+    const Mac k = fake_mac(21), other = fake_mac(22);
+    std::vector<Neighbour> nl = {{2, 157, 60000}, {3, 36, 81234}};
+    std::vector<uint8_t> bcn(36, 0);
+    bcn[0] = 0x80;
+    const auto ie = encode_nl_ie(1, 7, nl, k);
+    CHECK(!ie.empty());
+    bcn.insert(bcn.end(), ie.begin(), ie.end());
+    auto got = find_nl_ie(bcn.data(), bcn.size(), 1, k);
+    CHECK(got && got->cells == nl && got->gen == 7); /* the generation travels, tagged */
+    /* An empty list is a valid NL (a list going away; the beacon's provenance). */
+    std::vector<uint8_t> eb(36, 0);
+    eb[0] = 0x80;
+    const auto eie = encode_nl_ie(1, 8, {}, k);
+    eb.insert(eb.end(), eie.begin(), eie.end());
+    auto eg = find_nl_ie(eb.data(), eb.size(), 1, k);
+    CHECK(eg && eg->cells.empty() && eg->gen == 8);
+    CHECK(!find_nl_ie(bcn.data(), bcn.size(), 2, k));     /* another cell's list */
+    CHECK(!find_nl_ie(bcn.data(), bcn.size(), 1, other)); /* a forged list is inert */
+    auto torn = bcn;
+    torn[36 + 5 + 7] ^= 1;
+    CHECK(!find_nl_ie(torn.data(), torn.size(), 1, k));
+    auto data = bcn;
+    data[0] = 0x08;
+    CHECK(!find_nl_ie(data.data(), data.size(), 1, k)); /* beacons only */
+    std::vector<MeasEntryUe> mr = {{1, -52, 38, 40}, {2, -49, 41, 2900}};
+    std::vector<uint8_t> ub(36, 0);
+    ub[0] = 0x80;
+    const auto mie = encode_mr_ie(1, 1, 12345, mr, k);
+    ub.insert(ub.end(), mie.begin(), mie.end());
+    auto gm = find_mr_ie(ub.data(), ub.size(), 1, 1, k);
+    CHECK(gm && gm->cells == mr && gm->gen == 12345); /* sample ages + generation travel */
+    CHECK(!find_mr_ie(ub.data(), ub.size(), 1, 2, k));     /* another UE's */
+    CHECK(!find_mr_ie(ub.data(), ub.size(), 1, 1, other)); /* a forged report is inert */
+    CHECK(encode_nl_ie(1, 1, std::vector<Neighbour>(kMaxNeighbours + 1), k).empty());
+    /* The rig grid (beacon 1500, DL 4000 x3 from 1500, turnaround 1000, UL
+     * 2000 x3 from 14500), a UE in position 2: busy = the serving beacon, its
+     * DL [5500, 9500), its UL [16500, 18500) with the uplink-beacon margin. */
+    const std::vector<GridSpan> busy = {{0, 1500}, {5500, 4000}, {16500, 2000}};
+    const int64_t retune = 24000, guard = 2000, beacon = 500;
+    auto g = gap_window(60000, beacon, retune, guard, P, busy);
+    CHECK(g && g->start == 60000 - 26000 && g->len == 2 * 26000 + 500);
+    CHECK(!gap_window(13450, beacon, retune, guard, P, busy)); /* over the UE's own slots */
+    CHECK(!gap_window(100000, beacon, retune, guard, P, busy)); /* wraps onto the serving beacon */
+    CHECK(!gap_window(80000, beacon, retune, guard, P, busy));  /* [54000, 106500) wraps onto the beacon */
+    CHECK(gap_window(70000, beacon, retune, guard, P, busy));   /* [44000, 96500): clear */
+    /* F1 v7: Neighbours, and the UEs' own measurements in a Report. */
+    f1::Neighbours nb{1, 777, {{2, 157, 60000}, {3, 36, 13450}}};
+    const auto wn = f1::encode_neighbours(nb, k);
+    CHECK(f1::peek_type(wn.data(), wn.size()) == f1::Type::Neighbours);
+    auto dn = f1::decode_neighbours(wn.data(), wn.size(), k);
+    CHECK(dn && *dn == nb);
+    for (size_t cut = 0; cut < wn.size(); ++cut)
+      CHECK(!f1::decode_neighbours(wn.data(), cut, k));
+    f1::Report rr;
+    rr.du = 1;
+    rr.ue_meas = {{1, 1, -52 * 4, 38 * 4, 120}, {1, 2, -49 * 4 - 1, 41 * 4, 900}};
+    /* A full cell's worth of UE measurements fits the dedicated cap. */
+    f1::Report full;
+    full.du = 1;
+    full.ue_meas.resize(f1::kMaxUeMeas);
+    const auto wf = f1::encode_report(full, k);
+    CHECK(!wf.empty());
+    auto df = f1::decode_report(wf.data(), wf.size(), k);
+    CHECK(df && df->ue_meas.size() == f1::kMaxUeMeas);
+    full.ue_meas.resize(f1::kMaxUeMeas + 1);
+    CHECK(f1::encode_report(full, k).empty());
+    const auto wr = f1::encode_report(rr, k);
+    auto drr = f1::decode_report(wr.data(), wr.size(), k);
+    CHECK(drr && drr->ue_meas == rr.ue_meas);
   }
 
   if (failures == 0)

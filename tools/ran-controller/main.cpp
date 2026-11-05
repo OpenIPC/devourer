@@ -545,13 +545,14 @@ int main() {
         return d.at.time_since_epoch().count() != 0 && age_ms + rep_age <= meas_stale_ms;
       };
       auto log_candidate = [&](uint16_t ue, uint16_t from, uint16_t to, double sv, double tv,
-                               int64_t held) {
+                               int64_t held, bool ue_reported) {
         char b[256];
         snprintf(b, sizeof b,
                  "{\"ev\":\"ran.ho_candidate\",\"t_ms\":%lld,\"ue\":%u,\"from\":%u,"
-                 "\"to\":%u,\"metric\":\"%s\",\"serving\":%.2f,\"target\":%.2f,"
+                 "\"to\":%u,\"metric\":\"%s%s\",\"serving\":%.2f,\"target\":%.2f,"
                  "\"held_ms\":%lld}",
-                 (long long)tms, ue, from, to, metric.c_str(), sv, tv, (long long)held);
+                 (long long)tms, ue, from, to, ue_reported ? "ue_" : "", metric.c_str(), sv, tv,
+                 (long long)held);
         emit(b);
       };
       auto log_clear = [&](uint16_t ue, uint16_t from, uint16_t to, const char *why) {
@@ -571,19 +572,48 @@ int main() {
         for (const f1::UeMeas &q : dit->second.rep.meas) {
           if (!live(dit->second, q.age_ms))
             continue; /* no valid serving measurement: handled below */
-          const double serving = metric == "rssi" ? q.rssi_qdbm / 4.0 : q.snr_qdb / 4.0;
+          /* Per neighbour, ONE comparable pair: the UE's own (serving beacon,
+           * neighbour beacon) when its MR has both, else the DUs' (serving
+           * uplink, neighbour-heard uplink). The A3 sees margins (neighbour -
+           * serving; the A3 condition depends on the difference only), so a
+           * neighbour the UE did not report keeps its DU-heard evidence. */
+          auto val = [&](int16_t qdb_rssi, int16_t qdb_snr) {
+            return metric == "rssi" ? qdb_rssi / 4.0 : qdb_snr / 4.0;
+          };
+          const double serving_du = val(q.rssi_qdbm, q.snr_qdb);
+          std::optional<double> serving_ue;
+          for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
+            if (m.ue == q.ue && m.cell == cell && live(dit->second, m.age_ms))
+              serving_ue = val(m.rssi_qdbm, m.snr_qdb);
+          struct Pair {
+            double s, t;
+            bool ue;
+          };
+          std::map<uint16_t, Pair> pairs;
           std::map<uint16_t, std::optional<double>> neigh;
           for (long oid : expected) {
             if (oid == cell)
               continue;
-            std::optional<double> v;
-            auto oit = dus.find(static_cast<uint16_t>(oid));
-            if (oit != dus.end())
+            const auto o = static_cast<uint16_t>(oid);
+            std::optional<double> ue_v, du_v;
+            if (serving_ue)
+              for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
+                if (m.ue == q.ue && m.cell == o && live(dit->second, m.age_ms))
+                  ue_v = val(m.rssi_qdbm, m.snr_qdb);
+            if (auto oit = dus.find(o); oit != dus.end())
               for (const f1::HeardUe &h : oit->second.rep.heard)
                 if (h.cell == cell && h.ue == q.ue && live(oit->second, h.age_ms))
-                  v = metric == "rssi" ? h.rssi_dbm : h.snr_db;
-            neigh[static_cast<uint16_t>(oid)] = v; /* absent or expired: no evidence */
+                  du_v = metric == "rssi" ? h.rssi_dbm : h.snr_db;
+            if (ue_v)
+              pairs[o] = {*serving_ue, *ue_v, true};
+            else if (du_v)
+              pairs[o] = {serving_du, *du_v, false};
+            if (pairs.count(o))
+              neigh[o] = pairs[o].t - pairs[o].s;
+            else
+              neigh[o] = std::nullopt; /* absent or expired: no evidence */
           }
+          const double serving = 0.0; /* margins */
           const auto key = std::make_pair(cell, q.ue);
           /* A just-moved UE's old key: the source's last (stale) reports must
            * not trigger again. Time-bound (stale window + release + a report),
@@ -608,8 +638,8 @@ int main() {
               log_clear(q.ue, cell, *st.firing, tgt ? "retarget" : "condition");
             if (tgt) {
               const auto since = st.a3.holding_since(*tgt);
-              log_candidate(q.ue, cell, *tgt, serving, neigh.at(*tgt).value_or(0),
-                            since ? tms - *since : 0);
+              const Pair &pp = pairs.at(*tgt);
+              log_candidate(q.ue, cell, *tgt, pp.s, pp.t, since ? tms - *since : 0, pp.ue);
             }
           }
           st.firing = tgt;
@@ -770,6 +800,20 @@ int main() {
     if (now < next_plan)
       continue;
     next_plan = now + std::chrono::milliseconds(plan_ms);
+    /* The neighbour lists (M6 measurement gaps): each fresh DU gets every
+     * other fresh DU's channel and TBTT phase, every round. */
+    for (auto &kv : dus) {
+      if (now - kv.second.at >= std::chrono::seconds(3))
+        continue;
+      f1::Neighbours nb;
+      nb.du = kv.first;
+      nb.seq = next_seq();
+      for (const auto &ov : dus)
+        if (ov.first != kv.first && now - ov.second.at < std::chrono::seconds(3) &&
+            nb.cells.size() < devourer::cell::kMaxNeighbours)
+          nb.cells.push_back({ov.first, ov.second.rep.channel, ov.second.rep.phase_us});
+      send(kv.second, f1::encode_neighbours(nb, mac));
+    }
     /* The keepalive, every round and whatever the planning state: every DU
      * keeps its current schedule (a fresh sequence each send) while one
      * DU cannot be planned (e.g. it is re-locking). Only the plan waits. */

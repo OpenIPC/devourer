@@ -129,6 +129,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -2274,25 +2275,46 @@ int run_ue(IRadio *dev, const Cfg &c) {
        * beacon restarts on the new channel next pass. The clock needs
        * nothing: the TSF delta already put it on the new cell's. */
       const uint8_t from = cur_ch, to = *retune_to;
-      retune_to.reset();
-      if (beaconing) {
-        dev->StopBeacon();
+      /* The beacon must be stopped first (never carried across the channel
+       * change): a failed stop is retried; the retune waits for it (the
+       * fallback deadline bounds how long). */
+      bool stopped = !beaconing;
+      for (int k = 0; k < 3 && !stopped; ++k)
+        stopped = dev->StopBeacon();
+      if (!stopped) {
+        char l[120];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.ue.stop_beacon_fail\",\"ue\":%d,\"to_ch\":%u}",
+                 me_a.load(), to);
+        emit(l);
+      } else {
         beaconing = false;
+        retune_to.reset();
+        const auto r0 = std::chrono::steady_clock::now();
+        bool tuned = true;
+        try {
+          dev->FastRetune(to);
+        } catch (const std::exception &ex) {
+          tuned = false; /* stays on its channel; no target grant -> the fallback */
+          char l[200];
+          snprintf(l, sizeof l, "{\"ev\":\"cell.ue.retune_fail\",\"ue\":%d,\"to_ch\":%u,\"what\":\"%.80s\"}",
+                   me_a.load(), to, ex.what());
+          emit(l);
+        }
+        const auto r1 = std::chrono::steady_clock::now();
+        if (tuned) {
+          cur_ch = to;
+          retune_done_us.store(std::chrono::duration_cast<std::chrono::microseconds>(
+                                   r1.time_since_epoch())
+                                   .count());
+          char l[200];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.retune\",\"ue\":%d,\"from_ch\":%u,\"to_ch\":%u,"
+                   "\"retune_us\":%lld}",
+                   me_a.load(), from, to,
+                   (long long)std::chrono::duration_cast<std::chrono::microseconds>(r1 - r0).count());
+          emit(l);
+        }
       }
-      const auto r0 = std::chrono::steady_clock::now();
-      dev->FastRetune(to);
-      const auto r1 = std::chrono::steady_clock::now();
-      cur_ch = to;
-      retune_done_us.store(std::chrono::duration_cast<std::chrono::microseconds>(
-                               r1.time_since_epoch())
-                               .count());
-      char l[200];
-      snprintf(l, sizeof l,
-               "{\"ev\":\"cell.ue.retune\",\"ue\":%d,\"from_ch\":%u,\"to_ch\":%u,"
-               "\"retune_us\":%lld}",
-               me_a.load(), from, to,
-               (long long)std::chrono::duration_cast<std::chrono::microseconds>(r1 - r0).count());
-      emit(l);
     }
     if (rearm_ack) {
       /* The ACK responder for the identity now in use; retried every pass

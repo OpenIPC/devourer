@@ -211,9 +211,11 @@ int main() {
   std::optional<Force> force;
   bool force_done = false;
   if (const char *fv = std::getenv("RAN_HO_FORCE"); fv && *fv) {
-    unsigned a = 0, b = 0, t = 0;
+    unsigned long a = 0, b = 0, t = 0;
     double sec = 0;
-    if (std::sscanf(fv, "%u:%u:%u@%lf", &a, &b, &t, &sec) != 4 || !a || !b || !t || sec < 0) {
+    auto id_ok = [](unsigned long v) { return v >= 1 && v <= 65535; };
+    if (std::sscanf(fv, "%lu:%lu:%lu@%lf", &a, &b, &t, &sec) != 4 || !id_ok(a) || !id_ok(b) ||
+        !id_ok(t) || !std::isfinite(sec) || sec < 0 || sec > 86400) {
       fprintf(stderr, "RAN_HO_FORCE=\"%s\": want SRC:UE:TGT@SECONDS\n", fv);
       return 2;
     }
@@ -617,12 +619,11 @@ int main() {
            * whatever the A3 says (inter-frequency: no DU hears the UE across
            * channels until measurement gaps exist). */
           std::optional<uint16_t> act = tgt;
+          bool forcing = false;
           if (force && !force_done && key == std::make_pair(force->src, force->ue) &&
               tms >= force->at_ms) {
             act = force->tgt;
-            force_done = true;
-            emit("{\"ev\":\"ran.ho_forced\",\"ue\":" + std::to_string(q.ue) + ",\"from\":" +
-                 std::to_string(cell) + ",\"to\":" + std::to_string(force->tgt) + "}");
+            forcing = true; /* done only once a command is in flight */
           }
           if (ho_exec && act) {
             bool busy = flights.count(key) > 0;
@@ -630,7 +631,10 @@ int main() {
               busy = busy || fl.second.cmd.target == *act || fl.second.cmd.source == *act ||
                      fl.second.cmd.target == cell || fl.second.cmd.source == cell;
             auto tit = dus.find(*act);
-            if (!busy && tit != dus.end() && tit->second.rep.net_sf > 0 && dit->second.rep.net_sf > 0) {
+            /* The target's report must be current: its capacity, channel and
+             * clock are what the command is built from. */
+            const bool tgt_fresh = tit != dus.end() && now - tit->second.at < std::chrono::seconds(3);
+            if (!busy && tgt_fresh && tit->second.rep.net_sf > 0 && dit->second.rep.net_sf > 0) {
               const f1::Report &sr = dit->second.rep, &tr = tit->second.rep;
               uint16_t tue = 0;
               for (uint16_t u = 1; u <= tr.positions.size() && !tue; ++u) {
@@ -665,6 +669,11 @@ int main() {
                 cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
                                                                    tr.net_off, sr.period_us);
                 flights[key] = HoFlight{cmd};
+                if (forcing) {
+                  force_done = true;
+                  emit("{\"ev\":\"ran.ho_forced\",\"ue\":" + std::to_string(q.ue) + ",\"from\":" +
+                       std::to_string(cell) + ",\"to\":" + std::to_string(force->tgt) + "}");
+                }
                 ul.alias({cmd.target, cmd.target_ue}, {cmd.source, cmd.ue}); /* DAPS: one stream */
                 char b[300];
                 snprintf(b, sizeof b,

@@ -19,8 +19,12 @@
  * identity at the target is assigned in the command).
  *
  * The beacon IE (vendor 221, kGrantOui), little-endian:
- *   'H' 'O' ver(1)=1 id(4) cell(2) ue(2) target(2) target_ue(2)
- *   dl_slot(1) ul_slot(1) effective_sf(8) tsf_delta(8, signed) crc16(2) tag(8)
+ *   'H' 'O' ver(1)=2 id(4) cell(2) ue(2) target(2) target_ue(2)
+ *   dl_slot(1) ul_slot(1) channel(1) effective_sf(8) tsf_delta(8, signed)
+ *   crc16(2) tag(8)
+ * `channel` is the target's: when it differs from the source's the UE
+ * retunes at the switch (inter-frequency; the TSF delta holds regardless,
+ * so it needs no beacon of the target first).
  * `effective_sf` is in the SOURCE cell's superframe count (what the UE
  * runs). The CRC detects a torn body; the tag (the cell key's HMAC, as the
  * other scheduling frames, label 'H') makes a forged handover inert. An
@@ -45,7 +49,8 @@
 
 namespace devourer::cell {
 
-constexpr uint8_t kHoIeVersion = 1;
+/* 2: the target's channel (inter-frequency handover, the UE retunes). */
+constexpr uint8_t kHoIeVersion = 2;
 constexpr size_t kHoTagLen = 8;
 
 /* target TSF - source TSF, at any instant (see the header). */
@@ -60,6 +65,7 @@ struct HoCommand {
   uint16_t ue = 0;               /* the UE's id at the source */
   uint16_t source = 0, target = 0;
   uint16_t target_ue = 0;        /* its id at the target */
+  uint8_t target_channel = 0;    /* the target cell's channel (0 = unknown: same) */
   uint8_t target_pos = 0;        /* its capacity position at the target; 0 =
                                     CANCEL this id (the target drops the UE it
                                     pre-admitted for it) */
@@ -76,6 +82,7 @@ struct HoIe {
   uint16_t ue = 0;
   uint16_t target = 0, target_ue = 0;
   uint8_t dl_slot = 0, ul_slot = 0; /* the target grid's slot indices */
+  uint8_t channel = 0;              /* the target's channel (0 = the source's) */
   uint64_t effective_sf = 0;        /* in the source cell's count */
   int64_t tsf_delta_us = 0;
   bool operator==(const HoIe &) const = default;
@@ -92,7 +99,7 @@ inline uint64_t get(const uint8_t *p, int n) {
     v |= static_cast<uint64_t>(p[i]) << (8 * i);
   return v;
 }
-constexpr size_t kBodyLen = 2 + 1 + 4 + 2 + 2 + 2 + 2 + 1 + 1 + 8 + 8; /* 'H' 'O' .. delta */
+constexpr size_t kBodyLen = 2 + 1 + 4 + 2 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8; /* 'H' 'O' .. delta */
 inline bool tag(const Mac &mac, const uint8_t *body, size_t n, uint8_t out[kHoTagLen]) {
   if (!mac) {
     std::memset(out, 0, kHoTagLen);
@@ -119,6 +126,7 @@ inline std::vector<uint8_t> encode_ho_ie(const HoIe &h, const Mac &mac) {
   put(b, h.target_ue, 2);
   b.push_back(h.dl_slot);
   b.push_back(h.ul_slot);
+  b.push_back(h.channel);
   put(b, h.effective_sf, 8);
   put(b, static_cast<uint64_t>(h.tsf_delta_us), 8);
   put(b, detail::crc16_ccitt(b.data(), b.size()), 2);
@@ -159,8 +167,9 @@ inline std::optional<HoIe> decode_ho_body(const uint8_t *b, size_t n, const Mac 
   h.target_ue = static_cast<uint16_t>(get(b + 13, 2));
   h.dl_slot = b[15];
   h.ul_slot = b[16];
-  h.effective_sf = get(b + 17, 8);
-  h.tsf_delta_us = static_cast<int64_t>(get(b + 25, 8));
+  h.channel = b[17];
+  h.effective_sf = get(b + 18, 8);
+  h.tsf_delta_us = static_cast<int64_t>(get(b + 26, 8));
   return h;
 }
 

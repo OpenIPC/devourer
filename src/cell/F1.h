@@ -69,7 +69,8 @@ namespace devourer::cell::f1 {
 /* 5: Uplink (DAPS: a DU forwarding a UE uplink it heard). 4: Handover
  * messages; Report carries the DU's network-superframe offset
  * (for the TSF delta, HoCommand.h); Ack names what it acknowledges. */
-constexpr uint8_t kVersion = 5;
+/* 6: Handover carries the target's channel (inter-frequency). */
+constexpr uint8_t kVersion = 6;
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -465,6 +466,7 @@ inline std::vector<uint8_t> encode_handover(uint16_t du, const HoCommand &h, con
   put(m, h.source, 2);
   put(m, h.target, 2);
   put(m, h.target_ue, 2);
+  m.push_back(h.target_channel);
   m.push_back(h.target_pos);
   put(m, h.effective_net_sf, 8);
   put(m, static_cast<uint64_t>(h.tsf_delta_us), 8);
@@ -487,6 +489,7 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
   h.source = static_cast<uint16_t>(r.get(2));
   h.target = static_cast<uint16_t>(r.get(2));
   h.target_ue = static_cast<uint16_t>(r.get(2));
+  h.target_channel = static_cast<uint8_t>(r.get(1));
   h.target_pos = static_cast<uint8_t>(r.get(1));
   h.effective_net_sf = r.get(8);
   h.tsf_delta_us = static_cast<int64_t>(r.get(8));

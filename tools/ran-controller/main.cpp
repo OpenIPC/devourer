@@ -44,6 +44,10 @@
 //                             when the target reports the UE. One handover in
 //                             flight per DU pair end.
 //   RAN_A3_DWELL_MS [2000]    after a handover, the moved UE's A3 dwell
+//   RAN_HO_FORCE              SRC:UE:TGT@SECONDS: that UE is handed over at
+//                             that time whatever the A3 says (an inter-
+//                             frequency test: no DU hears a UE across
+//                             channels until UE measurement gaps exist)
 // DAPS (M6): the DUs forward the UE uplinks they hear (F1 Uplink); the CU
 // delivers each once per UE stream (src/cell/Handover.h UlStreams; a
 // handover aliases the target identity onto the source's stream) and logs
@@ -198,6 +202,26 @@ int main() {
   const bool ho_exec = envl("RAN_HO_EXECUTE", 0, 0, 1) != 0;
   const uint64_t ho_lead_sf = static_cast<uint64_t>(envl("RAN_HO_LEAD_SF", 24, 4, 10000));
   const int64_t ho_dwell_ms = envl("RAN_A3_DWELL_MS", 2000, 0, 600000);
+  /* RAN_HO_FORCE=SRC:UE:TGT@SECONDS — one handover issued at that time
+   * regardless of the A3 (with RAN_HO_EXECUTE=1). */
+  struct Force {
+    uint16_t src = 0, ue = 0, tgt = 0;
+    int64_t at_ms = 0;
+  };
+  std::optional<Force> force;
+  bool force_done = false;
+  if (const char *fv = std::getenv("RAN_HO_FORCE"); fv && *fv) {
+    unsigned long a = 0, b = 0, t = 0;
+    double sec = 0;
+    auto id_ok = [](unsigned long v) { return v >= 1 && v <= 65535; };
+    if (std::sscanf(fv, "%lu:%lu:%lu@%lf", &a, &b, &t, &sec) != 4 || !id_ok(a) || !id_ok(b) ||
+        !id_ok(t) || !std::isfinite(sec) || sec < 0 || sec > 86400) {
+      fprintf(stderr, "RAN_HO_FORCE=\"%s\": want SRC:UE:TGT@SECONDS\n", fv);
+      return 2;
+    }
+    force = Force{static_cast<uint16_t>(a), static_cast<uint16_t>(b), static_cast<uint16_t>(t),
+                  static_cast<int64_t>(sec * 1000)};
+  }
   a3c.min_dwell_ms = ho_dwell_ms; /* counted from a moved UE's switch */
   const int64_t meas_stale_ms = envl("RAN_MEAS_STALE_MS", 2000, 100, 60000);
   std::vector<uint8_t> spare;
@@ -591,13 +615,26 @@ int main() {
           st.firing = tgt;
           /* Execute: one command per candidate, one handover in flight per
            * DU (source or target). */
-          if (ho_exec && tgt) {
+          /* RAN_HO_FORCE: the configured UE is handed over at its time,
+           * whatever the A3 says (inter-frequency: no DU hears the UE across
+           * channels until measurement gaps exist). */
+          std::optional<uint16_t> act = tgt;
+          bool forcing = false;
+          if (force && !force_done && key == std::make_pair(force->src, force->ue) &&
+              tms >= force->at_ms) {
+            act = force->tgt;
+            forcing = true; /* done only once a command is in flight */
+          }
+          if (ho_exec && act) {
             bool busy = flights.count(key) > 0;
             for (const auto &fl : flights)
-              busy = busy || fl.second.cmd.target == *tgt || fl.second.cmd.source == *tgt ||
+              busy = busy || fl.second.cmd.target == *act || fl.second.cmd.source == *act ||
                      fl.second.cmd.target == cell || fl.second.cmd.source == cell;
-            auto tit = dus.find(*tgt);
-            if (!busy && tit != dus.end() && tit->second.rep.net_sf > 0 && dit->second.rep.net_sf > 0) {
+            auto tit = dus.find(*act);
+            /* The target's report must be current: its capacity, channel and
+             * clock are what the command is built from. */
+            const bool tgt_fresh = tit != dus.end() && now - tit->second.at < std::chrono::seconds(3);
+            if (!busy && tgt_fresh && tit->second.rep.net_sf > 0 && dit->second.rep.net_sf > 0) {
               const f1::Report &sr = dit->second.rep, &tr = tit->second.rep;
               uint16_t tue = 0;
               for (uint16_t u = 1; u <= tr.positions.size() && !tue; ++u) {
@@ -621,9 +658,10 @@ int main() {
                 cmd.id = ho_last_id;
                 cmd.ue = q.ue;
                 cmd.source = cell;
-                cmd.target = *tgt;
+                cmd.target = *act;
                 cmd.target_ue = tue;
                 cmd.target_pos = tpos;
+                cmd.target_channel = tr.channel; /* != the source's: inter-frequency */
                 const double age_us =
                     std::chrono::duration<double, std::micro>(now - dit->second.at).count();
                 cmd.effective_net_sf =
@@ -631,6 +669,11 @@ int main() {
                 cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
                                                                    tr.net_off, sr.period_us);
                 flights[key] = HoFlight{cmd};
+                if (forcing) {
+                  force_done = true;
+                  emit("{\"ev\":\"ran.ho_forced\",\"ue\":" + std::to_string(q.ue) + ",\"from\":" +
+                       std::to_string(cell) + ",\"to\":" + std::to_string(force->tgt) + "}");
+                }
                 ul.alias({cmd.target, cmd.target_ue}, {cmd.source, cmd.ue}); /* DAPS: one stream */
                 char b[300];
                 snprintf(b, sizeof b,

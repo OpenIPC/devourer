@@ -17,6 +17,9 @@
 #include "cell/Handover.h"
 #include "cell/HoCommand.h"
 #include "cell/MeasGap.h"
+#include "cell/PhasePlan.h"
+#include "cell/SlotGrid.h"
+#include "cell/TsfDiscipline.h"
 
 using namespace devourer::cell;
 
@@ -511,6 +514,79 @@ int main() {
     const auto wr = f1::encode_report(rr, k);
     auto drr = f1::decode_report(wr.data(), wr.size(), k);
     CHECK(drr && drr->ue_meas == rr.ue_meas);
+  }
+
+  /* --- Phase planning (PhasePlan.h) on the rig grid: beacon 1500, three
+   * positions (DL 4000, turnaround 1000, UL 2000), gaps of 26 + 2 ms. --- */
+  {
+    auto g = build_fixed_grid(100, 0, 1500, {1, 2, 3}, 4000, 1000, 2000);
+    CHECK(g);
+    CoordDu d;
+    coord_layout(*g, d);
+    const PhaseCell a = phase_cell(1, 149, 0, 102400, d.fixed, d.positions);
+    CHECK(a.beacon_us == 1500 && a.span_us == 20500 && a.positions.size() == 3);
+    PhaseParams pp;
+    pp.retune_us = 26000;
+    pp.guard_us = 2000;
+    /* Another channel: every position of each cell can measure the other's
+     * beacon only for a phase in [48500, 53900]; the plan takes its middle. */
+    PhaseCell b = phase_cell(2, 157, 0, 102400, d.fixed, d.positions);
+    auto p = plan_phase(b, {a}, pp);
+    CHECK(p.score == 2 && p.max_score == 2 && p.phase_us == 51200);
+    CHECK(p.pairs.size() == 1 && p.pairs[0].first == 1 && p.pairs[0].second == 2);
+    CHECK(mg_detail::pair_score(b, 48500, a, pp) == 2 && mg_detail::pair_score(b, 53900, a, pp) == 2);
+    CHECK(mg_detail::pair_score(b, 48400, a, pp) < 2 && mg_detail::pair_score(b, 54000, a, pp) < 2);
+    CHECK(mg_detail::pair_score(b, 60000, a, pp) < 2); /* the old hand-picked phase: one way only */
+    /* The 30 + 3 ms bound leaves no phase measurable both ways. */
+    PhaseParams wide = pp;
+    wide.retune_us = 30000;
+    wide.guard_us = 3000;
+    CHECK(plan_phase(b, {a}, wide).score < 2);
+    /* The same channel: disjoint active spans. */
+    b.channel = 149;
+    p = plan_phase(b, {a}, pp);
+    CHECK(p.score == 2 && !mg_detail::arcs_overlap(p.phase_us, b.span_us, 0, a.span_us, 102400));
+    /* A third cell on a third channel cannot be measured both ways by both
+     * (a physical limit at this bound): the best is partial, not a failure. */
+    PhaseCell c2 = b;
+    c2.channel = 157;
+    c2.phase_us = 51200;
+    PhaseCell j = phase_cell(3, 36, 0, 102400, d.fixed, d.positions);
+    p = plan_phase(j, {a, c2}, pp);
+    CHECK(p.max_score == 4 && p.score >= 1 && p.score < 4);
+    /* Across bands: no gap credit (the UEs never gap there). */
+    PhaseCell lo = phase_cell(4, 6, 0, 102400, d.fixed, d.positions);
+    CHECK(mg_detail::pair_score(lo, 51200, a, pp) == 0);
+    CHECK(gap_cross_band(6, 149) && !gap_cross_band(36, 149));
+    /* Another period: left out, not mis-scored on this one's modulus. */
+    PhaseCell longer = a;
+    longer.du = 9;
+    longer.period_us = 204800;
+    p = plan_phase(b, {a, longer}, pp);
+    CHECK(p.max_score == 2 && p.other_period.size() == 1 && p.other_period[0] == 9);
+    /* A long period: the candidate grid is capped. */
+    PhaseParams lp = pp;
+    lp.period_us = 1000 * 1024;
+    lp.step_us = 1;
+    CHECK(plan_phase(j, {}, lp).phase_us < lp.period_us);
+    /* No other cell: any phase (the middle of the circle). */
+    CHECK(plan_phase(j, {}, pp).max_score == 0);
+    /* F1 v8: Phase. */
+    const Mac k = fake_mac(7);
+    f1::PhaseAssign pa{2, 51200, 1234567};
+    const auto wp = f1::encode_phase(pa, k);
+    CHECK(f1::peek_type(wp.data(), wp.size()) == f1::Type::Phase);
+    auto dp = f1::decode_phase(wp.data(), wp.size(), k);
+    CHECK(dp && *dp == pa);
+    CHECK(!f1::decode_phase(wp.data(), wp.size(), fake_mac(8))); /* forged */
+    for (size_t cut = 0; cut < wp.size(); ++cut)
+      CHECK(!f1::decode_phase(wp.data(), cut, k));
+    /* The discipline takes an assigned phase before it acquires. */
+    TsfDisciplineConfig dc;
+    dc.phase_us = 0;
+    TsfDiscipline disc(dc);
+    disc.set_phase(51200);
+    CHECK(disc.phase() == 51200);
   }
 
   if (failures == 0)

@@ -14,6 +14,8 @@ is no scan, no clock re-acquisition and no association exchange.
 | the command | `src/cell/HoCommand.h` `HoCommand`, F1 `Type::Handover` | UE, target id and position, switch instant, TSF delta |
 | the UE's copy | `HoIe` in the source DU's beacon | CRC and cell-key tag (forgery is inert); `HoReceiver` rejects a replay |
 | clock continuity | `ho_tsf_delta_us`, `TsfSync::ShiftRemote` | the target's TSF is the source's plus a known constant |
+| measurement gaps | `src/cell/MeasGap.h`; F1 `Type::Neighbours`, `Report.ue_meas` | the UE measures another channel's beacon in a gap clear of its slots |
+| phase planning | `src/cell/PhasePlan.h`; F1 `Type::Phase` | the CU places a joining DU's TBTT so the cells can measure each other |
 | DAPS (same channel) | `Handover.h` `SeqDedup`, `UlStreams`; F1 `Type::Uplink` | the uplink delivered through both cells during a crossing, once at the CU |
 
 ## TSF continuity
@@ -215,8 +217,10 @@ accordingly. For each, the UE computes `gap_window()`:
 The window must clear the serving beacon and the UE's own DL and UL slots.
 
 - **Retune bound:** both retunes are planned with a conservative bound,
-  `CELL_UE_GAP_RETUNE_US` (30 ms), raised by any slower retune measured. A
-  band change, which takes the full channel path, never gets a gap.
+  `CELL_UE_GAP_RETUNE_US` (26 ms), raised by any slower retune measured.
+  The 8852CE's retune measured 23.5–23.7 ms on the rig, so 26 ms is that
+  plus about 10 %. The first gap results below ran with 30 ms. A band change,
+  which takes the full channel path, never gets a gap.
 - **No fit:** the UE skips that neighbour (`cell.ue.gap_skip`), parks it, and
   re-checks it rarely. No slot is ever sacrificed.
 - **Late wake-up:** if the UE wakes for a gap later than half the guard, it
@@ -278,7 +282,8 @@ pass.
   there takes effect at that boundary.
 - **A limit of this layout:** cell 2's UE cannot measure cell 1. Cell 1's
   beacon falls at offset 42400 µs of cell 2's grid, too close to that UE's
-  own uplink slot, so it logs `gap_skip`.
+  own uplink slot, so it logs `gap_skip`. Phase planning (next section)
+  removes this.
 
 **TSF continuity, stated precisely.** The UE switches at the network
 instant, the source's boundary of network superframe N. On the target's
@@ -289,6 +294,64 @@ clock that instant is:
 The UE's shifted clock reads it plus its poll latency. The rig scripts
 assert exactly this, across every same-channel, inter-frequency and
 measurement-gap run.
+
+## Phase planning (where a joining cell's TBTT goes)
+
+A gap fits only where the neighbour's beacon falls in an idle part of the
+UE's grid, so the phase layout decides who can measure whom. The CU places
+a **joining** DU's TBTT; running cells keep theirs (re-phasing a live cell
+would move every UE's clock).
+- **The scoring:** see `plan_phase` in `src/cell/PhasePlan.h`.
+- **The exchange:** a DU with `CELL_PHASE_AUTO=1` asks before it starts its
+  beacon (a Report with phase −1) and gets F1 `Phase` (v8). The settings are
+  in the env headers of `examples/cell/main.cpp` and
+  `tools/ran-controller/main.cpp`.
+- **The bound:** the CU plans with the UEs' gap bound (26 + 2 ms on both
+  sides).
+
+**The rig grid** has a 1500 µs beacon and three positions (DL 4000, a
+1000 turnaround, UL 2000), so the active span is 20.5 ms. Against a cell at
+phase 0 on another channel:
+- with a 26 + 2 ms gap, both ways work only for a phase in
+  [48500, 53900] µs, and the plan takes 51200;
+- with the old 30 + 3 ms bound, no phase works both ways.
+
+A third cell on a third channel cannot be measured both ways by both others
+at this bound; its plan is partial (score below the maximum), not refused.
+
+**Rig result** (testrig `scripts/m6_phaseplan.sh`, 5 runs, all pass).
+- **Layout:** cell 1 is on ch149 at phase 0. Cell 2 is on ch157 with no phase
+  of its own (`m5_ran_coord.sh --phase2 auto`).
+- **CU role:** the CU only observes handovers here. The point is that both
+  UEs measure the other cell.
+
+| KPI | min | median | max |
+|---|---|---|---|
+| assigned phase (score 2/2 every run) | 51200 µs | 51200 µs | 51200 µs |
+| gaps per UE per run (60 s) | 57 | 57 | 57 |
+| of them, the other cell heard | 56 | 57 | 57 |
+| gap deaf time (568 gaps, 26 + 2 ms bound) | 54.0 ms | 54.1 ms | 54.6 ms |
+| cell 2 in cell 1's UE's gaps | −47 dBm | −46.7 dBm | −46 dBm |
+| cell 1 in cell 2's UE's gaps | −57.9 dBm | −57.8 dBm | −57.6 dBm |
+
+- **No gap skipped**, and neither cell missed one of its UE's uplinks (0 of
+  about 572 superframes per cell per run).
+- **The measurement-gap handover run** (`m6_measgap.sh`, phase 60000) passes
+  at the new bound too: 2/2, with gap deaf time 54.1 ms.
+
+**What the first runs found.** The first runs started the UEs a fixed 8 s
+after the DUs, with the DU asking for its phase after its beacon had started.
+- **Symptom:** in 3 of 3 such runs, cell 2's UE had already locked to cell
+  2's beacon when one jump of about 1.3 ms in its timing arrived. Its
+  `TsfSync` fit is cumulative from the first beacon, so it took the jump as
+  skew (hundreds to thousands of ppm, decaying slowly). Its gaps then missed
+  cell 1's beacon. In one run (0 of 42 heard), each gap also cost its uplink.
+- **What changed:** the DU now asks before starting its beacon, and the rig
+  starts the UEs only once both DUs log `cell.du.start`. Five runs since
+  have the UEs' skew at −3 to −8 ppm.
+- **Not established:** the source of the jump. Neither is how often a UE
+  meets one in service, for example on a DU restart under attached UEs.
+  That case is an open item below.
 
 ## DAPS: the duplicated uplink (same channel)
 
@@ -386,9 +449,14 @@ superframe when there is nothing to serve.
     budget.
 - **A moving UE:** the rig's UEs are stationary, so the crossing is forced
   with a negative A3 offset.
-- **Measurement-gap scheduling:** a gap goes only where it clears the UE's
-  own slots, so some phase layouts leave a neighbour unmeasurable. Placing
-  cells' phases so every pair can measure each other is a CU planning task.
+- **Phase planning beyond two cells:** a joining cell is placed against the
+  running ones, which never move. With three or more cells on different
+  channels, the 26 ms retune leaves no layout where every pair can measure
+  both ways. Re-phasing live cells, or longer superframes, is open.
+- **A UE's clock fit after a jump in its serving beacon's timing:**
+  `TsfSync` never forgets, so one discontinuity (seen as about 1.3 ms, source
+  not established) skews the UE for a long time. A UE-side reset on a
+  detected discontinuity is open.
 - **No crossing test:** every handover result here is from stationary UEs.
   The trigger is either forced or the measured standing difference between
   two cells. No A→B path-loss ramp has been run, so none of these numbers

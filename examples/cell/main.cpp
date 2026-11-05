@@ -73,6 +73,11 @@
 //   CELL_REF_PTP              the PHC, e.g. /dev/ptp0 (unset: a standalone
 //                             cell, always coordinated, the M1-M3 behaviour)
 //   CELL_PHASE_US [0]         where this DU's TBTT sits: ref % period
+//   CELL_PHASE_AUTO [0]       1 = ask the CU for it (M6 phase planning,
+//                             src/cell/PhasePlan.h) before acquiring: a
+//                             Report with phase -1, answered by F1 Phase;
+//                             CELL_PHASE_WAIT_S [30] for the answer, else
+//                             CELL_PHASE_US. Needs CELL_F1_CU.
 //   CELL_SYNC_LOOP_MS [500]   discipline period
 //   CELL_SYNC_ACQUIRE_S [30]  wait for lock before serving (then autonomous)
 //   CELL_SYNC_LOCK_US [10] CELL_SYNC_LOST_US [200]   SyncHealth thresholds
@@ -583,6 +588,23 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
   }
   const CellMac f1_mac = hmac_sha1(f1_key);
+  /* Only the configured CU's address (the tag and freshness come next). */
+  auto f1_from_cu = [&](const sockaddr_storage &from) {
+    if (from.ss_family != f1_addr.ss_family)
+      return false;
+    if (from.ss_family == AF_INET) {
+      const auto &a = reinterpret_cast<const sockaddr_in &>(from);
+      const auto &b = reinterpret_cast<const sockaddr_in &>(f1_addr);
+      return a.sin_port == b.sin_port && a.sin_addr.s_addr == b.sin_addr.s_addr;
+    }
+    if (from.ss_family == AF_INET6) {
+      const auto &a = reinterpret_cast<const sockaddr_in6 &>(from);
+      const auto &b = reinterpret_cast<const sockaddr_in6 &>(f1_addr);
+      return a.sin6_port == b.sin6_port &&
+             std::memcmp(&a.sin6_addr, &b.sin6_addr, sizeof a.sin6_addr) == 0;
+    }
+    return false;
+  };
   const char *ref_cmd = std::getenv("CELL_REF_CHECK");
   const int ref_timeout_ms =
       static_cast<int>(envl("CELL_REF_CHECK_TIMEOUT_MS", 1500, 50, 600000));
@@ -673,6 +695,68 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
     return 0;
   };
+  /* M6 phase planning: a joining DU asks the CU where its grid goes (the
+   * running cells keep theirs), before it acquires: a Report with phase -1
+   * (its grid, channel, tier), every 500 ms, until a Phase answer from the
+   * CU's address. Without one in time it keeps CELL_PHASE_US. Before the
+   * beacon starts: a waiting DU airs nothing a UE could lock to. */
+  if (svc && f1_on && envl("CELL_PHASE_AUTO", 0, 0, 1) != 0) {
+    namespace f1 = devourer::cell::f1;
+    const int wait_s = static_cast<int>(envl("CELL_PHASE_WAIT_S", 30, 1, 600));
+    devourer::cell::CoordDu lay;
+    devourer::cell::coord_layout(*grid, lay);
+    f1::Report rq;
+    rq.du = c.cell;
+    rq.tier = static_cast<uint8_t>(tier);
+    rq.channel = c.ch;
+    rq.phase_us = -1; /* asks for a phase */
+    rq.period_us = P;
+    rq.fixed = lay.fixed;
+    rq.positions = lay.positions;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(wait_s);
+    auto next_req = std::chrono::steady_clock::now();
+    std::optional<int64_t> got;
+    uint64_t rq_seq = 0, first_seq = 0;
+    while (!got && std::chrono::steady_clock::now() < until) {
+      if (std::chrono::steady_clock::now() >= next_req) {
+        next_req += std::chrono::milliseconds(500);
+        rq_seq = std::max(rq_seq + 1, static_cast<uint64_t>(
+                                          std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::system_clock::now().time_since_epoch())
+                                              .count()));
+        rq.seq = rq_seq;
+        if (first_seq == 0)
+          first_seq = rq_seq;
+        const auto m = f1::encode_report(rq, f1_mac);
+        sendto(f1_fd.fd, m.data(), m.size(), 0, reinterpret_cast<const sockaddr *>(&f1_addr),
+               f1_addr_len);
+      }
+      pollfd pf{f1_fd.fd, POLLIN, 0};
+      if (poll(&pf, 1, 50) <= 0 || !(pf.revents & POLLIN))
+        continue;
+      uint8_t buf[2048];
+      sockaddr_storage from{};
+      socklen_t fl = sizeof from;
+      const ssize_t n = recvfrom(f1_fd.fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
+      if (n <= 0 || !f1_from_cu(from))
+        continue;
+      /* The CU echoes the request's seq: an answer to an earlier run's
+       * request (a replay) is older than this run's first. */
+      if (auto ph = f1::decode_phase(buf, static_cast<size_t>(n), f1_mac);
+          ph && ph->du == c.cell && ph->phase_us >= 0 && ph->phase_us < P &&
+          ph->seq >= first_seq && ph->seq <= rq_seq)
+        got = ph->phase_us;
+    }
+    char l[160];
+    if (got) {
+      dc.phase_us = static_cast<double>(*got);
+      disc.set_phase(dc.phase_us);
+      snprintf(l, sizeof l, "{\"ev\":\"cell.phase.assigned\",\"phase_us\":%lld}", (long long)*got);
+    } else {
+      snprintf(l, sizeof l, "{\"ev\":\"cell.phase.default\",\"phase_us\":%.0f}", dc.phase_us);
+    }
+    emit(l);
+  }
   auto bcn = build_du_beacon(map);
   if (bcn.empty() || !dev->StartBeacon(bcn.data(), bcn.size(), c.tu)) {
     fprintf(stderr, "StartBeacon failed\n");
@@ -1206,24 +1290,7 @@ int run_du(IRadio *dev, const Cfg &c) {
         const ssize_t n = recvfrom(f1_fd.fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
         if (n <= 0)
           continue;
-        /* Only the configured CU's address (the tag and freshness come next). */
-        auto same_peer = [&] {
-          if (from.ss_family != f1_addr.ss_family)
-            return false;
-          if (from.ss_family == AF_INET) {
-            const auto &a = reinterpret_cast<const sockaddr_in &>(from);
-            const auto &b = reinterpret_cast<const sockaddr_in &>(f1_addr);
-            return a.sin_port == b.sin_port && a.sin_addr.s_addr == b.sin_addr.s_addr;
-          }
-          if (from.ss_family == AF_INET6) {
-            const auto &a = reinterpret_cast<const sockaddr_in6 &>(from);
-            const auto &b = reinterpret_cast<const sockaddr_in6 &>(f1_addr);
-            return a.sin6_port == b.sin6_port &&
-                   std::memcmp(&a.sin6_addr, &b.sin6_addr, sizeof a.sin6_addr) == 0;
-          }
-          return false;
-        };
-        if (!same_peer())
+        if (!f1_from_cu(from))
           continue;
         if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::Neighbours) {
           auto nb = f1::decode_neighbours(buf, static_cast<size_t>(n), f1_mac);
@@ -2114,14 +2181,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
   /* Gap scheduling: the retune bound both retunes are planned with (the
    * configured floor, raised by any slower retune measured), and neighbours
    * parked after skipping (no slot clear for them) until a superframe. */
-  const int64_t gap_retune_floor_us = envl("CELL_UE_GAP_RETUNE_US", 30000, 1000, 500000);
+  /* 26 ms: the 8852CE's FastRetune measured 23.5-23.7 ms (11 retunes on the
+   * rig) + ~10 %. The CU plans phases with the same numbers (RAN_GAP_*). */
+  const int64_t gap_retune_floor_us = envl("CELL_UE_GAP_RETUNE_US", 26000, 1000, 500000);
   int64_t gap_retune_us = gap_retune_floor_us;
   std::map<uint16_t, int64_t> gap_parked;
   int64_t no_step_until_sf = -1; /* hold TSF steps until this superframe (after a gap) */
   devourer::cell::MeasTable ue_meas(devourer::cell::L3FilterConfig{
       static_cast<int>(envl("CELL_MEAS_L3_K", 4, 0, 19)), envl("CELL_MEAS_STALE_MS", 3000, 100, 60000)});
   const int64_t gap_every_sf = envl("CELL_UE_GAP_SF", 10, 0, 100000); /* 0 = no gaps */
-  const int64_t gap_guard_us = envl("CELL_UE_GAP_GUARD_US", 3000, 0, 50000);
+  const int64_t gap_guard_us = envl("CELL_UE_GAP_GUARD_US", 2000, 0, 50000);
   const int64_t mr_every_ms = envl("CELL_UE_MR_MS", 1000, 100, 60000);
   auto ue_ms = [] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2756,7 +2825,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
             {0, c.bcn_us},
             {sl[g->dl_slot].start_us, sl[g->dl_slot].len_us},
             {sl[g->ul_slot].start_us, sl[g->ul_slot].len_us}};
-        const bool cross_band = (cur_ch <= 14) != (n.channel <= 14);
+        const bool cross_band = devourer::cell::gap_cross_band(cur_ch, n.channel);
         const auto w = cross_band ? std::nullopt
                                   : devourer::cell::gap_window(n.offset_us, 500, gap_retune_us,
                                                                gap_guard_us, P, busy);

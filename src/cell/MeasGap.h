@@ -77,6 +77,10 @@ struct MrIe {
   bool operator==(const MrIe &) const = default;
 };
 
+/* A gap never crosses bands: a 2.4 <-> 5 GHz retune takes the full channel
+ * path (~90 ms on the 8852CE), longer than any gap. */
+inline bool gap_cross_band(uint8_t ch_a, uint8_t ch_b) { return (ch_a <= 14) != (ch_b <= 14); }
+
 /* A neighbour's TBTT on the serving grid. */
 inline int32_t neighbour_offset_us(int64_t phase_neighbour, int64_t phase_serving, int64_t period_us) {
   int64_t o = (phase_neighbour - phase_serving) % period_us;

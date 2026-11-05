@@ -73,7 +73,9 @@ namespace devourer::cell::f1 {
 /* 7: Neighbours (CU -> DU, the neighbour list for UE measurement gaps,
  * src/cell/MeasGap.h); Report carries the UEs' own measurements (ue_meas).
  * 6: Handover carries the target's channel (inter-frequency). */
-constexpr uint8_t kVersion = 7;
+/* 8: Phase (CU -> DU: a joining DU's TBTT phase, src/cell/PhasePlan.h); a
+ * Report with phase_us < 0 asks for one. */
+constexpr uint8_t kVersion = 8;
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -82,7 +84,8 @@ constexpr size_t kMaxHeard = 64;
 /* Every UE of a full cell with a full MR (serving + kMaxNeighbours). */
 constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 256 */
 
-enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6 };
+enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6,
+                            Phase = 7 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
 
 inline const char *ack_status_name(AckStatus s) {
@@ -295,7 +298,7 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {
   if (p == nullptr || n < 4 + kTagLen || p[0] != 'F' || p[1] != '1' || p[2] != kVersion)
     return std::nullopt;
-  if (p[3] < 1 || p[3] > 6)
+  if (p[3] < 1 || p[3] > 7)
     return std::nullopt;
   return static_cast<Type>(p[3]);
 }
@@ -628,6 +631,40 @@ inline std::optional<Neighbours> decode_neighbours(const uint8_t *p, size_t n, c
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return x;
+}
+
+/* CU -> DU: the phase a joining DU is to hold its grid at (the answer to a
+ * Report with phase_us < 0); `seq` echoes that Report's, so the DU takes
+ * only an answer to its own run's requests. */
+struct PhaseAssign {
+  uint16_t du = 0;
+  int64_t phase_us = 0;
+  uint64_t seq = 0;
+  bool operator==(const PhaseAssign &) const = default;
+};
+
+inline std::vector<uint8_t> encode_phase(const PhaseAssign &a, const Mac &mac) {
+  using namespace detail;
+  auto m = head(Type::Phase);
+  put(m, a.du, 2);
+  put(m, static_cast<uint64_t>(a.phase_us), 8);
+  put(m, a.seq, 8);
+  return seal(std::move(m), mac);
+}
+
+inline std::optional<PhaseAssign> decode_phase(const uint8_t *p, size_t n, const Mac &mac) {
+  using namespace detail;
+  auto o = open(p, n, Type::Phase, mac);
+  if (!o)
+    return std::nullopt;
+  Rd &r = *o;
+  PhaseAssign a;
+  a.du = static_cast<uint16_t>(r.get(2));
+  a.phase_us = static_cast<int64_t>(r.get(8));
+  a.seq = r.get(8);
+  if (!r.ok || r.i != r.n)
+    return std::nullopt;
+  return a;
 }
 
 struct StagerConfig {

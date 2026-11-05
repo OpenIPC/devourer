@@ -26,6 +26,10 @@
  * other scheduling frames, label 'H') makes a forged handover inert. An
  * unkeyed cell writes and ignores a zero tag (development).
  *
+ * Replay: the tag stops forgery, not replay. HoReceiver (the UE side) acts
+ * on an IE only if its id is above every one it accepted and its instant
+ * is still ahead, so an old beacon replayed later is inert.
+ *
  * Pure header; the cell_m6 ctest covers it. */
 #ifndef DEVOURER_CELL_HOCOMMAND_H
 #define DEVOURER_CELL_HOCOMMAND_H
@@ -158,11 +162,12 @@ inline std::optional<HoIe> decode_ho_body(const uint8_t *b, size_t n, const Mac 
   return h;
 }
 
-/* Every handover IE in an MPDU (radiotap stripped) addressed to cell
- * `cell`'s UE `ue`; the newest id wins. */
+/* The handover IE in one BEACON (radiotap stripped) addressed to cell
+ * `cell`'s UE `ue`; the newest id within this frame wins. Across beacons,
+ * replay is the caller's to reject: HoReceiver below. */
 inline std::optional<HoIe> find_ho_ie(const uint8_t *mpdu, size_t len, uint16_t cell, uint16_t ue,
                                       const Mac &mac) {
-  if (mpdu == nullptr || len < 36)
+  if (mpdu == nullptr || len < 36 || mpdu[0] != 0x80) /* beacons only */
     return std::nullopt;
   std::optional<HoIe> best;
   for (size_t off = 36; off + 2 <= len;) {
@@ -179,6 +184,30 @@ inline std::optional<HoIe> find_ho_ie(const uint8_t *mpdu, size_t len, uint16_t 
   }
   return best;
 }
+
+/* The UE's side: which handover IE it acts on. A captured, validly tagged
+ * beacon replayed later must not re-present a superseded or spent handover,
+ * so an IE is accepted only when its id is above every one accepted so far
+ * AND its switch instant (effective_sf, in the source cell's count, covered
+ * by the tag) is still ahead of the UE's current source superframe. */
+class HoReceiver {
+public:
+  bool accept(const HoIe &h, uint64_t now_source_sf) {
+    if (have_ && h.id <= last_id_)
+      return false; /* superseded, or the same one again */
+    if (h.effective_sf <= now_source_sf)
+      return false; /* its instant has passed: spent */
+    have_ = true;
+    last_id_ = h.id;
+    return true;
+  }
+  /* A new serving cell (after the switch): ids stay monotone (CU-wide). */
+  uint32_t last_id() const { return last_id_; }
+
+private:
+  bool have_ = false;
+  uint32_t last_id_ = 0;
+};
 
 } /* namespace devourer::cell */
 

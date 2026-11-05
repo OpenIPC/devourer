@@ -332,9 +332,33 @@ int main() {
     CHECK(t && *t == newer); /* the torn one is dropped, the intact newer one stays */
     auto plain = encode_ho_ie(a, {});
     std::vector<uint8_t> m2(36, 0);
+    m2[0] = 0x80;
     m2.insert(m2.end(), plain.begin(), plain.end());
     CHECK(find_ho_ie(m2.data(), m2.size(), 1, 1, {}));  /* unkeyed cell: tag ignored */
     CHECK(!find_ho_ie(m2.data(), m2.size(), 1, 1, k));  /* keyed UE: zero tag refused */
+    auto not_bcn = mpdu;
+    not_bcn[0] = 0x08; /* a data frame carrying the same bytes */
+    CHECK(!find_ho_ie(not_bcn.data(), not_bcn.size(), 1, 1, k));
+  }
+
+  /* --- Replay across beacons: the UE acts once, on a fresh command. --- */
+  {
+    HoReceiver rx;
+    HoIe h{100, 1, 1, 2, 3, 3, 7, 4200, 0};
+    CHECK(rx.accept(h, 4190));   /* new id, instant ahead */
+    CHECK(!rx.accept(h, 4191));  /* the same IE in the next beacons (or replayed) */
+    HoIe older = h;
+    older.id = 99;
+    older.effective_sf = 9000;
+    CHECK(!rx.accept(older, 4192)); /* superseded id, even with a later instant */
+    HoIe spent = h;
+    spent.id = 101;
+    spent.effective_sf = 4195;
+    CHECK(!rx.accept(spent, 4195)); /* its instant has passed */
+    HoIe next = h;
+    next.id = 102;
+    next.effective_sf = 4300;
+    CHECK(rx.accept(next, 4200) && rx.last_id() == 102);
   }
 
   if (failures == 0)

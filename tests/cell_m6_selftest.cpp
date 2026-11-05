@@ -44,6 +44,13 @@ int main() {
     CHECK(!f.valid(2000));
     f.update(-50, 2100);
     CHECK(f.value() == -50);
+    /* Samples resuming after a stale gap seed afresh, without reset(). */
+    L3Filter g({4, 2000});
+    g.update(-60, 0);
+    g.update(-90, 2001 + 0); /* 2001 ms later: stale, so not blended */
+    CHECK(g.value() == -90);
+    g.update(-80, 2100);
+    CHECK(std::fabs(g.value() + 85) < 1e-9); /* fresh again: blended (a = 1/2) */
     L3Filter raw({0, 2000}); /* k = 0: a = 1, no filtering */
     raw.update(-60, 0);
     raw.update(-70, 1);
@@ -88,6 +95,12 @@ int main() {
     w.evaluate(-70, {{2, -60}, {3, -55}}, 0);
     auto b = w.evaluate(-70, {{2, -60}, {3, -55}}, 700);
     CHECK(b && *b == 3);
+    /* ttt 0: the first qualifying evaluation fires. */
+    A3Config z = c;
+    z.ttt_ms = 0;
+    A3Trigger zt(1, z);
+    auto zh = zt.evaluate(-60, {{2, -50}}, 0);
+    CHECK(zh && *zh == 2);
     /* Dwell: right after a handover nothing fires, even with a strong
      * neighbour held past time-to-trigger. */
     w.handed_over(3, 700);
@@ -201,6 +214,30 @@ int main() {
     std::printf("cell_m6: DAPS dedup: 5000 frames, two 30%%-lossy paths: %d delivered once "
                 "(%d duplicates dropped, %d lost on both)\n",
                 delivered, dups, lost_both);
+  }
+
+  /* --- The DU's producer: a MeasTable fed per-frame quality, its snapshot
+   * into a report (own UEs -> meas in quarter dB, others -> heard), and
+   * staleness dropping a link that went quiet. --- */
+  {
+    MeasTable t({4, 2000});
+    for (int i = 0; i < 20; ++i) {
+      t.update(2, 1, -55, 30, i * 100);  /* cell 2 = this DU: its UE 1 */
+      t.update(1, 1, -72, 12, i * 100);  /* cell 1's UE 1, heard here */
+    }
+    t.update(3, 4, -90, 2, 0);           /* heard once, long ago */
+    f1::Report r;
+    r.du = 2;
+    f1::fill_report_measurements(r, 2, t.snapshot(1900));
+    CHECK(r.meas.size() == 1 && r.meas[0].ue == 1 && r.meas[0].rssi_qdbm == -220 &&
+          r.meas[0].snr_qdb == 120);
+    CHECK(r.heard.size() == 2); /* 3/4 still valid at 1900 ms */
+    f1::fill_report_measurements(r, 2, t.snapshot(2100));
+    CHECK(r.heard.size() == 1 && r.heard[0].cell == 1 && r.heard[0].rssi_dbm == -72 &&
+          r.heard[0].snr_db == 12);
+    const auto w = f1::encode_report(r, {});
+    auto d = f1::decode_report(w.data(), w.size(), {});
+    CHECK(d && d->meas == r.meas && d->heard == r.heard);
   }
 
   /* --- F1 v2: the measurement fields round-trip. --- */

@@ -17,6 +17,8 @@
  *               `min_dwell_ms` before another can trigger (ping-pong guard).
  *               The serving measurement must be valid: a gap in it is no
  *               reason to move (radio-link failure is a separate path).
+ *   MeasTable   one DU's filtered RSSI/SNR per (cell, UE): its own UEs and
+ *               the other cells' it hears; what its F1 report carries.
  *   SeqDedup    sequence duplicate suppression for DAPS: the same uplink
  *               frame arriving over two cells is delivered once. A sliding
  *               window behind the highest sequence seen, in serial-number
@@ -36,6 +38,8 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace devourer::cell {
 
@@ -50,7 +54,10 @@ public:
 
   /* One measurement (dB/dBm) at a monotonic time. */
   void update(double m, int64_t now_ms) {
-    v_ = have_ ? (1.0 - a_) * v_ + a_ * m : m; /* the first sample seeds it */
+    /* The first sample seeds it, and so does the first after a stale gap: a
+     * link that comes back is measured afresh, not blended with the past. */
+    const bool fresh = have_ && now_ms - last_ms_ <= cfg_.stale_ms;
+    v_ = fresh ? (1.0 - a_) * v_ + a_ * m : m;
     have_ = true;
     last_ms_ = now_ms;
   }
@@ -101,11 +108,10 @@ public:
       const bool enter = n - cfg_.hysteresis_db > s + cfg_.offset_db;
       const bool leave = n + cfg_.hysteresis_db < s + cfg_.offset_db;
       if (it == since_.end()) {
-        if (enter)
-          since_[cell] = now_ms;
-        continue;
-      }
-      if (leave) {
+        if (!enter)
+          continue;
+        it = since_.emplace(cell, now_ms).first; /* ttt 0: may fire right away */
+      } else if (leave) {
         since_.erase(it);
         continue;
       }
@@ -144,6 +150,47 @@ private:
   std::map<uint16_t, int64_t> since_;
   bool have_ho_ = false;
   int64_t last_ho_ms_ = 0;
+};
+
+/* The filtered uplink quality per (cell, UE) one DU measures: its own UEs
+ * (cell = its own id) and the other cells' it hears. RSSI and SNR each go
+ * through an L3Filter; snapshot() lists only the valid (fresh) entries. */
+struct MeasEntry {
+  uint16_t cell = 0, ue = 0;
+  double rssi_dbm = 0, snr_db = 0;
+};
+class MeasTable {
+public:
+  explicit MeasTable(L3FilterConfig c = {}) : cfg_(c) {}
+  void update(uint16_t cell, uint16_t ue, double rssi_dbm, double snr_db, int64_t now_ms) {
+    auto it = m_.find({cell, ue});
+    if (it == m_.end())
+      it = m_.emplace(std::make_pair(cell, ue), Pair{L3Filter(cfg_), L3Filter(cfg_)}).first;
+    it->second.rssi.update(rssi_dbm, now_ms);
+    it->second.snr.update(snr_db, now_ms);
+  }
+  /* Valid entries now; entries stale for 5x stale_ms are forgotten. */
+  std::vector<MeasEntry> snapshot(int64_t now_ms) {
+    std::vector<MeasEntry> v;
+    for (auto it = m_.begin(); it != m_.end();) {
+      if (now_ms - it->second.rssi.last_ms() > 5 * cfg_.stale_ms) {
+        it = m_.erase(it);
+        continue;
+      }
+      if (it->second.rssi.valid(now_ms))
+        v.push_back({it->first.first, it->first.second, it->second.rssi.value(),
+                     it->second.snr.value()});
+      ++it;
+    }
+    return v;
+  }
+
+private:
+  struct Pair {
+    L3Filter rssi, snr;
+  };
+  L3FilterConfig cfg_;
+  std::map<std::pair<uint16_t, uint16_t>, Pair> m_;
 };
 
 /* DAPS duplicate suppression (see the header). */

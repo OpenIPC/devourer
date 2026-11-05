@@ -97,6 +97,8 @@
 //   CELL_F1_REPORT_MS [1000]  report period
 //   CELL_F1_TIMEOUT_MS [3000] no CU message this long = CU outage
 //   CELL_F1_MIN_LEAD_SF [8] CELL_F1_PUBLISH_LEAD_SF [5]   the failure model
+//   CELL_MEAS_L3_K [4] CELL_MEAS_STALE_MS [2000]  the reported uplink quality:
+//                             a 3GPP L3 filter per (cell, UE), stale = absent
 //   CELL_SYNC_UL_SF [30]      beacon-engine proxy: once UEs in the map have
 //                             been heard, all of them silent this many
 //                             superframes = the DU's beacon is not reaching
@@ -856,11 +858,11 @@ int run_du(IRadio *dev, const Cfg &c) {
     bool coordinated = false;
     std::vector<devourer::cell::CoordAssign> ues;
   } f1_view;
-  struct Heard {
-    double rssi = 0;
-    std::chrono::steady_clock::time_point seen;
-  };
-  std::map<std::pair<uint16_t, uint16_t>, Heard> heard; /* (cell, ue) -> (f1_mu) */
+  /* Filtered uplink quality (L3, src/cell/Handover.h) per (cell, UE): this
+   * cell's own UEs and the other cells' it hears; the F1 report's
+   * measurements (f1_mu). */
+  devourer::cell::MeasTable meas_tab(devourer::cell::L3FilterConfig{
+      static_cast<int>(envl("CELL_MEAS_L3_K", 4, 0, 19)), envl("CELL_MEAS_STALE_MS", 2000, 100, 60000)});
   devourer::cell::CoordDu layout;
   devourer::cell::coord_layout(*grid, layout);
   auto now_ms = [] {
@@ -925,18 +927,20 @@ int run_du(IRadio *dev, const Cfg &c) {
         const uint16_t oc = static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]);
         const uint16_t ou = p.Data[15];
         if (oc != c.cell && ou >= 1) {
-          const double r = static_cast<double>(p.RxAtrib.rssi[0]) - 110.0;
           std::lock_guard<std::mutex> lk(f1_mu);
-          auto &h = heard[{oc, ou}];
-          const bool fresh = h.seen.time_since_epoch().count() == 0;
-          h.rssi = fresh ? r : 0.8 * h.rssi + 0.2 * r;
-          h.seen = std::chrono::steady_clock::now();
+          meas_tab.update(oc, ou, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
+                          static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
           return;
         }
       }
       const auto ub = parse_ue_beacon(p.Data.data(), p.Data.size(), c.cell, auth);
       if (!ub)
         return;
+      if (f1_on) { /* an own UE's (verified) uplink: its serving measurement */
+        std::lock_guard<std::mutex> lk(f1_mu);
+        meas_tab.update(c.cell, ub->ue, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
+                        static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+      }
       /* The UL slot of the grant the UE runs (by the epoch it reports). */
       std::optional<size_t> slot;
       {
@@ -1051,17 +1055,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.fixed = layout.fixed;
             r.positions = layout.positions;
             r.ues = f1_view.ues;
-            const auto now = std::chrono::steady_clock::now();
-            for (auto it = heard.begin(); it != heard.end();) {
-              if (now - it->second.seen > std::chrono::seconds(10)) { /* gone */
-                it = heard.erase(it);
-                continue;
-              }
-              if (r.heard.size() < f1::kMaxHeard)
-                r.heard.push_back({it->first.first, it->first.second,
-                                   static_cast<int8_t>(std::lround(it->second.rssi))});
-              ++it;
-            }
+            f1::fill_report_measurements(r, c.cell, meas_tab.snapshot(now_ms()));
             if (f1_view.net_sf < 0) /* no network superframe yet: nothing to plan on */
               r.ues.clear();
           }

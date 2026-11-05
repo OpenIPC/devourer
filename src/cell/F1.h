@@ -48,6 +48,7 @@
 #define DEVOURER_CELL_F1_H
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -56,6 +57,7 @@
 #include <vector>
 
 #include "cell/Coord.h"
+#include "cell/Handover.h"
 #include "cell/Rach.h"
 
 namespace devourer::cell::f1 {
@@ -233,6 +235,28 @@ inline CoordInterval get_iv(Rd &r) {
   return iv;
 }
 } /* namespace detail */
+
+/* A DU's report measurements from its MeasTable snapshot: entries of its own
+ * cell `own` go to `meas` (quarter dB), the others to `heard` (dB), each list
+ * capped at its wire bound. */
+inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<MeasEntry> &snap) {
+  auto clamp8 = [](double v) {
+    return static_cast<int8_t>(std::lround(std::max(-128.0, std::min(127.0, v))));
+  };
+  auto clampq = [](double v) {
+    return static_cast<int16_t>(std::lround(std::max(-32768.0, std::min(32767.0, v * 4.0))));
+  };
+  r.meas.clear();
+  r.heard.clear();
+  for (const MeasEntry &e : snap) {
+    if (e.cell == own) {
+      if (r.meas.size() < kMaxUes)
+        r.meas.push_back({e.ue, clampq(e.rssi_dbm), clampq(e.snr_db)});
+    } else if (r.heard.size() < kMaxHeard) {
+      r.heard.push_back({e.cell, e.ue, clamp8(e.rssi_dbm), clamp8(e.snr_db)});
+    }
+  }
+}
 
 /* Message type of a datagram (before any verification), nullopt if not F1. */
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {

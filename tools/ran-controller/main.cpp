@@ -172,6 +172,7 @@ int main() {
   const auto t0 = std::chrono::steady_clock::now();
   const auto deadline = t0 + std::chrono::seconds(secs);
   auto next_plan = t0 + std::chrono::milliseconds(plan_ms);
+  auto next_meas = t0 + std::chrono::seconds(10);
   /* Schedule freshness (F1.h): the realtime clock in us, strictly
    * increasing, so a restarted CU's sequence still moves forward. */
   uint64_t last_seq = 0;
@@ -237,6 +238,28 @@ int main() {
       }
     }
     const auto now = std::chrono::steady_clock::now();
+    /* The DUs' filtered uplink measurements (M6), every 10 s. */
+    if (now >= next_meas) {
+      next_meas = now + std::chrono::seconds(10);
+      for (const auto &kv : dus) {
+        std::string m = "{\"ev\":\"ran.meas\",\"du\":" + std::to_string(kv.first) + ",\"own\":[";
+        for (size_t i = 0; i < kv.second.rep.meas.size(); ++i) {
+          const auto &q = kv.second.rep.meas[i];
+          char b[64];
+          snprintf(b, sizeof b, "%s[%u,%.2f,%.2f]", i ? "," : "", q.ue, q.rssi_qdbm / 4.0,
+                   q.snr_qdb / 4.0);
+          m += b;
+        }
+        m += "],\"heard\":[";
+        for (size_t i = 0; i < kv.second.rep.heard.size(); ++i) {
+          const auto &h = kv.second.rep.heard[i];
+          char b[64];
+          snprintf(b, sizeof b, "%s[%u,%u,%d,%d]", i ? "," : "", h.cell, h.ue, h.rssi_dbm, h.snr_db);
+          m += b;
+        }
+        emit(m + "]}");
+      }
+    }
     if (now < next_plan)
       continue;
     next_plan = now + std::chrono::milliseconds(plan_ms);

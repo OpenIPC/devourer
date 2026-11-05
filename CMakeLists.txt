@@ -1655,6 +1655,16 @@ add_executable(CellM5Selftest
 target_link_libraries(CellM5Selftest PRIVATE devourer)
 add_test(NAME cell_m5 COMMAND CellM5Selftest)
 
+# Headless guard for the M6 cell core (src/cell/Handover.h): the L3
+# measurement filter, the A3 (CHO) trigger with hysteresis / time-to-trigger /
+# dwell (a noisy cell-edge crossing: raw RSSI ping-pongs, filtered A3 moves
+# once), DAPS sequence dedup, and the F1 v2 measurement fields.
+add_executable(CellM6Selftest
+    tests/cell_m6_selftest.cpp
+)
+target_link_libraries(CellM6Selftest PRIVATE devourer)
+add_test(NAME cell_m6 COMMAND CellM6Selftest)
+
 # Headless guard for the M1 cell node's pure logic (examples/cell/cell.h).
 add_executable(CellNodeSelftest
     tests/cell_node_selftest.cpp

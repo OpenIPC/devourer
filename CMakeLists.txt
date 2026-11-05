@@ -1646,6 +1646,15 @@ add_executable(CellM4Selftest
 target_link_libraries(CellM4Selftest PRIVATE devourer)
 add_test(NAME cell_m4 COMMAND CellM4Selftest)
 
+# Headless guard for the M5 cell core (src/cell/Coord.h, F1.h): the CU's
+# coordination planner on the rig layout and random scenarios, the F1
+# messages (round trips, tags, malformed input) and the DU's failure model.
+add_executable(CellM5Selftest
+    tests/cell_m5_selftest.cpp
+)
+target_link_libraries(CellM5Selftest PRIVATE devourer)
+add_test(NAME cell_m5 COMMAND CellM5Selftest)
+
 # Headless guard for the M1 cell node's pure logic (examples/cell/cell.h).
 add_executable(CellNodeSelftest
     tests/cell_node_selftest.cpp

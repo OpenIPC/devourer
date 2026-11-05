@@ -159,6 +159,27 @@ int main() {
            s.valid && !s.snr_sampled[0] && !s.evm_sampled[0]);
   }
 
+  {
+    /* M4 sync tier: derived from the timing caps. */
+    AdapterCaps c;
+    expect("tier none by default", sync_tier(c) == SyncTier::None);
+    c.hw_beacon_txtsf = true;
+    expect("tier none without tsf write", sync_tier(c) == SyncTier::None);
+    c.tsf_write_ok = true;
+    c.transport = "usb";
+    c.tbtt_follows_tsf = true;
+    expect("tier coarse over usb", sync_tier(c) == SyncTier::Coarse);
+    c.transport = "pcie";
+    c.tbtt_follows_tsf = false;
+    expect("tier coarse: tbtt deaf to the write", sync_tier(c) == SyncTier::Coarse);
+    c.tbtt_follows_tsf = true;
+    expect("tier tight: pcie + tbtt follows tsf", sync_tier(c) == SyncTier::Tight);
+    c.hw_beacon_txtsf = false;
+    expect("tier none without hw beacon", sync_tier(c) == SyncTier::None);
+    expect("tier names", std::string_view(sync_tier_name(SyncTier::Tight)) == "tight" &&
+                             std::string_view(sync_tier_name(SyncTier::Coarse)) == "coarse");
+  }
+
   if (g_fail) {
     std::printf("adapter_caps_selftest: %d failure(s)\n", g_fail);
     return 1;

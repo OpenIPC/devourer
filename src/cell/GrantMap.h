@@ -32,6 +32,12 @@ namespace devourer::cell {
 constexpr uint8_t kGrantOui[3] = {0x57, 0x42, 0x75}; /* devourer test OUI */
 constexpr uint8_t kGrantVersion = 1;
 constexpr size_t kGrantMax = kMaxUesPerCell; /* 3+21+24*8+2 = 218 <= 255 IE bytes */
+/* GrantMap::flags. kGrantAutonomous (M4, #258): the DU has suspended its
+ * COORDINATED schedule (it lost sync with the fabric, see src/cell/SyncHealth.h).
+ * Its UEs fall back to carrier sense and a random uplink-beacon backoff, as
+ * the DU does, so the desynced cell cannot collide with its neighbours'
+ * slots. Clear (the default) = deterministic access on the grid. */
+constexpr uint8_t kGrantAutonomous = 0x01;
 
 struct Grant {
   uint16_t ue = 0;

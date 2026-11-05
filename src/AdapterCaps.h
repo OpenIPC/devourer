@@ -27,6 +27,7 @@
 #define DEVOURER_ADAPTER_CAPS_H
 
 #include <cstdint>
+#include <string_view>
 
 #include "TxCaps.h"
 #include "TxPower.h"
@@ -497,6 +498,35 @@ struct AdapterCaps {
    * host-injected SendTrigger is what puts a Trigger on the air. */
   bool sounding_ok = false;
 };
+
+/* The M4 (#258) sync tier of a DU built on this adapter, from the timing caps
+ * above (derived, so it cannot drift from them). M5's coordinator reads it.
+ *   Tight  — PCIe/MMIO, a writable TSF the hardware beacon's TBTT follows: the
+ *            PTP discipline (src/cell/TsfDiscipline.h) holds the beacon grid to
+ *            ~us (RTL8852CE: on-air TBTT p95 ~4 us across three cells). Eligible
+ *            for same-channel coordinated slots.
+ *   Coarse — a hardware beacon with a writable TSF over a slower bus or a
+ *            TBTT that does not follow the write (USB; Jaguar2/3, steered per
+ *            TU): ~0.5-1.5 ms disturbance. Needs ms guards or its own channel.
+ *   None   — no hardware beacon or no TSF write: cannot hold a shared grid.
+ * The tier is what the TSF-write actuator achieves. A part steered another way
+ * (PinBeaconTbtt, measured to ~0.67 us on the 8821CE) is not promoted by it. */
+enum class SyncTier : uint8_t { None = 0, Coarse = 1, Tight = 2 };
+
+inline const char *sync_tier_name(SyncTier t) {
+  switch (t) {
+  case SyncTier::Tight: return "tight";
+  case SyncTier::Coarse: return "coarse";
+  default: return "none";
+  }
+}
+
+inline SyncTier sync_tier(const AdapterCaps &c) {
+  if (!c.hw_beacon_txtsf || !c.tsf_write_ok)
+    return SyncTier::None;
+  const bool pcie = c.transport && std::string_view(c.transport) == "pcie";
+  return pcie && c.tbtt_follows_tsf ? SyncTier::Tight : SyncTier::Coarse;
+}
 
 inline void set_standard_freq_ranges(AdapterCaps &c) {
   c.tune_2g4 = BandRange{true, 2412, 2484};

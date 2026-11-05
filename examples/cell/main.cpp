@@ -63,6 +63,29 @@
 //   CELL_RELEASE_SF [50]      DU: release a JOINED UE whose uplink has been
 //                             absent this many superframes (static UEs stay)
 //   CELL_SECS [60]            run time
+// DU service mode (M4, #258) — set CELL_REF_PTP to hold this DU's beacon grid
+// to a PTP hardware clock (src/cell/TsfDiscipline.h; needs a Tight sync tier,
+// AdapterCaps sync_tier) and gate the coordinated schedule on its health
+// (src/cell/SyncHealth.h). The DU starts AUTONOMOUS (carrier sense on, random
+// beacon backoff, kGrantAutonomous in the grant map, so its UEs do the same)
+// and turns coordinated (no deferral, deterministic beacon) only once Locked.
+// It falls back to autonomous on any loss.
+//   CELL_REF_PTP              the PHC, e.g. /dev/ptp0 (unset: a standalone
+//                             cell, always coordinated, the M1-M3 behaviour)
+//   CELL_PHASE_US [0]         where this DU's TBTT sits: ref % period
+//   CELL_SYNC_LOOP_MS [500]   discipline period
+//   CELL_SYNC_ACQUIRE_S [30]  wait for lock before serving (then autonomous)
+//   CELL_SYNC_LOCK_US [10] CELL_SYNC_LOST_US [200]   SyncHealth thresholds
+//   CELL_SYNC_LOCK_ITERS [8] CELL_SYNC_LOST_ITERS [20]
+//   CELL_REF_CHECK            a shell command; exit 0 = the reference is good
+//                             (e.g. ptp4l in SLAVE, checked with pmc); run
+//                             every CELL_REF_CHECK_S [2]. Unset: the PHC read
+//                             alone.
+//   CELL_SYNC_UL_SF [30]      beacon-engine proxy: once UEs in the map have
+//                             been heard, all of them silent this many
+//                             superframes = the DU's beacon is not reaching
+//                             them. Three failed beacon updates in a row also
+//                             count.
 //   DEVOURER_CHANNEL [149]
 // Output: JSONL on stdout ("ev":"cell.*").
 #include <algorithm>
@@ -82,6 +105,8 @@
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "RadiotapBuilder.h"
@@ -95,6 +120,8 @@
 #include "logger.h"
 #include "radio_open.h"
 #include "cell/Rach.h"
+#include "cell/SyncHealth.h"
+#include "cell/TsfDiscipline.h"
 #include "cell/UeRegistry.h"
 #if defined(DEVOURER_CELL_OPENSSL)
 #include <openssl/evp.h>
@@ -112,6 +139,14 @@ using devourer::cell::HarqStats;
 using devourer::cell::LinkAdapt;
 
 namespace {
+
+#define CELL_FD_TO_CLOCKID(fd) ((~(clockid_t)(fd) << 3) | 3)
+
+double phc_us(clockid_t c) {
+  struct timespec t;
+  clock_gettime(c, &t);
+  return static_cast<double>(t.tv_sec) * 1e6 + static_cast<double>(t.tv_nsec) / 1e3;
+}
 
 long envl(const char *k, long d, long lo, long hi) {
   const char *v = std::getenv(k);
@@ -370,12 +405,65 @@ int run_du(IRadio *dev, const Cfg &c) {
   const CellMac auth = cell_auth(c);
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
-  dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
-  if (!dev->SetBeaconBackoff(false)) {
-    fprintf(stderr, "SetBeaconBackoff(false) refused\n");
-    return 1;
+  /* M4 DU service mode (see the header): the PHC, the discipline loop, the
+   * health that gates the coordinated schedule. */
+  const char *ref_ptp = std::getenv("CELL_REF_PTP");
+  const bool svc = ref_ptp && *ref_ptp;
+  const devourer::SyncTier tier = devourer::sync_tier(dev->GetAdapterCaps());
+  struct Fd {
+    int fd = -1;
+    ~Fd() {
+      if (fd >= 0)
+        close(fd);
+    }
+  } ref_fd;
+  clockid_t refclk = CLOCK_REALTIME;
+  if (svc) {
+    if (tier != devourer::SyncTier::Tight) {
+      fprintf(stderr, "CELL_REF_PTP needs a tight-sync DU (this radio: %s)\n",
+              devourer::sync_tier_name(tier));
+      return 2;
+    }
+    ref_fd.fd = open(ref_ptp, O_RDONLY);
+    if (ref_fd.fd < 0) {
+      fprintf(stderr, "open %s failed\n", ref_ptp);
+      return 1;
+    }
+    refclk = CELL_FD_TO_CLOCKID(ref_fd.fd);
   }
-  dev->SetCcaMode(true);  // coordinated grid: no carrier-sense deferral
+  const int sync_loop_ms = static_cast<int>(envl("CELL_SYNC_LOOP_MS", 500, 50, 10000));
+  const int acquire_s = static_cast<int>(envl("CELL_SYNC_ACQUIRE_S", 30, 0, 3600));
+  const int64_t sync_ul_sf = envl("CELL_SYNC_UL_SF", 30, 2, 100000);
+  const int ref_check_s = static_cast<int>(envl("CELL_REF_CHECK_S", 2, 1, 600));
+  const char *ref_cmd = std::getenv("CELL_REF_CHECK");
+  devourer::cell::TsfDisciplineConfig dc;
+  dc.interval_us = P;
+  dc.phase_us = static_cast<double>(envl("CELL_PHASE_US", 0, 0, P - 1));
+  devourer::cell::TsfDiscipline disc(dc);
+  devourer::cell::SyncHealthConfig shc;
+  shc.lock_us = envf("CELL_SYNC_LOCK_US", 10, 0.5, 10000);
+  shc.lost_us = envf("CELL_SYNC_LOST_US", 200, shc.lock_us, 100000);
+  shc.lock_iters = static_cast<int>(envl("CELL_SYNC_LOCK_ITERS", 8, 1, 1000));
+  shc.lost_iters = static_cast<int>(envl("CELL_SYNC_LOST_ITERS", 20, 1, 1000));
+  devourer::cell::SyncHealth health(shc);
+
+  dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
+  /* Coordinated: no carrier-sense deferral, a deterministic beacon departure
+   * (the cell owns its grid slots). Autonomous: carrier sense and the random
+   * beacon backoff, so a cell off the shared timebase defers to its
+   * neighbours instead of colliding with their slots. A standalone cell
+   * (no CELL_REF_PTP) owns its channel: always coordinated. */
+  bool coordinated = !svc;
+  auto apply_mode = [&](bool coord) {
+    if (!dev->SetBeaconBackoff(!coord)) {
+      fprintf(stderr, "SetBeaconBackoff(%d) refused\n", coord ? 0 : 1);
+      return false;
+    }
+    dev->SetCcaMode(coord);
+    return true;
+  };
+  if (!apply_mode(coordinated))
+    return 1;
 
   /* The UE pool over the capacity grid's fixed positions; static UEs are
    * bound first (positions 1..n == their ids, du_budget_ok checks the list),
@@ -391,6 +479,7 @@ int run_du(IRadio *dev, const Cfg &c) {
   GrantMap map;
   GrantMap prev_map; /* the map before the last publish (in force until map's effective_sf) */
   map.cell_id = c.cell;
+  map.flags = coordinated ? 0 : devourer::cell::kGrantAutonomous;
   map.epoch = 1;
   map.effective_sf = 0;
   map.period_tu = static_cast<uint16_t>(c.tu);
@@ -418,9 +507,97 @@ int run_du(IRadio *dev, const Cfg &c) {
     fprintf(stderr, "ReadTsfAndFreeRun unsupported\n");
     return 1;
   }
-  // DU tsf - freerun: constant (the DU never writes its TSF).
-  const int64_t tsf_minus_fr = static_cast<int64_t>(t0) - static_cast<int64_t>(f0);
+  // DU tsf - freerun: constant between TSF writes, which only the DU service
+  // mode's discipline makes (it re-reads the pair after each one).
+  std::atomic<int64_t> tsf_minus_fr{static_cast<int64_t>(t0) - static_cast<int64_t>(f0)};
   std::atomic<int64_t> fr_ref{static_cast<int64_t>(f0)};
+
+  /* The reference check: a command, off the radio path (it may take tens of
+   * ms), its verdict an atomic the discipline reads. */
+  std::atomic<bool> ref_ok{true};
+  std::atomic<bool> ref_stop{false};
+  auto run_ref_check = [&] {
+    if (svc && ref_cmd && *ref_cmd)
+      ref_ok.store(std::system(ref_cmd) == 0);
+  };
+  run_ref_check();
+  std::thread ref_thr;
+  if (svc && ref_cmd && *ref_cmd)
+    ref_thr = std::thread([&] {
+      while (!ref_stop.load()) {
+        for (int i = 0; i < ref_check_s * 10 && !ref_stop.load(); ++i)
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!ref_stop.load())
+          run_ref_check();
+      }
+    });
+  struct Joiner {
+    std::atomic<bool> &stop;
+    std::thread &t;
+    ~Joiner() {
+      stop.store(true);
+      if (t.joinable())
+        t.join();
+    }
+  } ref_join{ref_stop, ref_thr};
+
+  /* One discipline iteration: a PHC-bracketed radio read, the step, the
+   * health verdict. Runs on the DU's main thread (the only TSF writer). */
+  uint64_t sync_samples = 0;
+  std::array<uint64_t, 3> sync_in_state{};
+  auto sync_once = [&](int64_t sf_now, bool beacon_ok) {
+    uint64_t t = 0, f = 0;
+    const double r1 = phc_us(refclk);
+    const bool rd = dev->ReadTsfAndFreeRun(t, f);
+    const double r2 = phc_us(refclk);
+    const auto d = disc.sample(r1, r2, rd, static_cast<int64_t>(t), static_cast<int64_t>(f));
+    bool wok = true;
+    if (d.step_us != 0) {
+      wok = dev->WriteTsf(dev->ReadTsf() + static_cast<uint64_t>(d.write_us));
+      disc.wrote(wok);
+      uint64_t t2 = 0, f2 = 0;
+      if (dev->ReadTsfAndFreeRun(t2, f2)) {
+        tsf_minus_fr.store(static_cast<int64_t>(t2) - static_cast<int64_t>(f2));
+        fr_ref.store(static_cast<int64_t>(f2));
+      }
+    }
+    const bool rok = ref_ok.load();
+    const auto st = health.update(d, rok, beacon_ok, wok);
+    ++sync_samples;
+    ++sync_in_state[static_cast<size_t>(st)];
+    char l[300];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.sync\",\"sf\":%lld,\"state\":\"%s\",\"accepted\":%d,"
+             "\"phase_us\":%.1f,\"step_us\":%lld,\"write_ok\":%d,\"ppm\":%.2f,"
+             "\"ref_ok\":%d,\"beacon_ok\":%d}",
+             (long long)sf_now, devourer::cell::sync_state_name(st), d.acting ? 1 : 0,
+             d.phase_err_us, (long long)d.step_us, wok ? 1 : 0, d.ppm, rok ? 1 : 0,
+             beacon_ok ? 1 : 0);
+    emit(l);
+  };
+  auto set_mode = [&](bool coord, int64_t sf_now) {
+    if (coord == coordinated || !apply_mode(coord))
+      return;
+    coordinated = coord;
+    char l[160];
+    snprintf(l, sizeof l, "{\"ev\":\"cell.mode\",\"sf\":%lld,\"mode\":\"%s\"}",
+             (long long)sf_now, coord ? "coordinated" : "autonomous");
+    emit(l);
+  };
+  if (svc) {
+    /* Acquire before serving: the first steps can move the grid by up to half
+     * a superframe, which no UE should see mid-schedule. */
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(acquire_s);
+    while (!health.coordinated() && std::chrono::steady_clock::now() < until) {
+      sync_once(-1, true);
+      std::this_thread::sleep_for(std::chrono::milliseconds(sync_loop_ms));
+    }
+    set_mode(health.coordinated(), -1);
+    char l[160];
+    snprintf(l, sizeof l, "{\"ev\":\"cell.sync.acquire\",\"locked\":%d,\"samples\":%llu}",
+             health.coordinated() ? 1 : 0, (unsigned long long)sync_samples);
+    emit(l);
+  }
 
   std::mutex mu;  // guards ta, ue_epoch
   std::map<uint16_t, TaLoop> ta;
@@ -450,12 +627,15 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::vector<uint8_t> rar_on_air;                 /* the RACH answers in the live beacon */
   std::vector<devourer::cell::RachResponse> rar_on_air_set; /* ... as answers, for accounting */
   std::map<uint16_t, int64_t> last_ul_sf;          /* per UE: superframe of its last uplink (mu) */
+  std::map<uint16_t, int64_t> heard_ul_sf;         /* ... only ever set by an uplink heard (mu) */
+  int beacon_fail_run = 0;                         /* consecutive failed beacon updates */
 
   char line[384];
   snprintf(line, sizeof line,
            "{\"ev\":\"cell.du.start\",\"cell\":%u,\"period_us\":%lld,\"ues\":%zu,\"ch\":%u,"
-           "\"tsf_minus_fr\":%lld}",
-           c.cell, (long long)P, ues.size(), c.ch, (long long)tsf_minus_fr);
+           "\"tsf_minus_fr\":%lld,\"tier\":\"%s\",\"svc\":%d}",
+           c.cell, (long long)P, ues.size(), c.ch, (long long)tsf_minus_fr.load(),
+           devourer::sync_tier_name(tier), svc ? 1 : 0);
   emit(line);
   for (size_t i = 0; i < grid->slots().size(); ++i) {
     const auto &s = grid->slots()[i];
@@ -473,7 +653,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       if (rach_on) {
         const size_t mlen = p.Data.size() - (p.RxAtrib.fcs_present && p.Data.size() >= 4 ? 4 : 0);
         if (auto rf = parse_rach_frame(p.Data.data(), mlen, c.cell)) {
-          const int64_t at = extend32_near(p.RxAtrib.tsfl, fr_ref.load()) + tsf_minus_fr;
+          const int64_t at = extend32_near(p.RxAtrib.tsfl, fr_ref.load()) + tsf_minus_fr.load();
           const auto pos = grid->at(at);
           std::optional<devourer::cell::RachResponse> a;
           /* Only a request that arrived inside the RACH slot is considered:
@@ -503,7 +683,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       if (!slot)
         return;
       const int64_t fr = extend32_near(p.RxAtrib.tsfl, fr_ref.load());
-      const int64_t at = fr + tsf_minus_fr;  // DU tsf at RX
+      const int64_t at = fr + tsf_minus_fr.load();  // DU tsf at RX
       const auto pos = grid->at(at);
       const int64_t target = grid->slots()[*slot].start_us + c.ul_target_us;
       const int64_t err = wrap_phase(pos.into_us - target, P);
@@ -518,6 +698,7 @@ int run_du(IRadio *dev, const Cfg &c) {
         }
         ue_epoch[ub->ue] = ub->epoch;
         last_ul_sf[ub->ue] = pos.superframe;
+        heard_ul_sf[ub->ue] = pos.superframe;
         auto d = dlue.find(ub->ue);
         if (d != dlue.end()) {
           ++d->second.ul_in_window;
@@ -556,6 +737,7 @@ int run_du(IRadio *dev, const Cfg &c) {
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
   auto next_ta = std::chrono::steady_clock::now() + std::chrono::seconds(ta_every_s);
+  auto next_sync = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_loop_ms);
   int64_t sf = grid->at(static_cast<int64_t>(dev->ReadTsf())).superframe + 1;
   while (std::chrono::steady_clock::now() < deadline) {
     /* Serve the UEs of the map IN FORCE: a newly admitted UE starts
@@ -623,9 +805,34 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint64_t t = 0, f = 0;
     if (dev->ReadTsfAndFreeRun(t, f))
       fr_ref.store(static_cast<int64_t>(f));
+    if (svc && std::chrono::steady_clock::now() >= next_sync) {
+      next_sync = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_loop_ms);
+      /* The beacon-engine proxy (no beacon TX counter on this path): the
+       * newest uplink of the UEs in the live map that were ever heard. */
+      bool beacon_ok = beacon_fail_run < 3;
+      {
+        std::lock_guard<std::mutex> lk(mu);
+        int64_t newest = -1;
+        for (const Grant &g : map.grants) {
+          auto h = heard_ul_sf.find(g.ue);
+          if (h != heard_ul_sf.end())
+            newest = std::max(newest, h->second);
+        }
+        if (newest >= 0 && sf - newest > sync_ul_sf)
+          beacon_ok = false;
+      }
+      sync_once(sf, beacon_ok);
+      set_mode(health.coordinated(), sf);
+    }
     /* Stage the next map; it replaces `map` only once it is on air. */
     GrantMap next = map;
     bool changed = false;
+    /* The mode the UEs must follow (retried while a publish fails). */
+    const uint8_t want_flags = coordinated ? 0 : devourer::cell::kGrantAutonomous;
+    if (next.flags != want_flags) {
+      next.flags = want_flags;
+      changed = true;
+    }
     std::vector<uint8_t> rar_now;
     std::vector<devourer::cell::RachResponse> rar_sel;
     std::vector<uint16_t> to_release;
@@ -723,6 +930,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       }
       const auto nb = build_du_beacon(next, rar_now);
       const bool ok = !nb.empty() && dev->UpdateBeaconPayload(nb.data(), nb.size());
+      beacon_fail_run = ok ? 0 : beacon_fail_run + 1;
       if (ok) {
         rar_on_air = rar_now;
         rar_on_air_set = rar_sel;
@@ -735,6 +943,7 @@ int run_du(IRadio *dev, const Cfg &c) {
           for (uint16_t ue : to_release) {
             reg.release_id(ue);
             last_ul_sf.erase(ue);
+            heard_ul_sf.erase(ue);
             char l[120];
             snprintf(l, sizeof l, "{\"ev\":\"cell.release\",\"ue\":%u,\"sf\":%lld}", ue,
                      (long long)sf);
@@ -752,8 +961,9 @@ int run_du(IRadio *dev, const Cfg &c) {
         const GrantMap &shown = ok ? map : next;
         char l[320];
         int n = snprintf(l, sizeof l, "{\"ev\":\"cell.grant\",\"epoch\":%u,\"effective_sf\":%llu,"
-                                      "\"ok\":%d,\"ta\":{",
-                         shown.epoch, (unsigned long long)shown.effective_sf, ok ? 1 : 0);
+                                      "\"ok\":%d,\"flags\":%u,\"ta\":{",
+                         shown.epoch, (unsigned long long)shown.effective_sf, ok ? 1 : 0,
+                         shown.flags);
         for (size_t i = 0; i < shown.grants.size() && n > 0 && n < (int)sizeof l; ++i)
           n += snprintf(l + n, sizeof l - n, "%s\"%u\":[%d,%u]", i ? "," : "", shown.grants[i].ue,
                         shown.grants[i].ta_us, shown.grants[i].rate_mbps);
@@ -785,6 +995,16 @@ int run_du(IRadio *dev, const Cfg &c) {
              kv.second.la.rate_mbps());
     emit(l);
   }
+  if (svc) {
+    char l[240];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.sync.summary\",\"samples\":%llu,\"rejected\":%llu,"
+             "\"locked\":%llu,\"degraded\":%llu,\"lost\":%llu,\"transitions\":%u}",
+             (unsigned long long)sync_samples, (unsigned long long)disc.rejected(),
+             (unsigned long long)sync_in_state[2], (unsigned long long)sync_in_state[1],
+             (unsigned long long)sync_in_state[0], health.transitions());
+    emit(l);
+  }
   emit("{\"ev\":\"cell.du.done\"}");
   return 0;
 }
@@ -814,6 +1034,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
     return 1;
   }
   dev->SetCcaMode(true);
+  bool ue_autonomous = false; /* the DU's kGrantAutonomous, followed */
 
   const CellMac auth = cell_auth(c);
   std::mutex mu;  // guards sync, wrap, rxr
@@ -962,6 +1183,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
       m = rxr.current(static_cast<uint64_t>(sfn));
       if (m)
         mcopy = *m;
+    }
+    /* M4: follow the DU's mode — autonomous = carrier sense + a random
+     * uplink-beacon backoff while the DU is off the shared timebase. */
+    if (m) {
+      const bool want_auto = (mcopy.flags & devourer::cell::kGrantAutonomous) != 0;
+      if (want_auto != ue_autonomous && dev->SetBeaconBackoff(want_auto)) {
+        dev->SetCcaMode(!want_auto);
+        ue_autonomous = want_auto;
+        char l[140];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.ue.mode\",\"ue\":%d,\"mode\":\"%s\"}",
+                 me_a.load(), want_auto ? "autonomous" : "coordinated");
+        emit(l);
+      }
     }
     if (me_a == 0) {
       /* Joining: answers first, then maybe an attempt next superframe. */

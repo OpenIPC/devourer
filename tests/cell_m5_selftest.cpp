@@ -193,6 +193,7 @@ int main() {
     r.phase_us = 1500;
     r.period_us = 102400;
     r.net_sf = 0x1234567890ull;
+    r.seq = 0x0102030405060708ull;
     r.applied_version = 4;
     r.staged_version = 5;
     CoordDu d = rig_du(7, 1500, 3, 6000);

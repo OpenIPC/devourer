@@ -1684,6 +1684,20 @@ if(NOT WIN32)
     endif()
 endif()
 
+# ran-controller — the M5 (#259) CU (tools/ran-controller/main.cpp): F1
+# reports in, src/cell/Coord.h plans, schedules out. Header-only on the
+# library side: it never opens a radio, so it builds without libusb on a
+# controller host. POSIX sockets, so not on Windows.
+if(NOT WIN32)
+    add_executable(ran-controller tools/ran-controller/main.cpp)
+    target_include_directories(ran-controller PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(ran-controller PRIVATE cxx_std_20)
+    if(OpenSSL_FOUND)
+        target_link_libraries(ran-controller PRIVATE OpenSSL::Crypto)
+        target_compile_definitions(ran-controller PRIVATE DEVOURER_CELL_OPENSSL=1)
+    endif()
+endif()
+
 # Headless guard for the M2 cell core (src/cell/Harq.h, LinkAdapt.h): HARQ
 # receiver dedup/window, sender ACK/NACK/timeout/attempt limit/span, a lossy-
 # channel HARQ-vs-baseline simulation, and the link-adaptation rate rules.
@@ -1896,6 +1910,15 @@ if(Python3_Interpreter_FOUND)
         NAME cell_2ue_analyze
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/cell_2ue_analyze.py --selftest
+    )
+
+    # Headless guard for the M5 coordination KPIs (tests/ran_coord_analyze.py):
+    # a synthetic planned run passes; the uncoordinated one (a DL on the other
+    # cell's beacon) fails on delivery and on witness cross-cell overlaps.
+    add_test(
+        NAME ran_coord_analyze
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/ran_coord_analyze.py --selftest
     )
 
     # Headless guard for the 2.4 GHz-VHT waterfall's decode + crossing math

@@ -66,16 +66,17 @@ namespace devourer::cell::f1 {
 /* 2 (M6): Report carries the DU's filtered measurements of its own UEs, and
  * the SNR of the other cells' UEs it hears. 3: every measurement carries its
  * sample age, so the CU can tell when it expires. */
-/* 4: Handover messages; Report carries the DU's network-superframe offset
+/* 5: Uplink (DAPS: a DU forwarding a UE uplink it heard). 4: Handover
+ * messages; Report carries the DU's network-superframe offset
  * (for the TSF delta, HoCommand.h); Ack names what it acknowledges. */
-constexpr uint8_t kVersion = 4;
+constexpr uint8_t kVersion = 5;
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
 constexpr size_t kMaxUes = kMaxUesPerCell;
 constexpr size_t kMaxHeard = 64;
 
-enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4 };
+enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
 
 inline const char *ack_status_name(AckStatus s) {
@@ -278,7 +279,7 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {
   if (p == nullptr || n < 4 + kTagLen || p[0] != 'F' || p[1] != '1' || p[2] != kVersion)
     return std::nullopt;
-  if (p[3] < 1 || p[3] > 4)
+  if (p[3] < 1 || p[3] > 5)
     return std::nullopt;
   return static_cast<Type>(p[3]);
 }
@@ -493,6 +494,45 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return std::make_pair(du, h);
+}
+
+/* DAPS (M6): one UE uplink a DU heard, forwarded to the CU. `cell`/`ue`
+ * are the identity it was heard under (the UE beacon's SA); `seq` its
+ * common sequence (Handover.h ul_seq_from_egress). */
+struct UplinkFwd {
+  uint16_t du = 0;
+  uint16_t cell = 0, ue = 0;
+  uint32_t seq = 0;
+  int8_t rssi_dbm = 0;
+  bool operator==(const UplinkFwd &) const = default;
+};
+
+inline std::vector<uint8_t> encode_uplink(const UplinkFwd &u, const Mac &mac) {
+  using namespace detail;
+  auto m = head(Type::Uplink);
+  put(m, u.du, 2);
+  put(m, u.cell, 2);
+  put(m, u.ue, 2);
+  put(m, u.seq, 4);
+  m.push_back(static_cast<uint8_t>(u.rssi_dbm));
+  return seal(std::move(m), mac);
+}
+
+inline std::optional<UplinkFwd> decode_uplink(const uint8_t *p, size_t n, const Mac &mac) {
+  using namespace detail;
+  auto o = open(p, n, Type::Uplink, mac);
+  if (!o)
+    return std::nullopt;
+  Rd &r = *o;
+  UplinkFwd u;
+  u.du = static_cast<uint16_t>(r.get(2));
+  u.cell = static_cast<uint16_t>(r.get(2));
+  u.ue = static_cast<uint16_t>(r.get(2));
+  u.seq = static_cast<uint32_t>(r.get(4));
+  u.rssi_dbm = static_cast<int8_t>(r.get(1));
+  if (!r.ok || r.i != r.n)
+    return std::nullopt;
+  return u;
 }
 
 struct StagerConfig {

@@ -361,6 +361,78 @@ int main() {
     CHECK(rx.accept(next, 4200) && rx.last_id() == 102);
   }
 
+  /* --- DAPS: the CU's uplink streams. A UE crossing from cell 1 (id 1) to
+   * cell 2 (id 2): both DUs forward what they hear; cell 2 aliases its id
+   * onto the stream; at 60 % of the run the SOURCE path dies. Every uplink
+   * either DU heard is delivered exactly once, and after the kill only the
+   * target carries it. --- */
+  {
+    std::mt19937 rng(11);
+    UlStreams s;
+    const UlStreams::Id src{1, 1}, tgt{2, 2};
+    s.alias(tgt, src);
+    int heard_any = 0, delivered = 0, after_kill_via_tgt = 0, after_kill = 0;
+    for (uint32_t seq = 1000; seq < 2000; ++seq) {
+      const bool switched = seq >= 1500;           /* the UE's identity flips at 1500 */
+      const bool src_alive = seq < 1600;           /* the source DU dies at 1600 */
+      const UlStreams::Id who = switched ? tgt : src;
+      const bool a = src_alive && rng() % 10 >= 2; /* each path loses 20 % */
+      const bool b = rng() % 10 >= 2;
+      heard_any += (a || b) ? 1 : 0;
+      int got = 0;
+      if (a)
+        got += s.deliver(who, seq, 1).fresh;
+      if (b)
+        got += s.deliver(who, seq, 2).fresh;
+      CHECK(got <= 1);
+      delivered += got;
+      if (!src_alive && got) {
+        ++after_kill;
+        after_kill_via_tgt += b ? 1 : 0;
+      }
+    }
+    CHECK(delivered == heard_any);
+    CHECK(after_kill > 0 && after_kill == after_kill_via_tgt);
+    const auto *st = s.stats(src);
+    CHECK(st && st == s.stats(tgt)); /* one stream under both identities */
+    CHECK(st->delivered == static_cast<uint64_t>(delivered));
+    CHECK(st->first_by_du.at(1) + st->first_by_du.at(2) == st->delivered);
+    std::printf("cell_m6: DAPS streams: %d uplinks heard, %d delivered once (%llu duplicates), "
+                "%d after the source died, all via the target\n",
+                heard_any, delivered, (unsigned long long)st->duplicates, after_kill);
+    const auto sid = s.stream_id(tgt);
+    CHECK(sid && s.stats_of_stream(*sid) == st);
+    s.forget(src);
+    CHECK(!s.stats(src) && s.stats(tgt)); /* the stream lives on via the target */
+    s.forget(tgt);
+    CHECK(!s.stats(tgt) && s.streams() == 0 && s.identities() == 0); /* the last one: gone */
+    /* forget_stream drops every identity of it. */
+    UlStreams f;
+    f.deliver({5, 1}, 1, 5);
+    f.alias({6, 2}, {5, 1});
+    f.forget_stream(*f.stream_id({5, 1}));
+    CHECK(f.identities() == 0 && f.streams() == 0);
+    /* A reused identity after forget starts a fresh stream (no inherited window). */
+    f.deliver({5, 1}, 900000, 5);
+    CHECK(f.stats({5, 1})->delivered == 1);
+    /* The common seq: the reception instant in network superframes — two
+     * DUs a few us apart on the fabric agree (away from a boundary). */
+    const int64_t P = 102400;
+    CHECK(ul_seq_from_network_time(1000 * P + 50000 + 3, P) ==
+          ul_seq_from_network_time(1000 * P + 50000 - 4, P));
+    CHECK(ul_seq_from_network_time(1001 * P + 7, P) == ul_seq_from_network_time(1000 * P + 7, P) + 1);
+    /* F1 v5 Uplink round trip. */
+    const Mac k = fake_mac(3);
+    f1::UplinkFwd u{2, 1, 1, 123456, -61};
+    const auto w = f1::encode_uplink(u, k);
+    CHECK(f1::peek_type(w.data(), w.size()) == f1::Type::Uplink);
+    auto du = f1::decode_uplink(w.data(), w.size(), k);
+    CHECK(du && *du == u);
+    CHECK(!f1::decode_uplink(w.data(), w.size(), fake_mac(4)));
+    for (size_t cut = 0; cut < w.size(); ++cut)
+      CHECK(!f1::decode_uplink(w.data(), cut, k));
+  }
+
   if (failures == 0)
     std::printf("cell_m6_selftest: all checks passed\n");
   return failures == 0 ? 0 : 1;

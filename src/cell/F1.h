@@ -63,8 +63,9 @@
 namespace devourer::cell::f1 {
 
 /* 2 (M6): Report carries the DU's filtered measurements of its own UEs, and
- * the SNR of the other cells' UEs it hears. */
-constexpr uint8_t kVersion = 2;
+ * the SNR of the other cells' UEs it hears. 3: every measurement carries its
+ * sample age, so the CU can tell when it expires. */
+constexpr uint8_t kVersion = 3;
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -88,6 +89,7 @@ struct HeardUe {
   uint16_t cell = 0, ue = 0;
   int8_t rssi_dbm = 0; /* filtered (src/cell/Handover.h L3Filter), dBm */
   int8_t snr_db = 0;   /* filtered, dB */
+  uint16_t age_ms = 0; /* since its newest sample, at report time (saturates) */
   bool operator==(const HeardUe &) const = default;
 };
 /* The DU's filtered uplink measurement of one of its own UEs (M6), quarter
@@ -96,6 +98,7 @@ struct UeMeas {
   uint16_t ue = 0;
   int16_t rssi_qdbm = 0;
   int16_t snr_qdb = 0;
+  uint16_t age_ms = 0; /* since its newest sample, at report time (saturates) */
   bool operator==(const UeMeas &) const = default;
 };
 
@@ -246,14 +249,17 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
   auto clampq = [](double v) {
     return static_cast<int16_t>(std::lround(std::max(-32768.0, std::min(32767.0, v * 4.0))));
   };
+  auto age16 = [](int64_t a) {
+    return static_cast<uint16_t>(std::max<int64_t>(0, std::min<int64_t>(a, 65535)));
+  };
   r.meas.clear();
   r.heard.clear();
   for (const MeasEntry &e : snap) {
     if (e.cell == own) {
       if (r.meas.size() < kMaxUes)
-        r.meas.push_back({e.ue, clampq(e.rssi_dbm), clampq(e.snr_db)});
+        r.meas.push_back({e.ue, clampq(e.rssi_dbm), clampq(e.snr_db), age16(e.age_ms)});
     } else if (r.heard.size() < kMaxHeard) {
-      r.heard.push_back({e.cell, e.ue, clamp8(e.rssi_dbm), clamp8(e.snr_db)});
+      r.heard.push_back({e.cell, e.ue, clamp8(e.rssi_dbm), clamp8(e.snr_db), age16(e.age_ms)});
     }
   }
 }
@@ -300,12 +306,14 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
     put(m, h.ue, 2);
     m.push_back(static_cast<uint8_t>(h.rssi_dbm));
     m.push_back(static_cast<uint8_t>(h.snr_db));
+    put(m, h.age_ms, 2);
   }
   m.push_back(static_cast<uint8_t>(r.meas.size()));
   for (const UeMeas &q : r.meas) {
     put(m, q.ue, 2);
     put(m, static_cast<uint16_t>(q.rssi_qdbm), 2);
     put(m, static_cast<uint16_t>(q.snr_qdb), 2);
+    put(m, q.age_ms, 2);
   }
   return seal(std::move(m), mac);
 }
@@ -353,6 +361,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     h.ue = static_cast<uint16_t>(r.get(2));
     h.rssi_dbm = static_cast<int8_t>(r.get(1));
     h.snr_db = static_cast<int8_t>(r.get(1));
+    h.age_ms = static_cast<uint16_t>(r.get(2));
     x.heard.push_back(h);
   }
   const size_t nm = r.get(1);
@@ -363,6 +372,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     q.ue = static_cast<uint16_t>(r.get(2));
     q.rssi_qdbm = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     q.snr_qdb = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
+    q.age_ms = static_cast<uint16_t>(r.get(2));
     x.meas.push_back(q);
   }
   if (!r.ok || r.i != r.n)

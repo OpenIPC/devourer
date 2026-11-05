@@ -200,8 +200,8 @@ int main() {
     r.fixed = d.fixed;
     r.positions = d.positions;
     r.ues = {{1, 2}, {3, 1}};
-    r.heard = {{2, 1, -61, 25}, {3, 4, -90, 3}};
-    r.meas = {{1, -55 * 4, 31 * 4}, {3, -83 * 4 - 2, 7 * 4 + 1}};
+    r.heard = {{2, 1, -61, 25, 100}, {3, 4, -90, 3, 1999}};
+    r.meas = {{1, -55 * 4, 31 * 4, 0}, {3, -83 * 4 - 2, 7 * 4 + 1, 40}};
     const auto w = f1::encode_report(r, k1);
     CHECK(!w.empty() && f1::peek_type(w.data(), w.size()) == f1::Type::Report);
     CHECK(f1::decode_report(w.data(), w.size(), k1) == r);

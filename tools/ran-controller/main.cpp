@@ -25,6 +25,21 @@
 //   RAN_LEAD_SF [12]          schedule lead (> the DUs' CELL_F1_MIN_LEAD_SF)
 //   RAN_PLAN_MS [1000]        plan / keepalive period
 //   RAN_SPARE_CHANNELS        channels the planner may propose (advisory)
+// Handover evaluation (M6, #260) — OBSERVE ONLY: for every UE the CU runs the
+// A3 (CHO) condition (src/cell/Handover.h) on the DUs' filtered reports —
+// the serving DU's own measurement against every other DU's heard one — and
+// logs when a handover would trigger (ran.ho_candidate) and when the
+// condition clears (ran.ho_clear). Nothing is pushed to the DUs.
+//   RAN_HO [1]                0 = off
+//   RAN_A3_METRIC [rssi]      rssi | snr
+//   RAN_A3_OFFSET_DB [3] RAN_A3_HYST_DB [1] RAN_A3_TTT_MS [640]
+//   RAN_MEAS_STALE_MS [2000]  a reported value counts until its sample age
+//                             (carried in F1) plus the report's age passes
+//                             this (= the DUs' CELL_MEAS_STALE_MS)
+// The A3 runs once per RAN_PLAN_MS on the latest reports (the DUs report
+// every CELL_F1_REPORT_MS), so the effective time-to-trigger rounds up to
+// that period: 640 ms fires on the round after it, about 1 s at the
+// defaults.
 //   RAN_SECS [120]            run time
 // Output: JSONL on stdout ("ev":"ran.*").
 #include <arpa/inet.h>
@@ -42,6 +57,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -52,6 +68,7 @@
 
 #include "cell/Coord.h"
 #include "cell/F1.h"
+#include "cell/Handover.h"
 
 namespace f1 = devourer::cell::f1;
 using devourer::cell::CoordAssign;
@@ -139,6 +156,31 @@ int main() {
   const uint64_t lead_sf = static_cast<uint64_t>(envl("RAN_LEAD_SF", 12, 2, 100000));
   const int plan_ms = static_cast<int>(envl("RAN_PLAN_MS", 1000, 50, 60000));
   const int secs = static_cast<int>(envl("RAN_SECS", 120, 1, 86400));
+  const bool ho_on = envl("RAN_HO", 1, 0, 1) != 0;
+  const char *metric_env = std::getenv("RAN_A3_METRIC");
+  const std::string metric = metric_env && *metric_env ? metric_env : "rssi";
+  if (metric != "rssi" && metric != "snr") {
+    fprintf(stderr, "RAN_A3_METRIC must be rssi or snr\n");
+    return 2;
+  }
+  auto envd = [](const char *k, double d, double lo, double hi) {
+    const char *v = std::getenv(k);
+    if (!v || !*v)
+      return d;
+    char *end = nullptr;
+    const double x = std::strtod(v, &end);
+    if (*end || !(x >= lo && x <= hi)) {
+      fprintf(stderr, "invalid %s=\"%s\" (want %g..%g)\n", k, v, lo, hi);
+      std::exit(2);
+    }
+    return x;
+  };
+  devourer::cell::A3Config a3c;
+  a3c.offset_db = envd("RAN_A3_OFFSET_DB", 3.0, -30.0, 30.0);
+  a3c.hysteresis_db = envd("RAN_A3_HYST_DB", 1.0, 0.0, 20.0);
+  a3c.ttt_ms = static_cast<int64_t>(envl("RAN_A3_TTT_MS", 640, 0, 60000));
+  a3c.min_dwell_ms = 0; /* observe only: nothing is handed over */
+  const int64_t meas_stale_ms = envl("RAN_MEAS_STALE_MS", 2000, 100, 60000);
   std::vector<uint8_t> spare;
   for (long ch : env_list("RAN_SPARE_CHANNELS", 1, 196))
     spare.push_back(static_cast<uint8_t>(ch));
@@ -173,6 +215,17 @@ int main() {
   const auto deadline = t0 + std::chrono::seconds(secs);
   auto next_plan = t0 + std::chrono::milliseconds(plan_ms);
   auto next_meas = t0 + std::chrono::seconds(10);
+  /* Per UE (its serving cell, its id): the A3 state, and whether a
+   * candidate is currently logged as firing. */
+  struct HoState {
+    devourer::cell::A3Trigger a3;
+    std::optional<uint16_t> firing;
+  };
+  std::map<std::pair<uint16_t, uint16_t>, HoState> ho;
+  auto ms_now = [&] {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+        .count();
+  };
   /* Schedule freshness (F1.h): the realtime clock in us, strictly
    * increasing, so a restarted CU's sequence still moves forward. */
   uint64_t last_seq = 0;
@@ -198,7 +251,13 @@ int main() {
       if (n > 0) {
         const auto ty = f1::peek_type(buf, static_cast<size_t>(n));
         if (ty == f1::Type::Report) {
-          if (auto r = f1::decode_report(buf, static_cast<size_t>(n), mac)) {
+          auto r = f1::decode_report(buf, static_cast<size_t>(n), mac);
+          /* Only the configured DUs: no state for any other id, however
+           * many a sender makes up. */
+          if (r && std::find(expected.begin(), expected.end(), static_cast<long>(r->du)) ==
+                       expected.end())
+            r.reset();
+          if (r) {
             DuState &d = dus[r->du];
             const bool first = d.at.time_since_epoch().count() == 0;
             /* Freshness: a report at or below the last one taken from this DU
@@ -258,6 +317,87 @@ int main() {
           m += b;
         }
         emit(m + "]}");
+      }
+    }
+    /* A3, every plan round, on the configured DUs' latest reports. A value
+     * counts only while its sample is younger than meas_stale_ms (its age
+     * at report time plus the report's age since). */
+    if (ho_on && now >= next_plan) {
+      const int64_t tms = ms_now();
+      auto live = [&](const DuState &d, uint16_t age_ms) {
+        const int64_t rep_age =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - d.at).count();
+        return d.at.time_since_epoch().count() != 0 && age_ms + rep_age <= meas_stale_ms;
+      };
+      auto log_candidate = [&](uint16_t ue, uint16_t from, uint16_t to, double sv, double tv,
+                               int64_t held) {
+        char b[256];
+        snprintf(b, sizeof b,
+                 "{\"ev\":\"ran.ho_candidate\",\"t_ms\":%lld,\"ue\":%u,\"from\":%u,"
+                 "\"to\":%u,\"metric\":\"%s\",\"serving\":%.2f,\"target\":%.2f,"
+                 "\"held_ms\":%lld}",
+                 (long long)tms, ue, from, to, metric.c_str(), sv, tv, (long long)held);
+        emit(b);
+      };
+      auto log_clear = [&](uint16_t ue, uint16_t from, uint16_t to, const char *why) {
+        char b[200];
+        snprintf(b, sizeof b,
+                 "{\"ev\":\"ran.ho_clear\",\"t_ms\":%lld,\"ue\":%u,\"from\":%u,"
+                 "\"to\":%u,\"why\":\"%s\"}",
+                 (long long)tms, ue, from, to, why);
+        emit(b);
+      };
+      std::set<std::pair<uint16_t, uint16_t>> seen;
+      for (long id : expected) {
+        auto dit = dus.find(static_cast<uint16_t>(id));
+        if (dit == dus.end())
+          continue;
+        const uint16_t cell = dit->first;
+        for (const f1::UeMeas &q : dit->second.rep.meas) {
+          if (!live(dit->second, q.age_ms))
+            continue; /* no valid serving measurement: handled below */
+          const double serving = metric == "rssi" ? q.rssi_qdbm / 4.0 : q.snr_qdb / 4.0;
+          std::map<uint16_t, std::optional<double>> neigh;
+          for (long oid : expected) {
+            if (oid == cell)
+              continue;
+            std::optional<double> v;
+            auto oit = dus.find(static_cast<uint16_t>(oid));
+            if (oit != dus.end())
+              for (const f1::HeardUe &h : oit->second.rep.heard)
+                if (h.cell == cell && h.ue == q.ue && live(oit->second, h.age_ms))
+                  v = metric == "rssi" ? h.rssi_dbm : h.snr_db;
+            neigh[static_cast<uint16_t>(oid)] = v; /* absent or expired: no evidence */
+          }
+          const auto key = std::make_pair(cell, q.ue);
+          seen.insert(key);
+          auto it = ho.find(key);
+          if (it == ho.end())
+            it = ho.emplace(key, HoState{devourer::cell::A3Trigger(cell, a3c), std::nullopt}).first;
+          HoState &st = it->second;
+          const auto tgt = st.a3.evaluate(serving, neigh, tms);
+          if (tgt != st.firing) {
+            if (st.firing) /* also when switching straight to another target */
+              log_clear(q.ue, cell, *st.firing, tgt ? "retarget" : "condition");
+            if (tgt) {
+              const auto since = st.a3.holding_since(*tgt);
+              log_candidate(q.ue, cell, *tgt, serving, neigh.at(*tgt).value_or(0),
+                            since ? tms - *since : 0);
+            }
+          }
+          st.firing = tgt;
+        }
+      }
+      /* A UE without a valid serving measurement this round: its evidence
+       * is gone, so its timers go, and a logged candidate clears. */
+      for (auto it = ho.begin(); it != ho.end();) {
+        if (seen.count(it->first)) {
+          ++it;
+          continue;
+        }
+        if (it->second.firing)
+          log_clear(it->first.second, it->first.first, *it->second.firing, "no_serving");
+        it = ho.erase(it);
       }
     }
     if (now < next_plan)

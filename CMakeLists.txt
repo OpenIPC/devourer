@@ -1636,6 +1636,16 @@ add_executable(CellSelftest
 target_link_libraries(CellSelftest PRIVATE devourer)
 add_test(NAME cell_core COMMAND CellSelftest)
 
+# Headless guard for the M4 cell core (src/cell/TsfDiscipline.h,
+# SyncHealth.h): the discipline loop against a simulated radio + PHC (true
+# on-air TBTT phase), its bracket filter / write-failure re-anchor / ledger
+# axis, and the lock / degrade / lose / recover rules.
+add_executable(CellM4Selftest
+    tests/cell_m4_selftest.cpp
+)
+target_link_libraries(CellM4Selftest PRIVATE devourer)
+add_test(NAME cell_m4 COMMAND CellM4Selftest)
+
 # Headless guard for the M1 cell node's pure logic (examples/cell/cell.h).
 add_executable(CellNodeSelftest
     tests/cell_node_selftest.cpp

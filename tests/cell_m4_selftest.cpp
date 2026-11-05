@@ -181,11 +181,24 @@ int main() {
     CHECK(h.update(at(2), true, true) == SyncState::Degraded); /* one good is not enough */
     h.update(at(2), true, true);
     CHECK(h.update(at(2), true, true) == SyncState::Locked);
-    /* Rejected samples (not acting) for lost_iters iterations: Lost. */
+    /* A rejected sample (not acting) carries no phase: a locked cell stays
+     * locked through a few; lost_iters of them in a row is Lost. */
     TsfDecision rej;
     for (int i = 0; i < 3; ++i)
-      CHECK(h.update(rej, true, true) == SyncState::Degraded);
+      CHECK(h.update(rej, true, true) == SyncState::Locked);
+    CHECK(h.update(at(1), true, true) == SyncState::Locked); /* the run is reset */
+    for (int i = 0; i < 3; ++i)
+      CHECK(h.update(rej, true, true) == SyncState::Locked);
     CHECK(h.update(rej, true, true) == SyncState::Lost);
+    /* Out of tolerance lost_iters times in a row: Lost (via Degraded). */
+    for (int i = 0; i < 3; ++i) h.update(at(1), true, true);
+    for (int i = 0; i < 3; ++i)
+      CHECK(h.update(at(50), true, true) == SyncState::Degraded);
+    CHECK(h.update(at(50), true, true) == SyncState::Lost);
+    /* A failed TSF write (the counter may be half-updated): Lost at once. */
+    for (int i = 0; i < 3; ++i) h.update(at(1), true, true);
+    CHECK(h.coordinated());
+    CHECK(h.update(at(1), true, true, false) == SyncState::Lost && !h.coordinated());
     /* The reference or the beacon engine failing: Lost at once. */
     for (int i = 0; i < 3; ++i) h.update(at(1), true, true);
     CHECK(h.coordinated());

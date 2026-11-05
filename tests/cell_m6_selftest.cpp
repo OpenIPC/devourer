@@ -230,8 +230,10 @@ int main() {
     r.du = 2;
     f1::fill_report_measurements(r, 2, t.snapshot(1900));
     CHECK(r.meas.size() == 1 && r.meas[0].ue == 1 && r.meas[0].rssi_qdbm == -220 &&
-          r.meas[0].snr_qdb == 120);
+          r.meas[0].snr_qdb == 120 && r.meas[0].age_ms == 0);
     CHECK(r.heard.size() == 2); /* 3/4 still valid at 1900 ms */
+    for (const auto &h : r.heard) /* the sample ages travel with the values */
+      CHECK(h.cell == 3 ? h.age_ms == 1900 : h.age_ms == 0);
     f1::fill_report_measurements(r, 2, t.snapshot(2100));
     CHECK(r.heard.size() == 1 && r.heard[0].cell == 1 && r.heard[0].rssi_dbm == -72 &&
           r.heard[0].snr_db == 12);
@@ -244,14 +246,14 @@ int main() {
   {
     f1::Report r;
     r.du = 2;
-    r.heard = {{1, 1, -71, 18}};
-    r.meas = {{1, -52 * 4 - 1, 33 * 4 + 3}, {2, -90 * 4, -2 * 4}};
+    r.heard = {{1, 1, -71, 18, 350}};
+    r.meas = {{1, -52 * 4 - 1, 33 * 4 + 3, 0}, {2, -90 * 4, -2 * 4, 65535}};
     const auto w = f1::encode_report(r, {});
     auto d = f1::decode_report(w.data(), w.size(), {});
     CHECK(d && *d == r);
-    CHECK(w[2] == 2); /* version 2 on the wire */
+    CHECK(w[2] == 3); /* version 3 on the wire */
     auto old = w;
-    old[2] = 1; /* a v1 sender is refused, never half-parsed */
+    old[2] = 2; /* an older sender is refused, never half-parsed */
     CHECK(!f1::decode_report(old.data(), old.size(), {}));
   }
 

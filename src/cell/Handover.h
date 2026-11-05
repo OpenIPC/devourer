@@ -158,6 +158,7 @@ private:
 struct MeasEntry {
   uint16_t cell = 0, ue = 0;
   double rssi_dbm = 0, snr_db = 0;
+  int64_t age_ms = 0; /* since the newest sample in it */
 };
 class MeasTable {
 public:
@@ -179,7 +180,7 @@ public:
       }
       if (it->second.rssi.valid(now_ms))
         v.push_back({it->first.first, it->first.second, it->second.rssi.value(),
-                     it->second.snr.value()});
+                     it->second.snr.value(), now_ms - it->second.rssi.last_ms()});
       ++it;
     }
     return v;

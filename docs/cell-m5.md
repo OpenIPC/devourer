@@ -61,9 +61,16 @@ the M0 departure latency, and the beacon has ended by then.
 The messages are UDP datagrams with an HMAC-SHA1 tag, keyed by `CELL_F1_KEY` /
 `RAN_F1_KEY`.
 
+- **Key required:** a DU refuses an F1 link without a key unless
+  `CELL_F1_INSECURE=1` marks it as a development link.
+- **Peer check:** a DU takes schedules only from the configured CU address.
+- **Report freshness:** reports carry a freshness `seq` too. The CU ignores a
+  report at or below the last one it took from that DU, so a replayed report
+  cannot redirect that DU's schedules.
+
 | message | direction | content |
 |---|---|---|
-| Report | DU → CU | tier, sync state, mode, channel, phase, network superframe, applied/staged versions, grid, UEs and positions, the other cells' UEs heard |
+| Report | DU → CU | tier, sync state, mode, channel, phase, network superframe, freshness `seq`, applied/staged versions, grid, UEs and positions, the other cells' UEs heard |
 | Schedule | CU → DU | version, `effective_net_sf`, freshness `seq`, every UE's position |
 | Ack | DU → CU | staged / applied / stale / late / invalid |
 
@@ -73,8 +80,15 @@ The messages are UDP datagrams with an HMAC-SHA1 tag, keyed by `CELL_F1_KEY` /
   from the CU's start time, so a restarted CU's versions still move forward.
 - **Lead time:** a schedule arriving less than `CELL_F1_MIN_LEAD_SF` (8)
   before its instant is Late.
-- **Invalid:** a schedule the DU cannot carry (unknown UE, out-of-range or
-  duplicate position) changes nothing.
+- **Invalid:** a schedule that is not a one-to-one assignment of exactly the
+  DU's live UEs to distinct positions changes nothing.
+- **Re-validation at publish:** a UE admitted after the schedule was staged
+  moves off any pair the schedule takes. If no pair is free, the schedule is
+  not applied. The deadline is checked again right before the publish.
+- **No clock:** without a valid network superframe (the conversion is
+  dropped whenever SyncHealth is Lost), a new schedule is Late. The
+  keepalive of the version the DU already runs is still answered and
+  still counts as CU contact.
 - **Instant:** the DU publishes the schedule in its grant map
   `CELL_F1_PUBLISH_LEAD_SF` (5) before the instant, with exactly that
   instant as the map's effective superframe. One pending map at a time: no
@@ -87,9 +101,16 @@ The messages are UDP datagrams with an HMAC-SHA1 tag, keyed by `CELL_F1_KEY` /
   DU is autonomous (the M4 mode). A DU is also autonomous until it first
   hears a CU.
 
-**The CU** resends every DU's current schedule each round as the keepalive,
-including rounds where it cannot plan, for example while one DU is
-re-locking.
+**The CU:**
+
+- **Keepalives:** every round it resends every DU's current schedule,
+  including rounds where it cannot plan, for example while one DU is
+  re-locking.
+- **Versions:** a new version is above both the CU's own last version and
+  whatever the DU reports applied or staged.
+- **Channels:** the positions it pushes are always planned on the channels
+  the DUs are actually on. Spare-channel proposals come from a separate
+  advisory plan.
 
 **Not applied:** the planner's channel proposals are logged (`ran.retune`)
 but not applied, because a DU changes channel only at start. Moving a running
@@ -110,18 +131,26 @@ Measured with testrig `scripts/m5_ran_coord.sh`:
 - **Stagger:** 13450 µs puts cell 2's DL on air exactly on cell 1's UE uplink.
   The stagger comes from witness stamps, so the baseline really collides.
 
+Final-code runs:
+
 | | baseline (`--plan 0`: CU keeps each UE in position 1) | coordinated (`--plan 1`) |
 |---|---|---|
 | CU plan | 2 conflicts kept | 2 → 0 (both UEs to position 2) |
 | instant | both DUs on one `effective_net_sf` | both DUs on one `effective_net_sf` |
-| cell 1 UL heard by its DU | **55.6 %** (751 / 1351) | **99.9 %** (1397 / 1399) |
-| cell 1 DL retransmissions | **435** (the feedback rides the lost uplinks) | 2 |
+| CU send → applied | 10 superframes | 10 superframes |
+| cell 1 UL heard by its DU | **62.6 %** (840 / 1341) | **100 %** (1342 / 1342) |
+| cell 1 DL retransmissions | **361** (the feedback rides the lost uplinks) | 0 |
 | cell 2 DL / UL | 100 % / 100 % | 100 % / 100 % |
+| DL submit lateness p99 | 8–9 µs | 7–10 µs |
 | verdict | fail (UL ratio) | pass |
 
-The witness decodes at most one frame of a colliding pair, so it shows 0
-cross-cell overlaps in both runs. Its counts drop instead (cell 1 UL: 1299 vs
-1351). That makes it a lower bound, and the delivery KPIs are the measure.
+An earlier pair of runs, before the review fixes, gave 55.6 % / 435
+retransmissions against 99.9 % / 2.
+
+The witness decodes at most one frame of a colliding pair. In the baseline it
+counted only 1 cross-cell overlap (cell 1's UL with cell 2's DL), but its
+cell 1 UL count dropped (1308 vs 1341). That makes it a lower bound, and the
+delivery KPIs are the measure.
 
 **CU outage** (`--cu-outage 20`):
 

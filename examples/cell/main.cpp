@@ -91,8 +91,9 @@
 // autonomous until it has a CU, and falls back to autonomous when the CU
 // goes quiet.
 //   CELL_F1_CU                host:port of the CU (UDP)
-//   CELL_F1_KEY               the F1 key (HMAC-SHA1, as CELL_PSK; unset = an
-//                             unauthenticated development link)
+//   CELL_F1_KEY               the F1 key (HMAC-SHA1, as CELL_PSK); required
+//                             unless CELL_F1_INSECURE=1 (a development link).
+//                             Schedules are taken only from the CU's address.
 //   CELL_F1_REPORT_MS [1000]  report period
 //   CELL_F1_TIMEOUT_MS [3000] no CU message this long = CU outage
 //   CELL_F1_MIN_LEAD_SF [8] CELL_F1_PUBLISH_LEAD_SF [5]   the failure model
@@ -524,6 +525,13 @@ int run_du(IRadio *dev, const Cfg &c) {
     return 2;
   }
 #endif
+  /* The CU moves this DU's UEs: without a key anyone on the LAN could. An
+   * unauthenticated link is an explicit development choice. */
+  if (f1_on && f1_key.empty() && envl("CELL_F1_INSECURE", 0, 0, 1) == 0) {
+    fprintf(stderr, "CELL_F1_CU needs CELL_F1_KEY (or CELL_F1_INSECURE=1 for an "
+                    "unauthenticated development link)\n");
+    return 2;
+  }
   sockaddr_storage f1_addr{};
   socklen_t f1_addr_len = 0;
   struct SockFd {
@@ -751,6 +759,11 @@ int run_du(IRadio *dev, const Cfg &c) {
       net_ok.store(true);
     }
     const auto st = health.update(d, rok, beacon_ok, wok);
+    /* The conversion is trusted only while the grid is held to the fabric:
+     * once Lost (reference, write or phase failure) it is re-derived from a
+     * fresh good sample before any network instant is used again. */
+    if (st == devourer::cell::SyncState::Lost)
+      net_ok.store(false);
     ++sync_samples;
     ++sync_in_state[static_cast<size_t>(st)];
     char l[300];
@@ -928,10 +941,16 @@ int run_du(IRadio *dev, const Cfg &c) {
       std::optional<size_t> slot;
       {
         std::lock_guard<std::mutex> lk(mu);
-        const UlSlots &u = ub->epoch == ul_prev.epoch ? ul_prev : ul_now;
-        auto it = u.ul.find(ub->ue);
-        if (it != u.ul.end())
-          slot = it->second;
+        /* Only an epoch the DU still knows: an uplink from an older map (a UE
+         * that missed updates) is not timed against a slot it did not use. */
+        const UlSlots *u = ub->epoch == ul_now.epoch    ? &ul_now
+                           : ub->epoch == ul_prev.epoch ? &ul_prev
+                                                        : nullptr;
+        if (u) {
+          auto it = u->ul.find(ub->ue);
+          if (it != u->ul.end())
+            slot = it->second;
+        }
       }
       if (!slot)
         return;
@@ -1006,6 +1025,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                  f1_addr_len);
       };
       auto next_report = std::chrono::steady_clock::now();
+      uint64_t report_seq = 0;
       while (!f1_stop.load()) {
         if (std::chrono::steady_clock::now() >= next_report) {
           next_report += std::chrono::milliseconds(f1_report_ms);
@@ -1020,6 +1040,12 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.phase_us = static_cast<int64_t>(dc.phase_us);
             r.period_us = P;
             r.net_sf = f1_view.net_sf >= 0 ? static_cast<uint64_t>(f1_view.net_sf) : 0;
+            const uint64_t rt = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            report_seq = std::max(report_seq + 1, rt);
+            r.seq = report_seq;
             r.applied_version = stager.applied_version();
             r.staged_version = stager.staged_version();
             r.fixed = layout.fixed;
@@ -1045,8 +1071,29 @@ int run_du(IRadio *dev, const Cfg &c) {
         if (poll(&pf, 1, 50) <= 0 || !(pf.revents & POLLIN))
           continue;
         uint8_t buf[2048];
-        const ssize_t n = recv(f1_fd.fd, buf, sizeof buf, 0);
+        sockaddr_storage from{};
+        socklen_t fl = sizeof from;
+        const ssize_t n = recvfrom(f1_fd.fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
         if (n <= 0)
+          continue;
+        /* Only the configured CU's address (the tag and freshness come next). */
+        auto same_peer = [&] {
+          if (from.ss_family != f1_addr.ss_family)
+            return false;
+          if (from.ss_family == AF_INET) {
+            const auto &a = reinterpret_cast<const sockaddr_in &>(from);
+            const auto &b = reinterpret_cast<const sockaddr_in &>(f1_addr);
+            return a.sin_port == b.sin_port && a.sin_addr.s_addr == b.sin_addr.s_addr;
+          }
+          if (from.ss_family == AF_INET6) {
+            const auto &a = reinterpret_cast<const sockaddr_in6 &>(from);
+            const auto &b = reinterpret_cast<const sockaddr_in6 &>(f1_addr);
+            return a.sin6_port == b.sin6_port &&
+                   std::memcmp(&a.sin6_addr, &b.sin6_addr, sizeof a.sin6_addr) == 0;
+          }
+          return false;
+        };
+        if (!same_peer())
           continue;
         auto s = f1::decode_schedule(buf, static_cast<size_t>(n), f1_mac);
         if (!s || s->du != c.cell)
@@ -1061,18 +1108,30 @@ int run_du(IRadio *dev, const Cfg &c) {
           auto valid = [&](const f1::Schedule &x) {
             if (x.ues.size() != f1_view.ues.size())
               return false;
-            std::set<uint8_t> seen;
+            std::set<uint8_t> seen_pos;
+            std::set<uint16_t> seen_ue;
             for (const auto &a : x.ues) {
               bool known = false;
               for (const auto &u : f1_view.ues)
                 known = known || u.ue == a.ue;
-              if (!known || a.pos < 1 || a.pos > c.capacity || !seen.insert(a.pos).second)
+              if (!known || !seen_ue.insert(a.ue).second || a.pos < 1 || a.pos > c.capacity ||
+                  !seen_pos.insert(a.pos).second)
                 return false;
             }
-            return true;
+            return seen_ue.size() == f1_view.ues.size(); /* one-to-one, every live UE */
           };
-          st = net_now < 0 ? f1::AckStatus::Late
-                           : stager.on_schedule(*s, static_cast<uint64_t>(net_now), now_ms(), valid);
+          /* Without a network superframe (not yet locked, or Lost) a NEW
+           * schedule cannot be timed: Late. The keepalive of the version the
+           * DU already runs or stages is still answered (and is CU contact);
+           * its instant is not re-checked against a clock it does not have. */
+          const bool known = s->version == stager.applied_version() ||
+                             s->version == stager.staged_version();
+          if (net_now >= 0)
+            st = stager.on_schedule(*s, static_cast<uint64_t>(net_now), now_ms(), valid);
+          else if (known && s->version != 0)
+            st = stager.on_schedule(*s, 0, now_ms(), valid);
+          else
+            st = f1::AckStatus::Late;
         }
         send(f1::encode_ack({c.cell, s->version, st, net_now < 0 ? 0 : static_cast<uint64_t>(net_now)},
                             f1_mac));
@@ -1191,7 +1250,9 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::optional<devourer::cell::f1::Schedule> f1_due;
     if (f1_on) {
       std::lock_guard<std::mutex> lk(f1_mu);
-      f1_view.net_sf = net_ok.load() ? sf + net_off.load() : -1;
+      f1_view.net_sf = net_ok.load() && health.state() != devourer::cell::SyncState::Lost
+                           ? sf + net_off.load()
+                           : -1;
       f1_view.sync_state = static_cast<uint8_t>(health.state());
       f1_view.coordinated = coordinated;
       f1_view.ues.clear();
@@ -1335,11 +1396,47 @@ int run_du(IRadio *dev, const Cfg &c) {
     /* A due F1 schedule: every UE's position, on its network-wide instant. */
     std::optional<uint64_t> f1_eff;
     if (f1_due) {
+      /* Re-validated against `next` as it is now: a UE admitted since the
+       * schedule was staged (the schedule does not name it) moves off any
+       * pair the schedule takes; if none is free, the schedule is not
+       * applied (it is abandoned at its deadline and the CU re-plans). */
+      GrantMap trial = next;
       for (const auto &a : f1_due->ues)
-        if (Grant *g = const_cast<Grant *>(next.find(a.ue)))
+        if (Grant *g = const_cast<Grant *>(trial.find(a.ue)))
           set_position(*g, a.pos);
-      f1_eff = static_cast<uint64_t>(static_cast<int64_t>(f1_due->effective_net_sf) - net_off.load());
-      changed = true;
+      bool fits = true;
+      for (Grant &g : trial.grants) {
+        bool named = false;
+        for (const auto &a : f1_due->ues)
+          named = named || a.ue == g.ue;
+        if (named)
+          continue;
+        bool clash = false;
+        for (const Grant &o : trial.grants)
+          clash = clash || (o.ue != g.ue && position_of(o) == position_of(g));
+        if (clash) {
+          Grant self = g;
+          g.dl_slot = 0xff; /* not counted by free_position */
+          const uint8_t fp = free_position(trial);
+          g = self;
+          if (fp == 0)
+            fits = false;
+          else
+            set_position(g, fp);
+        }
+      }
+      if (fits) {
+        next = trial;
+        f1_eff =
+            static_cast<uint64_t>(static_cast<int64_t>(f1_due->effective_net_sf) - net_off.load());
+        changed = true;
+      } else {
+        char l[160];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.f1.unfit\",\"version\":%u,\"sf\":%lld}",
+                 f1_due->version, (long long)sf);
+        emit(l);
+        f1_due.reset();
+      }
     }
     /* One pending map at a time: while the live map is not yet in force
      * (its effective superframe ahead), a new change waits, so no
@@ -1353,6 +1450,13 @@ int run_du(IRadio *dev, const Cfg &c) {
       next = map;
       changed = false;
       to_release.clear();
+      f1_eff.reset();
+    }
+    /* The deadline, checked again right before the publish: a schedule
+     * that can no longer reach the UEs N+2 ahead is not put on air. */
+    if (f1_eff && static_cast<uint64_t>(sf) + 2 > *f1_eff) {
+      next = map;
+      changed = false;
       f1_eff.reset();
     }
     if (changed || rar_now != rar_on_air) {
@@ -1385,9 +1489,15 @@ int run_du(IRadio *dev, const Cfg &c) {
           map = next;
           if (f1_eff) {
             std::lock_guard<std::mutex> lk(f1_mu);
-            /* due() released it this pass on the same network superframe, so
-             * its deadline holds. */
-            stager.published(static_cast<uint64_t>(sf + net_off.load()));
+            /* due() released it this pass and the deadline was checked just
+             * before the publish, so this holds; a false here (it cannot
+             * be) is logged, not reported as applied. */
+            if (!stager.published(static_cast<uint64_t>(sf + net_off.load()))) {
+              emit("{\"ev\":\"cell.f1.publish_late\"}");
+              f1_eff.reset();
+            }
+          }
+          if (f1_eff) {
             char l[200];
             snprintf(l, sizeof l,
                      "{\"ev\":\"cell.f1.applied\",\"version\":%u,\"effective_net_sf\":%llu,"

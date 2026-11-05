@@ -200,6 +200,11 @@ int main() {
           if (auto r = f1::decode_report(buf, static_cast<size_t>(n), mac)) {
             DuState &d = dus[r->du];
             const bool first = d.at.time_since_epoch().count() == 0;
+            /* Freshness: a report at or below the last one taken from this DU
+             * is a replay (or reordering) and changes nothing, not even the
+             * address this DU's schedules go to. */
+            if (!first && r->seq <= d.rep.seq)
+              continue;
             d.rep = *r;
             d.addr = from;
             d.at = std::chrono::steady_clock::now();
@@ -288,8 +293,24 @@ int main() {
     std::map<uint16_t, std::vector<CoordAssign>> target;
     devourer::cell::CoordPlan p;
     if (plan_on) {
-      p = devourer::cell::coord_plan(view, spare);
+      /* The positions pushed are planned on the channels the DUs are on: a
+       * retune the CU only proposes (below) must not make a co-channel
+       * conflict look resolved. */
+      p = devourer::cell::coord_plan(view, {});
       target = p.assign;
+      if (!spare.empty() && (p.unresolved || p.fixed_conflicts || !p.unseparated.empty())) {
+        const auto adv = devourer::cell::coord_plan(view, spare);
+        static std::string last_adv; /* log a proposal once, not every round */
+        std::string txt;
+        for (uint16_t du : adv.retuned)
+          txt += "{\"ev\":\"ran.retune\",\"du\":" + std::to_string(du) + ",\"channel\":" +
+                 std::to_string(adv.channel.at(du)) + ",\"applied\":0}\n";
+        if (!txt.empty() && txt != last_adv) {
+          last_adv = txt;
+          fputs(txt.c_str(), stdout);
+          fflush(stdout);
+        }
+      }
     } else {
       for (const CoordDu &c : view)
         for (const CoordUe &u : c.ues)
@@ -305,7 +326,8 @@ int main() {
                      ",\"conflicts_now\":" + std::to_string(before) + ",\"conflicts_planned\":" +
                      std::to_string(after) + ",\"moved\":" + std::to_string(p.moved) +
                      ",\"unresolved\":" + std::to_string(p.unresolved) + ",\"fixed_conflicts\":" +
-                     std::to_string(p.fixed_conflicts) + ",\"edges\":{";
+                     std::to_string(p.fixed_conflicts) + ",\"unseparated\":" +
+                     std::to_string(p.unseparated.size()) + ",\"edges\":{";
     bool firstk = true;
     for (const CoordDu &c : view)
       for (const CoordUe &u : c.ues)
@@ -319,9 +341,6 @@ int main() {
       last_plan = pl.substr(pl.find("\"conflicts_now\""));
       emit(pl);
     }
-    for (uint16_t du : p.retuned)
-      emit("{\"ev\":\"ran.retune\",\"du\":" + std::to_string(du) + ",\"channel\":" +
-           std::to_string(p.channel.at(du)) + ",\"applied\":0}");
 
     /* Changed DUs: new versions, one network-wide instant. */
     const uint64_t eff = net_now + lead_sf;
@@ -329,8 +348,11 @@ int main() {
       DuState &d = dus.at(c.du);
       const auto &want = target[c.du];
       if (!d.sched || d.sched->ues != want) {
+        /* Above anything this CU issued AND anything the DU reports applied
+         * or staged (a restarted CU, or a DU that outlived several CUs). */
         uint32_t &v = version[c.du];
-        v = v ? v + 1 : version_base;
+        v = std::max({v ? v + 1 : version_base, d.rep.applied_version + 1,
+                      d.rep.staged_version + 1});
         d.sched = f1::Schedule{c.du, v, eff, next_seq(), want};
         emit("{\"ev\":\"ran.schedule\",\"du\":" + std::to_string(c.du) + ",\"version\":" +
              std::to_string(d.sched->version) + ",\"effective_net_sf\":" + std::to_string(eff) +

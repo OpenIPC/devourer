@@ -545,13 +545,14 @@ int main() {
         return d.at.time_since_epoch().count() != 0 && age_ms + rep_age <= meas_stale_ms;
       };
       auto log_candidate = [&](uint16_t ue, uint16_t from, uint16_t to, double sv, double tv,
-                               int64_t held) {
+                               int64_t held, bool ue_reported) {
         char b[256];
         snprintf(b, sizeof b,
                  "{\"ev\":\"ran.ho_candidate\",\"t_ms\":%lld,\"ue\":%u,\"from\":%u,"
-                 "\"to\":%u,\"metric\":\"%s\",\"serving\":%.2f,\"target\":%.2f,"
+                 "\"to\":%u,\"metric\":\"%s%s\",\"serving\":%.2f,\"target\":%.2f,"
                  "\"held_ms\":%lld}",
-                 (long long)tms, ue, from, to, metric.c_str(), sv, tv, (long long)held);
+                 (long long)tms, ue, from, to, ue_reported ? "ue_" : "", metric.c_str(), sv, tv,
+                 (long long)held);
         emit(b);
       };
       auto log_clear = [&](uint16_t ue, uint16_t from, uint16_t to, const char *why) {
@@ -571,9 +572,30 @@ int main() {
         for (const f1::UeMeas &q : dit->second.rep.meas) {
           if (!live(dit->second, q.age_ms))
             continue; /* no valid serving measurement: handled below */
-          const double serving = metric == "rssi" ? q.rssi_qdbm / 4.0 : q.snr_qdb / 4.0;
+          double serving = metric == "rssi" ? q.rssi_qdbm / 4.0 : q.snr_qdb / 4.0;
           std::map<uint16_t, std::optional<double>> neigh;
+          /* The UE's own measurements (its MR IE, relayed by this DU) when it
+           * reports them: the serving cell's beacon against the neighbours'
+           * (heard in measurement gaps on other channels) — comparable, and
+           * the only evidence across channels. Else what the DUs hear. */
+          bool ue_reported = false;
+          for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
+            if (m.ue == q.ue && m.cell == cell && live(dit->second, m.age_ms)) {
+              serving = metric == "rssi" ? m.rssi_qdbm / 4.0 : m.snr_qdb / 4.0;
+              ue_reported = true;
+            }
+          if (ue_reported) {
+            for (long oid : expected)
+              if (oid != cell)
+                neigh[static_cast<uint16_t>(oid)] = std::nullopt;
+            for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
+              if (m.ue == q.ue && m.cell != cell && neigh.count(m.cell) &&
+                  live(dit->second, m.age_ms))
+                neigh[m.cell] = metric == "rssi" ? m.rssi_qdbm / 4.0 : m.snr_qdb / 4.0;
+          }
           for (long oid : expected) {
+            if (ue_reported)
+              break;
             if (oid == cell)
               continue;
             std::optional<double> v;
@@ -609,7 +631,7 @@ int main() {
             if (tgt) {
               const auto since = st.a3.holding_since(*tgt);
               log_candidate(q.ue, cell, *tgt, serving, neigh.at(*tgt).value_or(0),
-                            since ? tms - *since : 0);
+                            since ? tms - *since : 0, ue_reported);
             }
           }
           st.firing = tgt;
@@ -770,6 +792,20 @@ int main() {
     if (now < next_plan)
       continue;
     next_plan = now + std::chrono::milliseconds(plan_ms);
+    /* The neighbour lists (M6 measurement gaps): each fresh DU gets every
+     * other fresh DU's channel and TBTT phase, every round. */
+    for (auto &kv : dus) {
+      if (now - kv.second.at >= std::chrono::seconds(3))
+        continue;
+      f1::Neighbours nb;
+      nb.du = kv.first;
+      nb.seq = next_seq();
+      for (const auto &ov : dus)
+        if (ov.first != kv.first && now - ov.second.at < std::chrono::seconds(3) &&
+            nb.cells.size() < devourer::cell::kMaxNeighbours)
+          nb.cells.push_back({ov.first, ov.second.rep.channel, ov.second.rep.phase_us});
+      send(kv.second, f1::encode_neighbours(nb, mac));
+    }
     /* The keepalive, every round and whatever the planning state: every DU
      * keeps its current schedule (a fresh sequence each send) while one
      * DU cannot be planned (e.g. it is re-locking). Only the plan waits. */

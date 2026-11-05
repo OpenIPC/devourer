@@ -150,10 +150,9 @@ the source, which still holds it. This bounds the deaf time of a failed
 handover.
 
 **Trigger.** With one radio per DU, no DU hears a UE on another channel, so
-the A3 has no neighbour measurement to compare. UE measurement gaps (the UE
-briefly visits the other channel and reports what it hears) are the next
-step. Until then, the test forces the trigger: `RAN_HO_FORCE=SRC:UE:TGT@SECONDS`
-issues the command at that time through the normal execution path.
+the A3 needs the UE's own measurements: see "Measurement gaps" below.
+`RAN_HO_FORCE=SRC:UE:TGT@SECONDS` remains for tests: it issues one command
+at that time through the normal execution path.
 
 **Rig result** (testrig `scripts/m6_handover.sh --channel2 157`). Cell 1 is
 on ch149 and cell 2 on ch157, both UNII-3. There were 5 normal runs and 3
@@ -180,6 +179,79 @@ with the target killed after staging; all 8 pass.
   beacon of the source (ch149) while still tuned to ch157, about 1 s after
   the retune, before its own retune back. Its cause is not established. The
   rig script does not count it as the post-return beacon.
+
+## Measurement gaps (the inter-frequency trigger)
+
+The UE measures the cells' beacons (downlink): its serving DU's all the
+time, and a neighbour's on another channel in a measurement gap
+(`src/cell/MeasGap.h`).
+
+**Where to listen.** The CU sends each DU its neighbours' channels and TBTT
+phases (F1 `Neighbours`, every round). The DU airs them as offsets on its
+own grid, in a tagged NL IE:
+
+    offset = (phase_neighbour − phase_serving) mod P
+
+On the shared timebase a neighbour's beacon always falls at that offset of
+the UE's serving superframe, so the UE needs nothing beyond its serving
+clock.
+
+**The gap.** Every `CELL_UE_GAP_SF` (10) superframes, for one other-channel
+neighbour in turn, the UE computes `gap_window()`:
+
+    [offset − retune − guard, offset + beacon + retune + guard)
+
+The window must clear the serving beacon and the UE's own DL and UL slots.
+The retune budget is the last measured retune. If the window fits, the UE
+retunes there (`FastRetune`), its RX path hears the neighbour's beacon, and
+it retunes back. If it does not fit, the UE skips that neighbour
+(`cell.ue.gap_skip`): no slot is ever sacrificed.
+
+**Reports.** The UE L3-filters every cell beacon it hears, serving or
+neighbour, and reports the filtered RSSI/SNR in a tagged MR IE in its uplink
+beacon, refreshed each `CELL_UE_MR_MS` (1 s). The serving DU relays it over
+F1 (`Report.ue_meas`, with ages).
+
+**The A3 on UE reports.** For a UE that reports, the CU's A3 compares
+downlink with downlink: the serving beacon against the neighbours' (metric
+`ue_rssi`). Otherwise it falls back to what the DUs hear.
+
+**Rig result** (testrig `scripts/m6_measgap.sh`, 5 runs). Cell 1 is on
+ch149 at phase 0; cell 2 is on ch157 at phase 60000 µs, so its beacon falls
+in an idle part of cell 1's grid. The A3 runs at its **defaults** (offset
+3 dB, hysteresis 1 dB, time-to-trigger 640 ms), with nothing forced. All 5
+runs pass.
+
+| KPI | min | median | max |
+|---|---|---|---|
+| gap deaf time (14 gaps) | 53.7 ms | 53.9 ms | 56.6 ms |
+| neighbour beacon in gaps | −46 dBm | −46 dBm | −46 dBm |
+| A3 held before firing | 1002 ms | 1024 ms | 1024 ms |
+| switch after the network instant (the UE's poll latency) | 21 ms | 21 ms | 28 ms |
+| interruption (sf, first in-slot uplink at the target after the switch) | 3 | 3 | 3 |
+
+- **The trigger:** the serving beacon read −55 to −57 dBm, and the
+  neighbour's −46 dBm in the gaps. That beat the 3 dB offset plus hysteresis,
+  so the A3 fired on UE-reported values in every run.
+- **The gaps cost no uplink:** the source heard at least 98 % of the
+  superframes before the switch.
+- **The extra interruption superframe** compared with the forced runs is
+  the phase layout. The UE switches at the source's boundary of network
+  superframe N, and cell 2's superframe N starts 60 ms later. The UE's grant
+  there takes effect at that boundary.
+- **A limit of this layout:** cell 2's UE cannot measure cell 1. Cell 1's
+  beacon falls at offset 42400 µs of cell 2's grid, too close to that UE's
+  own uplink slot, so it logs `gap_skip`.
+
+**TSF continuity, stated precisely.** The UE switches at the network
+instant, the source's boundary of network superframe N. On the target's
+clock that instant is:
+
+    eff_target · P − ((phase_t − phase_s) mod P)
+
+The UE's shifted clock reads it plus its poll latency. The rig scripts
+assert exactly this, across every same-channel, inter-frequency and
+measurement-gap run.
 
 ## DAPS: the duplicated uplink (same channel)
 
@@ -277,8 +349,9 @@ superframe when there is nothing to serve.
     budget.
 - **A moving UE:** the rig's UEs are stationary, so the crossing is forced
   with a negative A3 offset.
-- **The inter-frequency trigger:** UE measurement gaps. The test forces
-  the handover (`RAN_HO_FORCE`).
+- **Measurement-gap scheduling:** a gap goes only where it clears the UE's
+  own slots, so some phase layouts leave a neighbour unmeasurable. Placing
+  cells' phases so every pair can measure each other is a CU planning task.
 - **Security context:** the cells share one key on the rig (`CELL_PSK`).
   Pre-staging a per-cell context (802.11r-style) is open.
 - **EVM:** not in the measurement reports.

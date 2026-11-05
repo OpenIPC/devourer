@@ -25,6 +25,18 @@
 //   RAN_LEAD_SF [12]          schedule lead (> the DUs' CELL_F1_MIN_LEAD_SF)
 //   RAN_PLAN_MS [1000]        plan / keepalive period
 //   RAN_SPARE_CHANNELS        channels the planner may propose (advisory)
+// Handover evaluation (M6, #260) — OBSERVE ONLY: for every UE the CU runs the
+// A3 (CHO) condition (src/cell/Handover.h) on the DUs' filtered reports —
+// the serving DU's own measurement against every other DU's heard one — and
+// logs when a handover would trigger (ran.ho_candidate) and when the
+// condition clears (ran.ho_clear). Nothing is pushed to the DUs.
+//   RAN_HO [1]                0 = off
+//   RAN_A3_METRIC [rssi]      rssi | snr
+//   RAN_A3_OFFSET_DB [3] RAN_A3_HYST_DB [1] RAN_A3_TTT_MS [640]
+// The A3 runs once per RAN_PLAN_MS on the latest reports (the DUs report
+// every CELL_F1_REPORT_MS), so the effective time-to-trigger rounds up to
+// that period: 640 ms fires on the round after it, about 1 s at the
+// defaults.
 //   RAN_SECS [120]            run time
 // Output: JSONL on stdout ("ev":"ran.*").
 #include <arpa/inet.h>
@@ -52,6 +64,7 @@
 
 #include "cell/Coord.h"
 #include "cell/F1.h"
+#include "cell/Handover.h"
 
 namespace f1 = devourer::cell::f1;
 using devourer::cell::CoordAssign;
@@ -139,6 +152,30 @@ int main() {
   const uint64_t lead_sf = static_cast<uint64_t>(envl("RAN_LEAD_SF", 12, 2, 100000));
   const int plan_ms = static_cast<int>(envl("RAN_PLAN_MS", 1000, 50, 60000));
   const int secs = static_cast<int>(envl("RAN_SECS", 120, 1, 86400));
+  const bool ho_on = envl("RAN_HO", 1, 0, 1) != 0;
+  const char *metric_env = std::getenv("RAN_A3_METRIC");
+  const std::string metric = metric_env && *metric_env ? metric_env : "rssi";
+  if (metric != "rssi" && metric != "snr") {
+    fprintf(stderr, "RAN_A3_METRIC must be rssi or snr\n");
+    return 2;
+  }
+  auto envd = [](const char *k, double d, double lo, double hi) {
+    const char *v = std::getenv(k);
+    if (!v || !*v)
+      return d;
+    char *end = nullptr;
+    const double x = std::strtod(v, &end);
+    if (*end || !(x >= lo && x <= hi)) {
+      fprintf(stderr, "invalid %s=\"%s\" (want %g..%g)\n", k, v, lo, hi);
+      std::exit(2);
+    }
+    return x;
+  };
+  devourer::cell::A3Config a3c;
+  a3c.offset_db = envd("RAN_A3_OFFSET_DB", 3.0, -30.0, 30.0);
+  a3c.hysteresis_db = envd("RAN_A3_HYST_DB", 1.0, 0.0, 20.0);
+  a3c.ttt_ms = static_cast<int64_t>(envl("RAN_A3_TTT_MS", 640, 0, 60000));
+  a3c.min_dwell_ms = 0; /* observe only: nothing is handed over */
   std::vector<uint8_t> spare;
   for (long ch : env_list("RAN_SPARE_CHANNELS", 1, 196))
     spare.push_back(static_cast<uint8_t>(ch));
@@ -173,6 +210,17 @@ int main() {
   const auto deadline = t0 + std::chrono::seconds(secs);
   auto next_plan = t0 + std::chrono::milliseconds(plan_ms);
   auto next_meas = t0 + std::chrono::seconds(10);
+  /* Per UE (its serving cell, its id): the A3 state, and whether a
+   * candidate is currently logged as firing. */
+  struct HoState {
+    devourer::cell::A3Trigger a3;
+    std::optional<uint16_t> firing;
+  };
+  std::map<std::pair<uint16_t, uint16_t>, HoState> ho;
+  auto ms_now = [&] {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+        .count();
+  };
   /* Schedule freshness (F1.h): the realtime clock in us, strictly
    * increasing, so a restarted CU's sequence still moves forward. */
   uint64_t last_seq = 0;
@@ -258,6 +306,57 @@ int main() {
           m += b;
         }
         emit(m + "]}");
+      }
+    }
+    /* A3, every plan round, on the reports as they are (fresh only). */
+    if (ho_on && now >= next_plan) {
+      const int64_t tms = ms_now();
+      auto fresh = [&](const DuState &d) { return now - d.at < std::chrono::seconds(3); };
+      for (const auto &kv : dus) {
+        if (!fresh(kv.second))
+          continue;
+        const uint16_t cell = kv.first;
+        for (const f1::UeMeas &q : kv.second.rep.meas) {
+          const double serving = metric == "rssi" ? q.rssi_qdbm / 4.0 : q.snr_qdb / 4.0;
+          std::map<uint16_t, std::optional<double>> neigh;
+          for (const auto &ov : dus) {
+            if (ov.first == cell)
+              continue;
+            std::optional<double> v;
+            if (fresh(ov.second))
+              for (const f1::HeardUe &h : ov.second.rep.heard)
+                if (h.cell == cell && h.ue == q.ue)
+                  v = metric == "rssi" ? h.rssi_dbm : h.snr_db;
+            neigh[ov.first] = v; /* absent or stale: no evidence */
+          }
+          auto it = ho.find({cell, q.ue});
+          if (it == ho.end())
+            it = ho.emplace(std::make_pair(cell, q.ue),
+                            HoState{devourer::cell::A3Trigger(cell, a3c), std::nullopt})
+                     .first;
+          HoState &st = it->second;
+          const auto tgt = st.a3.evaluate(serving, neigh, tms);
+          if (tgt && st.firing != tgt) {
+            const auto since = st.a3.holding_since(*tgt);
+            const double tv = neigh.at(*tgt).value_or(0);
+            char b[256];
+            snprintf(b, sizeof b,
+                     "{\"ev\":\"ran.ho_candidate\",\"t_ms\":%lld,\"ue\":%u,\"from\":%u,"
+                     "\"to\":%u,\"metric\":\"%s\",\"serving\":%.2f,\"target\":%.2f,"
+                     "\"held_ms\":%lld}",
+                     (long long)tms, q.ue, cell, *tgt, metric.c_str(), serving, tv,
+                     (long long)(since ? tms - *since : 0));
+            emit(b);
+          } else if (!tgt && st.firing) {
+            char b[160];
+            snprintf(b, sizeof b,
+                     "{\"ev\":\"ran.ho_clear\",\"t_ms\":%lld,\"ue\":%u,\"from\":%u,"
+                     "\"to\":%u,\"serving\":%.2f}",
+                     (long long)tms, q.ue, cell, *st.firing, serving);
+            emit(b);
+          }
+          st.firing = tgt;
+        }
       }
     }
     if (now < next_plan)

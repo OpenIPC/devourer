@@ -143,6 +143,14 @@ public:
     }
     pending_step_ = 0;
   }
+  /* A new target phase (M6: the CU assigns a joining DU's phase before it
+   * acquires). The fit stays (it is the clock relation, not the target); the
+   * integrator restarts. */
+  void set_phase(double phase_us) {
+    cfg_.phase_us = phase_us;
+    integ_ = 0;
+  }
+  double phase() const { return cfg_.phase_us; }
   /* Drop the fit (re-anchor from fresh samples). */
   void reset() {
     pts_.clear();

@@ -60,6 +60,17 @@
 // every CELL_F1_REPORT_MS), so the effective time-to-trigger rounds up to
 // that period: 640 ms fires on the round after it, about 1 s at the
 // defaults.
+// Phase planning (M6): a DU started with CELL_PHASE_AUTO=1 reports phase -1
+// before it acquires; the CU answers with F1 Phase — the phase
+// src/cell/PhasePlan.h finds best against the running cells (another channel:
+// mutual measurability in gaps; the same channel: disjoint active spans).
+// Running cells keep theirs; an assignment is sticky (a restarted DU gets the
+// same). Joining DUs are planned one at a time, in id order; each waits for
+// the expected DUs not yet heard, up to RAN_PHASE_WAIT_S. A joining DU is in
+// no neighbour list until it reports its phase.
+//   RAN_PHASE_WAIT_S [20]     (below the DUs' CELL_PHASE_WAIT_S)
+//   RAN_GAP_RETUNE_US [26000] RAN_GAP_GUARD_US [2000]  the UEs' gap bound
+//                             (= CELL_UE_GAP_RETUNE_US / _GUARD_US)
 //   RAN_SECS [120]            run time
 // Output: JSONL on stdout ("ev":"ran.*").
 #include <arpa/inet.h>
@@ -89,6 +100,7 @@
 #include "cell/Coord.h"
 #include "cell/F1.h"
 #include "cell/Handover.h"
+#include "cell/PhasePlan.h"
 
 namespace f1 = devourer::cell::f1;
 using devourer::cell::CoordAssign;
@@ -320,6 +332,66 @@ int main() {
     if (!m.empty())
       sendto(fd, m.data(), m.size(), 0, reinterpret_cast<const sockaddr *>(&d.addr), sizeof d.addr);
   };
+  /* Phase planning: the DUs asking (their latest request, kept apart from
+   * `dus` — a joining DU runs nothing yet) and the sticky assignments. */
+  const int phase_wait_s = static_cast<int>(envl("RAN_PHASE_WAIT_S", 20, 0, 600));
+  devourer::cell::PhaseParams phase_pp;
+  phase_pp.retune_us = envl("RAN_GAP_RETUNE_US", 26000, 1000, 500000);
+  phase_pp.guard_us = envl("RAN_GAP_GUARD_US", 2000, 0, 50000);
+  struct Joining {
+    DuState st;
+    std::chrono::steady_clock::time_point first;
+  };
+  std::map<uint16_t, Joining> joining;
+  std::map<uint16_t, int64_t> phase_of;
+  auto answer_phase = [&](const DuState &d) {
+    send(d, f1::encode_phase(f1::PhaseAssign{d.rep.du, phase_of.at(d.rep.du), d.rep.seq}, mac));
+  };
+  auto plan_joining = [&](std::chrono::steady_clock::time_point now) {
+    for (auto &kv : joining) {
+      if (phase_of.count(kv.first))
+        continue;
+      const f1::Report &rq = kv.second.st.rep;
+      /* Wait for the expected DUs not yet heard (a joining one never blocks:
+       * the lower ids are planned first, the higher ones around this). */
+      bool all = true;
+      for (long id : expected)
+        all = all && (id == kv.first || dus.count(static_cast<uint16_t>(id)) ||
+                      joining.count(static_cast<uint16_t>(id)));
+      if (!all && now - kv.second.first < std::chrono::seconds(phase_wait_s))
+        continue;
+      std::vector<devourer::cell::PhaseCell> ex;
+      for (const auto &d : dus)
+        if (d.first != kv.first && d.second.rep.phase_us >= 0 &&
+            now - d.second.at < std::chrono::seconds(3))
+          ex.push_back(devourer::cell::phase_cell(d.first, d.second.rep.channel,
+                                                  d.second.rep.phase_us, d.second.rep.fixed,
+                                                  d.second.rep.positions));
+      for (const auto &j : joining) /* assigned, not yet running */
+        if (j.first != kv.first && phase_of.count(j.first) && !dus.count(j.first))
+          ex.push_back(devourer::cell::phase_cell(j.first, j.second.st.rep.channel,
+                                                  phase_of[j.first], j.second.st.rep.fixed,
+                                                  j.second.st.rep.positions));
+      devourer::cell::PhaseParams pp = phase_pp;
+      pp.period_us = rq.period_us;
+      const auto me = devourer::cell::phase_cell(kv.first, rq.channel, 0, rq.fixed, rq.positions);
+      const auto plan = devourer::cell::plan_phase(me, ex, pp);
+      phase_of[kv.first] = plan.phase_us;
+      std::string pairs = "{";
+      for (size_t i = 0; i < plan.pairs.size(); ++i) {
+        char b[48];
+        snprintf(b, sizeof b, "%s\"%u\":%.2f", i ? "," : "", plan.pairs[i].first, plan.pairs[i].second);
+        pairs += b;
+      }
+      char l[256];
+      snprintf(l, sizeof l,
+               "{\"ev\":\"ran.phase\",\"du\":%u,\"channel\":%u,\"phase_us\":%lld,"
+               "\"score\":%.2f,\"max_score\":%.2f,\"against\":%zu,\"pairs\":",
+               kv.first, rq.channel, (long long)plan.phase_us, plan.score, plan.max_score, ex.size());
+      emit(std::string(l) + pairs + "}}");
+      answer_phase(kv.second.st);
+    }
+  };
   while (std::chrono::steady_clock::now() < deadline) {
     pollfd pf{fd, POLLIN, 0};
     if (poll(&pf, 1, 50) > 0 && (pf.revents & POLLIN)) {
@@ -391,7 +463,28 @@ int main() {
           if (r && std::find(expected.begin(), expected.end(), static_cast<long>(r->du)) ==
                        expected.end())
             r.reset();
+          if (r && r->phase_us < 0) {
+            /* A phase request (M6): above this DU's last request and last
+             * report, else a replay. */
+            auto j = joining.find(r->du);
+            const auto d = dus.find(r->du);
+            if ((j != joining.end() && r->seq <= j->second.st.rep.seq) ||
+                (d != dus.end() && r->seq <= d->second.rep.seq) || r->period_us <= 0)
+              continue;
+            if (j == joining.end())
+              j = joining.emplace(r->du, Joining{{}, std::chrono::steady_clock::now()}).first;
+            j->second.st.rep = *r;
+            j->second.st.addr = from;
+            j->second.st.at = std::chrono::steady_clock::now();
+            if (phase_of.count(r->du))
+              answer_phase(j->second.st);
+            else
+              plan_joining(std::chrono::steady_clock::now());
+            continue;
+          }
           if (r) {
+            /* Running: no longer joining (its assignment stays). */
+            joining.erase(r->du);
             DuState &d = dus[r->du];
             const bool first = d.at.time_since_epoch().count() == 0;
             /* Freshness: a report at or below the last one taken from this DU

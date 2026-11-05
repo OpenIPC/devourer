@@ -19,6 +19,9 @@
  *               reason to move (radio-link failure is a separate path).
  *   MeasTable   one DU's filtered RSSI/SNR per (cell, UE): its own UEs and
  *               the other cells' it hears; what its F1 report carries.
+ *   UlStreams   the CU's DAPS uplink delivery: per-UE streams over SeqDedup,
+ *               a handover aliasing the target identity onto the source's
+ *               stream; ul_seq_from_egress gives the copies' common seq.
  *   SeqDedup    sequence duplicate suppression for DAPS: the same uplink
  *               frame arriving over two cells is delivered once. A sliding
  *               window behind the highest sequence seen, in serial-number
@@ -244,6 +247,80 @@ private:
   uint32_t top_ = 0;
   std::array<uint64_t, kWindow / 64> bits_{};
 };
+
+/* The CU's uplink delivery for DAPS: every DU that hears a UE's uplink
+ * forwards it (cell, ue, seq); the copies of one uplink carry the same seq
+ * (the UE beacon's own egress TSF in superframes), so the stream delivers it
+ * once. A UE's stream is keyed by its identity (cell, ue); a handover
+ * ALIASES the target identity onto the source's stream, so the copies heard
+ * under either identity during the crossing dedup together and the stream
+ * continues across the switch. Per-path counts say which DU carried what. */
+class UlStreams {
+public:
+  using Id = std::pair<uint16_t, uint16_t>; /* (cell, ue) */
+
+  struct Result {
+    bool fresh = false;  /* delivered (first copy) */
+    uint32_t stream = 0;
+  };
+  struct Stats {
+    uint64_t delivered = 0, duplicates = 0;
+    std::map<uint16_t, uint64_t> first_by_du; /* which DU delivered first */
+    std::map<uint16_t, uint64_t> heard_by_du; /* every copy, by DU */
+  };
+
+  /* One forwarded copy. */
+  Result deliver(Id who, uint32_t seq, uint16_t du) {
+    const uint32_t s = stream_of(who);
+    Stream &st = streams_[s];
+    ++st.stats.heard_by_du[du];
+    const bool fresh = st.dedup.accept(seq);
+    if (fresh) {
+      ++st.stats.delivered;
+      ++st.stats.first_by_du[du];
+    } else {
+      ++st.stats.duplicates;
+    }
+    return {fresh, s};
+  }
+  /* `alias` (the target identity) joins `of`'s stream (the source identity). */
+  void alias(Id alias, Id of) { ids_[alias] = stream_of(of); }
+  /* Forget an identity (released); the stream stays reachable via its others. */
+  void forget(Id who) { ids_.erase(who); }
+  const Stats *stats(Id who) const {
+    auto it = ids_.find(who);
+    if (it == ids_.end())
+      return nullptr;
+    auto st = streams_.find(it->second);
+    return st == streams_.end() ? nullptr : &st->second.stats;
+  }
+
+private:
+  struct Stream {
+    SeqDedup dedup;
+    Stats stats;
+  };
+  uint32_t stream_of(Id who) {
+    auto it = ids_.find(who);
+    if (it != ids_.end())
+      return it->second;
+    const uint32_t s = next_++;
+    ids_[who] = s;
+    streams_[s];
+    return s;
+  }
+  std::map<Id, uint32_t> ids_;
+  std::map<uint32_t, Stream> streams_;
+  uint32_t next_ = 1;
+};
+
+/* The uplink sequence both DUs agree on: the UE beacon's egress TSF in
+ * superframes (one beacon per superframe; the hardware stamp is the same in
+ * every copy). Rounded, so a TSF step of a few us never splits a beacon. */
+inline uint32_t ul_seq_from_egress(uint64_t egress_tsf, int64_t period_us) {
+  return static_cast<uint32_t>((egress_tsf + static_cast<uint64_t>(period_us / 2)) /
+                               static_cast<uint64_t>(period_us));
+}
 
 } /* namespace devourer::cell */
 

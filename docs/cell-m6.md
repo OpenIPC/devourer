@@ -14,7 +14,7 @@ is no scan, no clock re-acquisition and no association exchange.
 | the command | `src/cell/HoCommand.h` `HoCommand`, F1 `Type::Handover` | UE, target id and position, switch instant, TSF delta |
 | the UE's copy | `HoIe` in the source DU's beacon | CRC and cell-key tag (forgery is inert); `HoReceiver` rejects a replay |
 | clock continuity | `ho_tsf_delta_us`, `TsfSync::ShiftRemote` | the target's TSF is the source's plus a known constant |
-| DAPS dedup | `Handover.h` `SeqDedup` | for the duplicated uplink (not wired yet) |
+| DAPS (same channel) | `Handover.h` `SeqDedup`, `UlStreams`; F1 `Type::Uplink` | the uplink delivered through both cells during a crossing, once at the CU |
 
 ## TSF continuity
 
@@ -126,6 +126,45 @@ The first runs, single, measured with testrig `scripts/m5_ran_coord.sh` plus
   the UE does not rebuild its uplink beacon. Its uplink never left the
   source, which is part of why the fallback is seamless.
 
+## DAPS: the duplicated uplink (same channel)
+
+**Common sequence.** A UE's uplink is its hardware beacon, which carries the
+UE's own egress TSF. Every DU that hears one copy sees the same stamp, so
+`seq = round(egress / P)` (`ul_seq_from_egress`) identifies that uplink at
+every DU. The UE needs no change.
+
+**Forwarding.** Each DU forwards its own UEs' uplinks to the CU (F1
+`Uplink`) whenever F1 is on. With `CELL_DAPS=1` (the default), during a
+handover it also forwards the UE's *other* identity:
+- the target forwards the UE's source identity, staged with the command,
+  until the switch plus the release window;
+- the source forwards the UE's target identity after the switch.
+
+**Delivery.** The CU delivers each uplink once per UE stream (`UlStreams`
+over `SeqDedup`). The command *aliases* the target identity onto the
+source's stream, so both identities' copies dedup together and the stream
+runs on across the switch.
+- Every gap in a stream's delivered sequence is logged (`ran.ul_gap`): it is
+  the interruption a crossing or a lost path costs.
+- A summary goes out every 10 s (`ran.ul`: delivered, duplicates, and which
+  DU delivered first).
+
+**Rig test** (testrig `scripts/m6_daps.sh`, 3 runs per mode). The source DU
+is killed the moment its UE accepts the handover, so the path dies
+mid-crossing about 2 s before the switch.
+
+| uplinks missing from the crossing UE's stream | min | median | max |
+|---|---|---|---|
+| DAPS (`CELL_DAPS=1`) | 0 | 0 | 1 |
+| no DAPS (`CELL_DAPS=0`) | 13 | 14 | 14 |
+
+- **Without DAPS:** the stream loses everything from the kill to the switch,
+  and resumes via the target once the UE uplinks under its target identity.
+- **With DAPS:** the target had been delivering the source-identity copies
+  all along. In one representative run, after the source died the stream
+  went on entirely via the target: of 1156 delivered, 31 came first through
+  the source and 1125 through the target.
+
 ## Bugs the rig found
 
 **A DU with no UE did not pace its main loop.** Its superframe count ran away
@@ -156,8 +195,10 @@ superframe when there is nothing to serve.
 
 ## Not covered yet
 
-- **DAPS:** the duplicated uplink through both cells with `SeqDedup`
-  (same-channel first), and the "kill one path mid-crossing" test.
+- **DAPS beyond same-channel uplink:**
+  - downlink duplication;
+  - the different-channel (sequential) variant, with its retune and deaf-time
+    budget.
 - **A moving UE:** the rig's UEs are stationary, so the crossing is forced
   with a negative A3 offset.
 - **Different-channel handover:** this needs `FastRetune` and the

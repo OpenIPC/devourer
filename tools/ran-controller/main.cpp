@@ -44,6 +44,11 @@
 //                             when the target reports the UE. One handover in
 //                             flight per DU pair end.
 //   RAN_A3_DWELL_MS [2000]    after a handover, the moved UE's A3 dwell
+// DAPS (M6): the DUs forward the UE uplinks they hear (F1 Uplink); the CU
+// delivers each once per UE stream (src/cell/Handover.h UlStreams; a
+// handover aliases the target identity onto the source's stream) and logs
+// every gap in a stream's delivered sequence (ran.ul_gap: the interruption
+// a crossing or a lost path costs) and a summary every 10 s (ran.ul).
 //   RAN_MEAS_STALE_MS [2000]  a reported value counts until its sample age
 //                             (carried in F1) plus the report's age passes
 //                             this (= the DUs' CELL_MEAS_STALE_MS)
@@ -255,6 +260,9 @@ int main() {
   };
   std::map<uint32_t, Cancel> cancels;
   uint32_t ho_last_id = 0;
+  devourer::cell::UlStreams ul;
+  std::map<uint32_t, uint32_t> ul_last; /* per stream: the newest seq delivered */
+  std::map<uint32_t, std::pair<uint16_t, uint16_t>> ul_name; /* stream -> latest identity */
   auto ms_now = [&] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
         .count();
@@ -283,7 +291,29 @@ int main() {
       const ssize_t n = recvfrom(fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
       if (n > 0) {
         const auto ty = f1::peek_type(buf, static_cast<size_t>(n));
-        if (ty == f1::Type::Report) {
+        if (ty == f1::Type::Uplink) {
+          auto u = f1::decode_uplink(buf, static_cast<size_t>(n), mac);
+          if (u && std::find(expected.begin(), expected.end(), static_cast<long>(u->du)) !=
+                       expected.end()) {
+            const auto r = ul.deliver({u->cell, u->ue}, u->seq, u->du);
+            if (r.fresh) {
+              auto lit = ul_last.find(r.stream);
+              if (lit != ul_last.end()) {
+                const int32_t d = static_cast<int32_t>(u->seq - lit->second);
+                if (d > 1)
+                  emit("{\"ev\":\"ran.ul_gap\",\"cell\":" + std::to_string(u->cell) +
+                       ",\"ue\":" + std::to_string(u->ue) + ",\"after_seq\":" +
+                       std::to_string(lit->second) + ",\"missing\":" + std::to_string(d - 1) +
+                       ",\"resumed_via\":" + std::to_string(u->du) + "}");
+                if (d > 0)
+                  lit->second = u->seq;
+              } else {
+                ul_last[r.stream] = u->seq;
+              }
+              ul_name[r.stream] = {u->cell, u->ue};
+            }
+          }
+        } else if (ty == f1::Type::Report) {
           auto r = f1::decode_report(buf, static_cast<size_t>(n), mac);
           /* Only the configured DUs: no state for any other id, however
            * many a sender makes up. */
@@ -372,9 +402,24 @@ int main() {
       }
     }
     const auto now = std::chrono::steady_clock::now();
-    /* The DUs' filtered uplink measurements (M6), every 10 s. */
+    /* The DUs' filtered uplink measurements (M6), every 10 s, and the DAPS
+     * uplink streams. */
     if (now >= next_meas) {
       next_meas = now + std::chrono::seconds(10);
+      for (const auto &nm : ul_name)
+        if (const auto *st = ul.stats(nm.second)) {
+          std::string m = "{\"ev\":\"ran.ul\",\"cell\":" + std::to_string(nm.second.first) +
+                          ",\"ue\":" + std::to_string(nm.second.second) + ",\"delivered\":" +
+                          std::to_string(st->delivered) + ",\"duplicates\":" +
+                          std::to_string(st->duplicates) + ",\"first_by_du\":{";
+          bool f = true;
+          for (const auto &kv : st->first_by_du) {
+            m += std::string(f ? "" : ",") + "\"" + std::to_string(kv.first) + "\":" +
+                 std::to_string(kv.second);
+            f = false;
+          }
+          emit(m + "}}");
+        }
       for (const auto &kv : dus) {
         std::string m = "{\"ev\":\"ran.meas\",\"du\":" + std::to_string(kv.first) + ",\"own\":[";
         for (size_t i = 0; i < kv.second.rep.meas.size(); ++i) {
@@ -515,6 +560,7 @@ int main() {
                 cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
                                                                    tr.net_off, sr.period_us);
                 flights[key] = HoFlight{cmd};
+                ul.alias({cmd.target, cmd.target_ue}, {cmd.source, cmd.ue}); /* DAPS: one stream */
                 char b[300];
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"

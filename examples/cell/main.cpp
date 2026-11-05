@@ -103,6 +103,13 @@
 //   CELL_HO_FALLBACK_SF [10]  M6 handover, UE side: no grant at the target
 //                             this many superframes after the switch = return
 //                             to the source (which still holds the UE)
+//   CELL_DAPS [1]             M6 DAPS (same channel). Every own-UE uplink is
+//                             forwarded to the CU (F1 Uplink) whenever F1 is
+//                             on. DAPS adds the UE's OTHER identity during a
+//                             handover (the target hears it under its source
+//                             id before the switch, the source under its
+//                             target id after); the CU delivers each uplink
+//                             once. 0 = the serving path only (no duplicate).
 //   CELL_MEAS_L3_K [4] CELL_MEAS_STALE_MS [2000]  the reported uplink quality:
 //                             a 3GPP L3 filter per (cell, UE), stale = absent
 //   CELL_SYNC_UL_SF [30]      beacon-engine proxy: once UEs in the map have
@@ -893,6 +900,26 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::map<uint16_t, HoOut> ho_out; /* by (source) UE id */
   bool have_ho_seq = false;
   uint64_t last_ho_seq = 0;
+  /* DAPS: the other identities to forward, until a local superframe (f1_mu). */
+  const bool daps_on = envl("CELL_DAPS", 1, 0, 1) != 0;
+  std::map<std::pair<uint16_t, uint16_t>, int64_t> daps_ids;
+  auto send_f1 = [&](const std::vector<uint8_t> &m) { /* any thread: a UDP sendto */
+    if (f1_on && !m.empty())
+      sendto(f1_fd.fd, m.data(), m.size(), 0, reinterpret_cast<const sockaddr *>(&f1_addr),
+             f1_addr_len);
+  };
+  auto forward_ul = [&](uint16_t cell, uint16_t ue, const Packet &p) {
+    const auto eg = p.TxEgressTsf();
+    if (!eg)
+      return;
+    devourer::cell::f1::UplinkFwd u;
+    u.du = c.cell;
+    u.cell = cell;
+    u.ue = ue;
+    u.seq = devourer::cell::ul_seq_from_egress(*eg, P);
+    u.rssi_dbm = static_cast<int8_t>(static_cast<int>(p.RxAtrib.rssi[0]) - 110);
+    send_f1(devourer::cell::f1::encode_uplink(u, f1_mac));
+  };
   const int64_t ho_release_sf = envl("CELL_HO_RELEASE_SF", 20, 3, 100000);
   auto now_ms = [] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -956,9 +983,15 @@ int run_du(IRadio *dev, const Cfg &c) {
         const uint16_t oc = static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]);
         const uint16_t ou = p.Data[15];
         if (oc != c.cell && ou >= 1) {
-          std::lock_guard<std::mutex> lk(f1_mu);
-          meas_tab.update(oc, ou, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
-                          static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+          bool fwd = false;
+          {
+            std::lock_guard<std::mutex> lk(f1_mu);
+            meas_tab.update(oc, ou, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
+                            static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+            fwd = daps_on && daps_ids.count({oc, ou}) > 0;
+          }
+          if (fwd) /* DAPS: a handing-over UE heard under its other identity */
+            forward_ul(oc, ou, p);
           return;
         }
       }
@@ -966,9 +999,12 @@ int run_du(IRadio *dev, const Cfg &c) {
       if (!ub)
         return;
       if (f1_on) { /* an own UE's (verified) uplink: its serving measurement */
-        std::lock_guard<std::mutex> lk(f1_mu);
-        meas_tab.update(c.cell, ub->ue, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
-                        static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+        {
+          std::lock_guard<std::mutex> lk(f1_mu);
+          meas_tab.update(c.cell, ub->ue, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
+                          static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+        }
+        forward_ul(c.cell, ub->ue, p); /* the serving path: always (F1 on) */
       }
       /* The UL slot of the grant the UE runs (by the epoch it reports). */
       std::optional<size_t> slot;
@@ -1208,6 +1244,10 @@ int run_du(IRadio *dev, const Cfg &c) {
               }
               if (got) {
                 st = f1::AckStatus::Staged;
+                std::lock_guard<std::mutex> lk(f1_mu);
+                /* DAPS: the UE's source identity, heard here until the switch
+                 * (+ the release window, for its last old-identity beacons). */
+                daps_ids[{cmd.source, cmd.ue}] = static_cast<int64_t>(eff) + ho_release_sf;
               } else {
                 std::lock_guard<std::mutex> lk(f1_mu);
                 ho_in.erase(cmd.target_ue);
@@ -1236,6 +1276,9 @@ int run_du(IRadio *dev, const Cfg &c) {
               if (!bytes.empty()) {
                 std::lock_guard<std::mutex> lk(f1_mu);
                 ho_out[cmd.ue] = {cmd.id, ie.effective_sf, cmd.target, cmd.target_ue, bytes};
+                /* DAPS: its target identity, heard here after the switch. */
+                daps_ids[{cmd.target, cmd.target_ue}] =
+                    static_cast<int64_t>(ie.effective_sf) + ho_release_sf;
                 st = f1::AckStatus::Staged;
               }
             }
@@ -1424,6 +1467,8 @@ int run_du(IRadio *dev, const Cfg &c) {
                            : -1;
       f1_view.sync_state = static_cast<uint8_t>(health.state());
       f1_view.coordinated = coordinated;
+      for (auto it = daps_ids.begin(); it != daps_ids.end();)
+        it = it->second < sf ? daps_ids.erase(it) : std::next(it);
       ho_in_snap = ho_in;
       ho_out_snap = ho_out;
       /* Kept until the live map no longer has the UE (a deferred or failed

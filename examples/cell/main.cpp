@@ -97,6 +97,12 @@
 //   CELL_F1_REPORT_MS [1000]  report period
 //   CELL_F1_TIMEOUT_MS [3000] no CU message this long = CU outage
 //   CELL_F1_MIN_LEAD_SF [8] CELL_F1_PUBLISH_LEAD_SF [5]   the failure model
+//   CELL_HO_RELEASE_SF [20]   M6 handover, source side: superframes after the
+//                             switch before the UE's grant is released (only
+//                             if it has stopped uplinking here)
+//   CELL_HO_FALLBACK_SF [10]  M6 handover, UE side: no grant at the target
+//                             this many superframes after the switch = return
+//                             to the source (which still holds the UE)
 //   CELL_MEAS_L3_K [4] CELL_MEAS_STALE_MS [2000]  the reported uplink quality:
 //                             a 3GPP L3 filter per (cell, UE), stale = absent
 //   CELL_SYNC_UL_SF [30]      beacon-engine proxy: once UEs in the map have
@@ -829,6 +835,7 @@ int run_du(IRadio *dev, const Cfg &c) {
   for (uint16_t ue : ues)
     dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
   std::vector<uint8_t> rar_on_air;                 /* the RACH answers in the live beacon */
+  std::vector<uint8_t> ho_on_air;                  /* the handover IEs in the live beacon */
   std::vector<devourer::cell::RachResponse> rar_on_air_set; /* ... as answers, for accounting */
   std::map<uint16_t, int64_t> last_ul_sf;          /* per UE: superframe of its last uplink (mu) */
   std::map<uint16_t, int64_t> heard_ul_sf;         /* ... only ever set by an uplink heard (mu) */
@@ -865,6 +872,27 @@ int run_du(IRadio *dev, const Cfg &c) {
       static_cast<int>(envl("CELL_MEAS_L3_K", 4, 0, 19)), envl("CELL_MEAS_STALE_MS", 2000, 100, 60000)});
   devourer::cell::CoordDu layout;
   devourer::cell::coord_layout(*grid, layout);
+  /* M6 handover (src/cell/HoCommand.h), staged by the F1 thread (f1_mu).
+   * Target side: a UE coming in, by the id it gets here, its position, and
+   * the switch instant in this DU's superframe count. Source side: a UE
+   * leaving, with the IE this DU airs to it until the switch. */
+  struct HoIn {
+    uint32_t id = 0;
+    uint8_t pos = 0;
+    uint64_t eff_sf = 0;
+  };
+  struct HoOut {
+    uint32_t id = 0;
+    uint64_t eff_sf = 0;
+    uint16_t target = 0, target_ue = 0;
+    std::vector<uint8_t> ie;
+  };
+  std::map<uint16_t, HoIn> ho_in;   /* by target UE id */
+  std::set<uint16_t> ho_cancel;     /* published arrivals the CU cancelled */
+  std::map<uint16_t, HoOut> ho_out; /* by (source) UE id */
+  bool have_ho_seq = false;
+  uint64_t last_ho_seq = 0;
+  const int64_t ho_release_sf = envl("CELL_HO_RELEASE_SF", 20, 3, 100000);
   auto now_ms = [] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -1090,6 +1118,129 @@ int run_du(IRadio *dev, const Cfg &c) {
         };
         if (!same_peer())
           continue;
+        if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::Handover) {
+          auto h = f1::decode_handover(buf, static_cast<size_t>(n), f1_mac);
+          if (!h || h->first != c.cell)
+            continue;
+          const devourer::cell::HoCommand &cmd = h->second;
+          f1::AckStatus st = f1::AckStatus::Invalid;
+          const char *role = cmd.target == c.cell ? "target" : cmd.source == c.cell ? "source" : "none";
+          int64_t net_now = -1;
+          bool fresh = true, again = false;
+          std::vector<devourer::cell::CoordAssign> live;
+          {
+            std::lock_guard<std::mutex> lk(f1_mu);
+            if (have_ho_seq && cmd.seq <= last_ho_seq) {
+              fresh = false; /* a replay or reordering: changes nothing */
+              st = f1::AckStatus::Stale;
+            } else {
+              have_ho_seq = true;
+              last_ho_seq = cmd.seq;
+            }
+            net_now = f1_view.net_sf;
+            live = f1_view.ues;
+            again = (cmd.target == c.cell && ho_in.count(cmd.target_ue) &&
+                     ho_in[cmd.target_ue].id == cmd.id) ||
+                    (cmd.source == c.cell && ho_out.count(cmd.ue) && ho_out[cmd.ue].id == cmd.id);
+          }
+          const auto off = net_off.load();
+          const auto pos_free = [&](uint8_t pos) {
+            for (const auto &u : live)
+              if (u.pos == pos)
+                return false;
+            return true;
+          };
+          if (!fresh) {
+          } else if (cmd.target == c.cell && cmd.target_pos == 0) {
+            /* Cancel (the handover failed at the source): drop the UE this
+             * id pre-admitted, staged or already published. */
+            bool staged_only = false;
+            {
+              std::lock_guard<std::mutex> lk(f1_mu);
+              auto it = ho_in.find(cmd.target_ue);
+              if (it != ho_in.end() && it->second.id == cmd.id) {
+                ho_in.erase(it);
+                staged_only = true;
+              } else {
+                ho_cancel.insert(cmd.target_ue);
+              }
+            }
+            if (staged_only) {
+              std::lock_guard<std::mutex> lk(mu);
+              reg.release_id(cmd.target_ue);
+            }
+            role = "cancel";
+            st = f1::AckStatus::Staged;
+          } else if (again) {
+            st = f1::AckStatus::Staged; /* the CU resending: already staged */
+          } else if (net_now < 0 ||
+                     cmd.effective_net_sf < static_cast<uint64_t>(net_now) + f1c.min_lead_sf) {
+            st = f1::AckStatus::Late;
+          } else if (cmd.target == c.cell) {
+            bool known = false;
+            for (const auto &u : live)
+              known = known || u.ue == cmd.target_ue;
+            if (!known && cmd.target_pos >= 1 && cmd.target_pos <= c.capacity &&
+                pos_free(cmd.target_pos) && cmd.target_ue >= 1 && cmd.target_ue <= 254) {
+              /* Pre-admit under exactly the id the CU gave it (the registry
+               * hands out the lowest free one; the CU chose that one). */
+              std::array<uint8_t, 6> um{};
+              cell_mac(um.data(), c.cell, static_cast<uint8_t>(cmd.target_ue));
+              std::lock_guard<std::mutex> lk(mu);
+              auto u = reg.admit(um);
+              if (u && u->ue == cmd.target_ue) {
+                st = f1::AckStatus::Staged;
+              } else if (u) {
+                reg.release(um);
+              }
+            }
+            if (st == f1::AckStatus::Staged) {
+              std::lock_guard<std::mutex> lk(f1_mu);
+              ho_in[cmd.target_ue] = {cmd.id, cmd.target_pos,
+                                      static_cast<uint64_t>(static_cast<int64_t>(cmd.effective_net_sf) - off)};
+            }
+          } else if (cmd.source == c.cell) {
+            bool known = false;
+            for (const auto &u : live)
+              known = known || u.ue == cmd.ue;
+            const auto dl = grid->find(SlotKind::Downlink, cmd.target_pos);
+            const auto ul = grid->find(SlotKind::Uplink, cmd.target_pos);
+            if (known && dl && ul) {
+              /* The target's grid is this grid (one env per network): its
+               * slot indices for that position are ours. */
+              devourer::cell::HoIe ie;
+              ie.id = cmd.id;
+              ie.cell = c.cell;
+              ie.ue = cmd.ue;
+              ie.target = cmd.target;
+              ie.target_ue = cmd.target_ue;
+              ie.dl_slot = static_cast<uint8_t>(*dl);
+              ie.ul_slot = static_cast<uint8_t>(*ul);
+              ie.effective_sf = static_cast<uint64_t>(static_cast<int64_t>(cmd.effective_net_sf) - off);
+              ie.tsf_delta_us = cmd.tsf_delta_us;
+              auto bytes = devourer::cell::encode_ho_ie(ie, auth);
+              if (!bytes.empty()) {
+                std::lock_guard<std::mutex> lk(f1_mu);
+                ho_out[cmd.ue] = {cmd.id, ie.effective_sf, cmd.target, cmd.target_ue, bytes};
+                st = f1::AckStatus::Staged;
+              }
+            }
+          }
+          send(f1::encode_ack({c.cell, f1::AckKind::Handover, cmd.id, st,
+                               net_now < 0 ? 0 : static_cast<uint64_t>(net_now)},
+                              f1_mac));
+          if (!again) {
+            char l[240];
+            snprintf(l, sizeof l,
+                     "{\"ev\":\"cell.ho.cmd\",\"id\":%u,\"role\":\"%s\",\"ue\":%u,"
+                     "\"target\":%u,\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,"
+                     "\"status\":\"%s\"}",
+                     cmd.id, role, cmd.ue, cmd.target, cmd.target_ue, cmd.target_pos,
+                     (unsigned long long)cmd.effective_net_sf, f1::ack_status_name(st));
+            emit(l);
+          }
+          continue;
+        }
         auto s = f1::decode_schedule(buf, static_cast<size_t>(n), f1_mac);
         if (!s || s->du != c.cell)
           continue;
@@ -1160,6 +1311,11 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::vector<uint16_t> served;
     for (const Grant &g : serving.grants)
       served.push_back(g.ue);
+    /* Pace the pass to its superframe when there is no DL to wait for (a
+     * DU with no UE, e.g. after its last one handed over): `sf` must track
+     * the TSF, or the network superframe it reports runs away. */
+    if (served.empty())
+      sleep_until_tsf(dev, grid->slot_start_tsf(sf, grid->slots().size() > 1 ? 1 : 0));
     for (uint16_t ue : served) {
       const size_t idx = serving.find(ue)->dl_slot;
       const int64_t start = grid->slot_start_tsf(sf, idx);
@@ -1244,6 +1400,9 @@ int run_du(IRadio *dev, const Cfg &c) {
      * contact, and a staged schedule that is due. */
     bool cu_alive = true;
     std::optional<devourer::cell::f1::Schedule> f1_due;
+    std::map<uint16_t, HoIn> ho_in_snap;
+    std::map<uint16_t, HoOut> ho_out_snap;
+    std::set<uint16_t> ho_cancel_snap;
     if (f1_on) {
       std::lock_guard<std::mutex> lk(f1_mu);
       f1_view.net_sf = net_ok.load() && health.state() != devourer::cell::SyncState::Lost
@@ -1251,6 +1410,9 @@ int run_du(IRadio *dev, const Cfg &c) {
                            : -1;
       f1_view.sync_state = static_cast<uint8_t>(health.state());
       f1_view.coordinated = coordinated;
+      ho_in_snap = ho_in;
+      ho_out_snap = ho_out;
+      ho_cancel_snap.swap(ho_cancel);
       f1_view.ues.clear();
       for (const Grant &g : map.grants)
         f1_view.ues.push_back({g.ue, position_of(g)});
@@ -1293,12 +1455,32 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::vector<uint8_t> rar_now;
     std::vector<devourer::cell::RachResponse> rar_sel;
     std::vector<uint16_t> to_release;
+    std::vector<uint8_t> ho_ies;     /* handover IEs to air (source side) */
+    std::vector<uint16_t> ho_done;   /* source-side handovers concluded */
+    std::optional<uint64_t> ho_eff;  /* a handover arrival's instant (target side) */
+    uint16_t ho_eff_ue = 0;
     {
       std::lock_guard<std::mutex> lk(mu);
       /* Joiners the RACH server admitted: a grant, and their per-UE state. */
       for (const auto &u : reg.admitted())
         if (!next.find(u.ue)) {
           Grant g = grant_for(u);
+          /* A handover arrival: published for its switch instant, in the
+           * position the CU gave it, no earlier than the publish lead. */
+          if (auto hi = ho_in_snap.find(u.ue); hi != ho_in_snap.end()) {
+            if (static_cast<uint64_t>(sf) + f1c.publish_lead_sf < hi->second.eff_sf || f1_due ||
+                ho_eff)
+              continue; /* not yet (or another instant is being published) */
+            set_position(g, hi->second.pos);
+            next.grants.push_back(g);
+            ta.emplace(u.ue, TaLoop(ta_gain, P / 4));
+            dlue.emplace(u.ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
+            last_ul_sf[u.ue] = static_cast<int64_t>(hi->second.eff_sf); /* silence clock at the switch */
+            ho_eff = hi->second.eff_sf;
+            ho_eff_ue = u.ue;
+            changed = true;
+            continue;
+          }
           /* Its default slot pair may be another UE's (the CU moved that one
            * there): then the first free one; the CU re-plans it. */
           for (const Grant &o : next.grants)
@@ -1329,6 +1511,54 @@ int run_du(IRadio *dev, const Cfg &c) {
           continue;
         }
         ++it;
+      }
+      /* Cancelled arrivals already in the map: released as departures. */
+      for (uint16_t ue : ho_cancel_snap)
+        for (auto it = next.grants.begin(); it != next.grants.end(); ++it)
+          if (it->ue == ue) {
+            next.grants.erase(it);
+            to_release.push_back(ue);
+            changed = true;
+            break;
+          }
+      /* Source side: air each handover IE through its switch instant; after
+       * it, release the UE only if it has stopped uplinking HERE (it took
+       * the target's identity). If it is still heard as ours, it never
+       * switched: it keeps its grant (make-before-break). */
+      for (const auto &kv : ho_out_snap) {
+        const uint16_t ue = kv.first;
+        const HoOut &ho = kv.second;
+        if (static_cast<uint64_t>(sf) <= ho.eff_sf + 2) {
+          ho_ies.insert(ho_ies.end(), ho.ie.begin(), ho.ie.end());
+          continue;
+        }
+        if (static_cast<uint64_t>(sf) < ho.eff_sf + static_cast<uint64_t>(ho_release_sf))
+          continue;
+        /* Its last uplink as ours in the switch superframe itself (+2: the
+         * UE's poll and its beacon update) is still the old identity. */
+        auto h = heard_ul_sf.find(ue);
+        const bool switched =
+            h == heard_ul_sf.end() || h->second <= static_cast<int64_t>(ho.eff_sf) + 2;
+        if (switched && map.find(ue)) {
+          /* Released through the normal publish; this entry concludes once
+           * the live map no longer has the UE (a deferred publish retries). */
+          for (auto it = next.grants.begin(); it != next.grants.end(); ++it)
+            if (it->ue == ue) {
+              next.grants.erase(it);
+              to_release.push_back(ue);
+              changed = true;
+              break;
+            }
+          continue;
+        }
+        ho_done.push_back(ue);
+        char l[200];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ho.%s\",\"id\":%u,\"ue\":%u,\"target\":%u,\"target_ue\":%u,"
+                 "\"sf\":%lld,\"last_heard_sf\":%lld}",
+                 switched ? "released" : "kept", ho.id, ue, ho.target, ho.target_ue, (long long)sf,
+                 (long long)(h == heard_ul_sf.end() ? -1 : h->second));
+        emit(l);
       }
       if (rach_on) {
         rar_sel = srv.select(static_cast<uint64_t>(sf + 1));
@@ -1455,17 +1685,27 @@ int run_du(IRadio *dev, const Cfg &c) {
       changed = false;
       f1_eff.reset();
     }
-    if (changed || rar_now != rar_on_air) {
+    /* A handover arrival that can no longer be announced N+2 ahead: it
+     * is not published (the UE stays with its source, which keeps it). */
+    if (ho_eff && (static_cast<uint64_t>(sf) + 2 > *ho_eff || f1_eff)) {
+      next = map;
+      changed = false;
+      ho_eff.reset();
+    }
+    if (changed || rar_now != rar_on_air || ho_ies != ho_on_air) {
       if (changed) {
         ++next.epoch;
-        next.effective_sf = f1_eff ? *f1_eff : static_cast<uint64_t>(sf + 3);
+        next.effective_sf = f1_eff   ? *f1_eff
+                            : ho_eff ? *ho_eff
+                                     : static_cast<uint64_t>(sf + 3);
       }
-      const auto nb = build_du_beacon(next, rar_now);
+      const auto nb = build_du_beacon(next, rar_now, ho_ies);
       const bool ok = !nb.empty() && dev->UpdateBeaconPayload(nb.data(), nb.size());
       beacon_fail_run = ok ? 0 : beacon_fail_run + 1;
       if (ok) {
         rar_on_air = rar_now;
         rar_on_air_set = rar_sel;
+        ho_on_air = ho_ies;
       }
       if (changed) {
         if (ok) {
@@ -1492,6 +1732,20 @@ int run_du(IRadio *dev, const Cfg &c) {
               emit("{\"ev\":\"cell.f1.publish_late\"}");
               f1_eff.reset();
             }
+          }
+          if (ho_eff) {
+            std::lock_guard<std::mutex> lk(f1_mu);
+            const auto it = ho_in.find(ho_eff_ue);
+            char l[200];
+            snprintf(l, sizeof l,
+                     "{\"ev\":\"cell.ho.target_staged\",\"id\":%u,\"ue\":%u,\"pos\":%u,"
+                     "\"effective_sf\":%llu,\"sf\":%lld}",
+                     it != ho_in.end() ? it->second.id : 0, ho_eff_ue,
+                     it != ho_in.end() ? it->second.pos : 0, (unsigned long long)*ho_eff,
+                     (long long)sf);
+            emit(l);
+            if (it != ho_in.end())
+              ho_in.erase(it);
           }
           if (f1_eff) {
             char l[200];
@@ -1536,6 +1790,11 @@ int run_du(IRadio *dev, const Cfg &c) {
           snprintf(l + n, sizeof l - n, "}}");
         emit(l);
       }
+    }
+    if (!ho_done.empty()) {
+      std::lock_guard<std::mutex> lk(f1_mu);
+      for (uint16_t ue : ho_done)
+        ho_out.erase(ue);
     }
     /* The answers on air this superframe (after a failed update: the
      * previous set, still airing) count one publication. */
@@ -1582,10 +1841,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
     fprintf(stderr, "CELL_UE=0 (join) needs CELL_RACH_US and CELL_PSK\n");
     return 2;
   }
+  /* The serving cell: c.cell until a handover (M6) moves the UE. */
+  std::atomic<uint16_t> cell_a{c.cell};
   dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
   auto arm_ack = [&](int ue) {
     devourer::MacAddr own;
-    cell_mac(own.bytes.data(), c.cell, static_cast<uint8_t>(ue));
+    cell_mac(own.bytes.data(), cell_a.load(), static_cast<uint8_t>(ue));
     if (dev->SetAckResponder(own))
       return true;
     fprintf(stderr, "SetAckResponder refused (ack_responder_ok=%d)\n",
@@ -1618,8 +1879,26 @@ int run_ue(IRadio *dev, const Cfg &c) {
     fprintf(stderr, "the grid does not fit a %d TU superframe\n", c.tu);
     return 2;
   }
-  uint8_t du_mac[6];
+  uint8_t du_mac[6]; /* the serving DU (mu) */
   cell_mac(du_mac, c.cell, 0);
+  /* M6 handover (src/cell/HoCommand.h), all under mu: the newest IE the
+   * serving DU's beacon addressed to us, the one accepted (fresh, instant
+   * ahead), and the target's grant maps heard while waiting for it. */
+  std::optional<devourer::cell::HoIe> ho_seen, ho_pending;
+  devourer::cell::HoReceiver horx;
+  std::optional<GrantMapReceiver> rxr_target;
+  uint8_t tgt_du_mac[6] = {0};
+  bool force_beacon = false;
+  /* After a switch, until the target grants us: the way back (mu). */
+  struct HoBack {
+    uint16_t cell = 0, ue = 0;
+    int64_t delta_us = 0;
+    int64_t deadline_sf = 0; /* in the target's count */
+    uint32_t id = 0;
+  };
+  std::optional<HoBack> ho_back;
+  std::optional<GrantMapReceiver> rxr_source;
+  const int64_t ho_fallback_sf = envl("CELL_HO_FALLBACK_SF", 10, 2, 10000);
   /* RACH (joining UE): its own random MAC + nonce, the client, and the
    * answers the RX thread finds in DU beacons (mu). */
   std::random_device rd;
@@ -1656,12 +1935,25 @@ int run_ue(IRadio *dev, const Cfg &c) {
     dev->StartRxLoop([&](const Packet &p) {
       if (p.RxAtrib.crc_err || p.Data.size() < 24)
         return;
-      if (p.Data[0] == 0x80 && std::memcmp(p.Data.data() + 10, du_mac, 6) == 0) {
+      if (p.Data[0] == 0x80) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (std::memcmp(p.Data.data() + 10, du_mac, 6) != 0) {
+          /* The handover target's beacons: its grant maps, buffered for the
+           * switch (they do not feed the clock: that is the source's until
+           * the switch, then shifted, not re-acquired). */
+          if (rxr_target && std::memcmp(p.Data.data() + 10, tgt_du_mac, 6) == 0)
+            if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size()))
+              rxr_target->offer(*m);
+          return;
+        }
         const auto eg = p.TxEgressTsf();
         if (!eg)
           return;
-        std::lock_guard<std::mutex> lk(mu);
         sync.Add(*eg, p.RxAtrib.tsfl);
+        if (me_a > 0)
+          if (auto h = devourer::cell::find_ho_ie(p.Data.data(), p.Data.size(), cell_a.load(),
+                                                  static_cast<uint16_t>(me_a.load()), auth))
+            ho_seen = h;
         wrap.feed(p.RxAtrib.tsfl);
         if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size()))
           rxr.offer(*m);
@@ -1675,7 +1967,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
         return;
       }
       const int me = me_a.load();
-      const auto d = parse_dl_frame(p.Data.data(), p.Data.size(), c.cell, auth);
+      const auto d = parse_dl_frame(p.Data.data(), p.Data.size(), cell_a.load(), auth);
       if (!d || me == 0 || d->ue != me)
         return;
       std::optional<size_t> want;
@@ -1731,6 +2023,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   /* The DU superframes this UE was running (synced, map in force), for the
    * DL accounting: frames sent outside it were never expected. */
   int64_t listen_from = -1, listen_to = -1;
+  bool rearm_ack = false;
   while (std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     uint64_t t = 0, f = 0;
@@ -1744,10 +2037,93 @@ int run_ue(IRadio *dev, const Cfg &c) {
       if (!sync.Ready() || !wrap.ready())
         continue;
       du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
-      const int64_t sfn = du_now >= 0 ? du_now / P : 0;
+      int64_t sfn = du_now >= 0 ? du_now / P : 0;
+      /* M6: a fresh handover command is accepted once (HoReceiver: newer
+       * id, instant ahead); at its instant the UE switches: the clock is
+       * SHIFTED to the target's (TsfSync::ShiftRemote, the CU's delta), the
+       * identity becomes the target's, and the target's buffered grant
+       * maps take over. No scan, no re-acquisition, no association. */
+      if (ho_seen) {
+        if (horx.accept(*ho_seen, static_cast<uint64_t>(sfn))) {
+          ho_pending = ho_seen;
+          rxr_target.emplace(ho_pending->target);
+          cell_mac(tgt_du_mac, ho_pending->target, 0);
+          char l[220];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.ho_staged\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
+                   "\"target_ue\":%u,\"effective_sf\":%llu,\"sf\":%lld}",
+                   ho_pending->id, ho_pending->ue, ho_pending->cell, ho_pending->target,
+                   ho_pending->target_ue, (unsigned long long)ho_pending->effective_sf,
+                   (long long)sfn);
+          emit(l);
+        }
+        ho_seen.reset();
+      }
+      if (ho_pending && static_cast<uint64_t>(sfn) >= ho_pending->effective_sf) {
+        const devourer::cell::HoIe h = *ho_pending;
+        const int64_t before = du_now;
+        sync.ShiftRemote(h.tsf_delta_us);
+        du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
+        cell_a.store(h.target);
+        me_a.store(h.target_ue);
+        cell_mac(du_mac, h.target, 0);
+        rxr_source = rxr;
+        rxr = *rxr_target;
+        rxr_target.reset();
+        ho_pending.reset();
+        hrx = HarqReceiver{}; /* the target's DL sequence space */
+        force_beacon = true;
+        listen_from = -1;     /* DL accounting restarts on the target's count */
+        sfn = du_now >= 0 ? du_now / P : 0;
+        char l[300];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.ho\",\"id\":%u,\"from\":%u,\"ue\":%u,\"to\":%u,"
+                 "\"target_ue\":%u,\"source_sf\":%lld,\"target_sf\":%lld,\"delta_us\":%lld,"
+                 "\"source_tsf\":%lld,\"target_tsf\":%lld}",
+                 h.id, h.cell, h.ue, h.target, h.target_ue, (long long)(before / P), (long long)sfn,
+                 (long long)h.tsf_delta_us, (long long)before, (long long)du_now);
+        emit(l);
+        rearm_ack = true;
+        ho_back = HoBack{h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
+      }
+      /* Committed once the target's map in force grants us; no grant by the
+       * deadline = back to the source (conditional: the UE never ends up
+       * with neither cell). */
+      if (ho_back) {
+        const GrantMap *tm = rxr.current(static_cast<uint64_t>(sfn));
+        if (tm && tm->find(static_cast<uint16_t>(me_a.load()))) {
+          ho_back.reset();
+          rxr_source.reset();
+        } else if (sfn >= ho_back->deadline_sf) {
+          const HoBack b = *ho_back;
+          sync.ShiftRemote(-b.delta_us);
+          du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
+          cell_a.store(b.cell);
+          me_a.store(b.ue);
+          cell_mac(du_mac, b.cell, 0);
+          if (rxr_source)
+            rxr = *rxr_source;
+          rxr_source.reset();
+          ho_back.reset();
+          hrx = HarqReceiver{};
+          force_beacon = true;
+          listen_from = -1;
+          rearm_ack = true;
+          sfn = du_now >= 0 ? du_now / P : 0;
+          char l[200];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.ho_fallback\",\"id\":%u,\"to\":%u,\"ue\":%u,\"sf\":%lld}",
+                   b.id, b.cell, b.ue, (long long)sfn);
+          emit(l);
+        }
+      }
       m = rxr.current(static_cast<uint64_t>(sfn));
       if (m)
         mcopy = *m;
+    }
+    if (rearm_ack) {
+      rearm_ack = false;
+      arm_ack(me_a.load()); /* the target identity's MAC (cell_a is the target now) */
     }
     /* M4: follow the DU's mode — autonomous = carrier sense + a random
      * uplink-beacon backoff while the DU is off the shared timebase. */
@@ -1911,11 +2287,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
      * SNR measurement) — not on the report's generation time alone, which
      * moves every superframe: each re-download can cost a beacon on some
      * generations. The published gen_sf is when this content was generated. */
-    const bool content_moved = !beaconing || running_epoch != mcopy.epoch ||
+    const bool content_moved = force_beacon || !beaconing || running_epoch != mcopy.epoch ||
                                fb.base != last_fb.base || fb.bitmap != last_fb.bitmap ||
                                snr_gen != last_snr_gen;
     if (content_moved) {
-      const auto b = build_ue_beacon(c.cell, me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth);
+      const auto b =
+          build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth);
       const bool ok = beaconing ? dev->UpdateBeaconPayload(b.data(), b.size())
                                 : dev->StartBeacon(b.data(), b.size(), c.tu);
       if (!ok) {
@@ -1923,6 +2300,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
         continue;
       }
       beaconing = true;
+      force_beacon = false;
       const bool epoch_moved = running_epoch != mcopy.epoch;
       running_epoch = mcopy.epoch;
       last_fb = fb;

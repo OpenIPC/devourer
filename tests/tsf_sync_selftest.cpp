@@ -88,6 +88,38 @@ int main() {
     CHECK(s.Count() == 1, "data frame not counted");
   }
 
+  {
+    // ShiftRemote: fitted to transmitter A, then moved to B whose clock is
+    // A's + delta (same rate: both held to one PTP timebase). The shifted fit
+    // maps local time to B's clock without a sample of B, and B's beacons
+    // then extend the same line (no reset, Ready() throughout).
+    devourer::TsfSync s;
+    const double skew = 1.0 + 15e-6; // local runs 15 ppm fast vs both
+    const int64_t a0 = 5'000'000, delta = 13450 - 7 * 102400LL;
+    const uint32_t l0 = 1'000'000;
+    for (int i = 0; i < 40; ++i) {
+      const int64_t r = a0 + i * 102400LL;
+      s.Add(static_cast<uint64_t>(r), static_cast<uint32_t>(l0 + llround((r - a0) * skew)));
+    }
+    CHECK(s.Ready(), "ready on A");
+    const int64_t at = a0 + 40 * 102400LL + 5000; // A's TSF at some later instant
+    const uint64_t local_at = l0 + llround((at - a0) * skew);
+    const int64_t a_est = s.RemoteForLocal(local_at);
+    s.ShiftRemote(delta);
+    CHECK(s.Ready(), "still ready after the shift");
+    CHECK(std::llabs(s.RemoteForLocal(local_at) - (a_est + delta)) <= 1,
+          "shifted fit = A's clock + delta");
+    CHECK(std::llabs(s.RemoteForLocal(local_at) - (at + delta)) <= 1, "= B's true clock");
+    for (int i = 40; i < 60; ++i) { // B's beacons (B's TSF = A's + delta)
+      const int64_t r = a0 + i * 102400LL;
+      s.Add(static_cast<uint64_t>(r + delta), static_cast<uint32_t>(l0 + llround((r - a0) * skew)));
+    }
+    CHECK(std::fabs(s.SkewPpm() - 15.0) < 0.5, "B's beacons extend the same line");
+    const int64_t later = a0 + 70 * 102400LL;
+    CHECK(std::llabs(s.RemoteForLocal(l0 + llround((later - a0) * skew)) - (later + delta)) <= 1,
+          "tracks B after the switch");
+  }
+
   std::printf(g_fail ? "tsf_sync_selftest: %d FAILURE(S)\n"
                      : "tsf_sync_selftest: all passed\n",
               g_fail);

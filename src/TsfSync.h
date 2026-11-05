@@ -93,6 +93,17 @@ class TsfSync {
     return llround(_x0 + ((static_cast<double>(static_cast<int64_t>(local_tsf)) - _y0) - b) / a);
   }
 
+  /* Re-express the fit against another transmitter whose clock is this
+   * one's plus `delta_us` at every instant (same rate): the remote axis moves
+   * by delta, the fit and its history stay, Ready() stays. What a UE does on
+   * a handover between two cells held to one PTP timebase (M6,
+   * src/cell/HoCommand.h ho_tsf_delta_us): it keeps its clock, no
+   * re-acquisition, and the new transmitter's beacons extend the same line. */
+  void ShiftRemote(int64_t delta_us) {
+    _x0 += static_cast<double>(delta_us);
+    _last_remote += delta_us;
+  }
+
   /* Instantaneous (local − remote) offset at the most recent beacon, µs — the
    * raw crystal offset before the fit, useful as a coarse health readout. */
   int64_t OffsetUs() const { return _last_local - _last_remote; }

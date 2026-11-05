@@ -33,6 +33,17 @@
 //   RAN_HO [1]                0 = off
 //   RAN_A3_METRIC [rssi]      rssi | snr
 //   RAN_A3_OFFSET_DB [3] RAN_A3_HYST_DB [1] RAN_A3_TTT_MS [640]
+//   RAN_HO_EXECUTE [0]        1 = act on a candidate (M6): a handover command
+//                             (src/cell/HoCommand.h) to both DUs over F1: the
+//                             UE's lowest free id and first free position at
+//                             the target, the switch RAN_HO_LEAD_SF [24]
+//                             superframes ahead, the TSF delta from the two
+//                             DUs' (phase, net_off). Two-phase: sent to the
+//                             target until it stages the UE, only then to the
+//                             source (which airs it to the UE); ran.ho_done
+//                             when the target reports the UE. One handover in
+//                             flight per DU pair end.
+//   RAN_A3_DWELL_MS [2000]    after a handover, the moved UE's A3 dwell
 //   RAN_MEAS_STALE_MS [2000]  a reported value counts until its sample age
 //                             (carried in F1) plus the report's age passes
 //                             this (= the DUs' CELL_MEAS_STALE_MS)
@@ -179,7 +190,10 @@ int main() {
   a3c.offset_db = envd("RAN_A3_OFFSET_DB", 3.0, -30.0, 30.0);
   a3c.hysteresis_db = envd("RAN_A3_HYST_DB", 1.0, 0.0, 20.0);
   a3c.ttt_ms = static_cast<int64_t>(envl("RAN_A3_TTT_MS", 640, 0, 60000));
-  a3c.min_dwell_ms = 0; /* observe only: nothing is handed over */
+  const bool ho_exec = envl("RAN_HO_EXECUTE", 0, 0, 1) != 0;
+  const uint64_t ho_lead_sf = static_cast<uint64_t>(envl("RAN_HO_LEAD_SF", 24, 4, 10000));
+  const int64_t ho_dwell_ms = envl("RAN_A3_DWELL_MS", 2000, 0, 600000);
+  a3c.min_dwell_ms = ho_dwell_ms; /* counted from a moved UE's switch */
   const int64_t meas_stale_ms = envl("RAN_MEAS_STALE_MS", 2000, 100, 60000);
   std::vector<uint8_t> spare;
   for (long ch : env_list("RAN_SPARE_CHANNELS", 1, 196))
@@ -222,6 +236,17 @@ int main() {
     std::optional<uint16_t> firing;
   };
   std::map<std::pair<uint16_t, uint16_t>, HoState> ho;
+  /* Handovers in flight, by the UE's (source cell, id). */
+  struct HoFlight {
+    devourer::cell::HoCommand cmd;
+    bool src_ok = false, tgt_ok = false, switched = false;
+  };
+  std::map<std::pair<uint16_t, uint16_t>, HoFlight> flights;
+  std::map<std::pair<uint16_t, uint16_t>, int64_t> moved_at; /* new key -> switch time (ms) */
+  /* Old keys of UEs that handed over: the source keeps reporting their last
+   * measurement until it goes stale, which must not trigger again. */
+  std::set<std::pair<uint16_t, uint16_t>> retired;
+  uint32_t ho_last_id = 0;
   auto ms_now = [&] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
         .count();
@@ -278,7 +303,43 @@ int main() {
             }
           }
         } else if (ty == f1::Type::Ack) {
-          if (auto a = f1::decode_ack(buf, static_cast<size_t>(n), mac)) {
+          if (auto a = f1::decode_ack(buf, static_cast<size_t>(n), mac);
+              a && a->kind == f1::AckKind::Handover) {
+            for (auto it = flights.begin(); it != flights.end(); ++it) {
+              HoFlight &fl = it->second;
+              if (fl.cmd.id != a->version)
+                continue;
+              const bool ok = a->status == f1::AckStatus::Staged;
+              const bool was = a->du == fl.cmd.source ? fl.src_ok : fl.tgt_ok;
+              (a->du == fl.cmd.source ? fl.src_ok : fl.tgt_ok) = ok;
+              if (!ok) {
+                emit("{\"ev\":\"ran.ho_failed\",\"id\":" + std::to_string(fl.cmd.id) +
+                     ",\"du\":" + std::to_string(a->du) + ",\"status\":\"" +
+                     f1::ack_status_name(a->status) + "\"}");
+                /* A target that already staged the UE drops it again. */
+                if (fl.tgt_ok || a->du == fl.cmd.source)
+                  if (auto t = dus.find(fl.cmd.target); t != dus.end()) {
+                    devourer::cell::HoCommand cancel = fl.cmd;
+                    cancel.target_pos = 0;
+                    cancel.seq = next_seq();
+                    send(t->second, f1::encode_handover(fl.cmd.target, cancel, mac));
+                  }
+                flights.erase(it); /* the A3 fires again later: a fresh command */
+              } else if (!was) {
+                emit("{\"ev\":\"ran.ho_ack\",\"id\":" + std::to_string(fl.cmd.id) +
+                     ",\"du\":" + std::to_string(a->du) + ",\"role\":\"" +
+                     (a->du == fl.cmd.source ? "source" : "target") + "\"}");
+                /* The target has it: the source (and so the UE) now, not on the
+                 * next round — the lead is spent waiting otherwise. */
+                if (a->du == fl.cmd.target && !fl.src_ok)
+                  if (auto s2 = dus.find(fl.cmd.source); s2 != dus.end()) {
+                    fl.cmd.seq = next_seq();
+                    send(s2->second, f1::encode_handover(fl.cmd.source, fl.cmd, mac));
+                  }
+              }
+              break;
+            }
+          } else if (a) {
             auto it = dus.find(a->du);
             const bool bad = a->status == f1::AckStatus::Stale || a->status == f1::AckStatus::Late ||
                              a->status == f1::AckStatus::Invalid;
@@ -348,7 +409,7 @@ int main() {
                  (long long)tms, ue, from, to, why);
         emit(b);
       };
-      std::set<std::pair<uint16_t, uint16_t>> seen;
+      std::set<std::pair<uint16_t, uint16_t>> seen, still_retired;
       for (long id : expected) {
         auto dit = dus.find(static_cast<uint16_t>(id));
         if (dit == dus.end())
@@ -371,11 +432,19 @@ int main() {
             neigh[static_cast<uint16_t>(oid)] = v; /* absent or expired: no evidence */
           }
           const auto key = std::make_pair(cell, q.ue);
+          if (retired.count(key)) {
+            still_retired.insert(key); /* still reported: keep ignoring it */
+            continue;
+          }
           seen.insert(key);
           auto it = ho.find(key);
           if (it == ho.end())
             it = ho.emplace(key, HoState{devourer::cell::A3Trigger(cell, a3c), std::nullopt}).first;
           HoState &st = it->second;
+          if (auto mv = moved_at.find(key); mv != moved_at.end()) { /* a moved UE: dwell */
+            st.a3.handed_over(cell, mv->second);
+            moved_at.erase(mv);
+          }
           const auto tgt = st.a3.evaluate(serving, neigh, tms);
           if (tgt != st.firing) {
             if (st.firing) /* also when switching straight to another target */
@@ -387,8 +456,112 @@ int main() {
             }
           }
           st.firing = tgt;
+          /* Execute: one command per candidate, one handover in flight per
+           * DU (source or target). */
+          if (ho_exec && tgt) {
+            bool busy = flights.count(key) > 0;
+            for (const auto &fl : flights)
+              busy = busy || fl.second.cmd.target == *tgt || fl.second.cmd.source == *tgt ||
+                     fl.second.cmd.target == cell || fl.second.cmd.source == cell;
+            auto tit = dus.find(*tgt);
+            if (!busy && tit != dus.end() && tit->second.rep.net_sf > 0 && dit->second.rep.net_sf > 0) {
+              const f1::Report &sr = dit->second.rep, &tr = tit->second.rep;
+              uint16_t tue = 0;
+              for (uint16_t u = 1; u <= tr.positions.size() && !tue; ++u) {
+                bool used = false;
+                for (const auto &a : tr.ues)
+                  used = used || a.ue == u;
+                if (!used)
+                  tue = u;
+              }
+              uint8_t tpos = 0;
+              for (uint8_t p = 1; p <= tr.positions.size() && !tpos; ++p) {
+                bool used = false;
+                for (const auto &a : tr.ues)
+                  used = used || a.pos == p;
+                if (!used)
+                  tpos = p;
+              }
+              if (tue && tpos) {
+                devourer::cell::HoCommand cmd;
+                ho_last_id = std::max(ho_last_id + 1, version_base);
+                cmd.id = ho_last_id;
+                cmd.ue = q.ue;
+                cmd.source = cell;
+                cmd.target = *tgt;
+                cmd.target_ue = tue;
+                cmd.target_pos = tpos;
+                const double age_us =
+                    std::chrono::duration<double, std::micro>(now - dit->second.at).count();
+                cmd.effective_net_sf =
+                    sr.net_sf + static_cast<uint64_t>(age_us / sr.period_us) + ho_lead_sf;
+                cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
+                                                                   tr.net_off, sr.period_us);
+                flights[key] = HoFlight{cmd};
+                char b[300];
+                snprintf(b, sizeof b,
+                         "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
+                         "\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,\"delta_us\":%lld}",
+                         cmd.id, cmd.ue, cmd.source, cmd.target, cmd.target_ue, cmd.target_pos,
+                         (unsigned long long)cmd.effective_net_sf, (long long)cmd.tsf_delta_us);
+                emit(b);
+              }
+            }
+          }
         }
       }
+      /* In flight: (re)send to both DUs until staged; conclude when the
+       * target reports the UE; give up long after the instant. */
+      for (auto it = flights.begin(); it != flights.end();) {
+        HoFlight &fl = it->second;
+        auto sit = dus.find(fl.cmd.source), tit = dus.find(fl.cmd.target);
+        if (sit == dus.end() || tit == dus.end()) {
+          it = flights.erase(it);
+          continue;
+        }
+        const double age_us = std::chrono::duration<double, std::micro>(now - tit->second.at).count();
+        const uint64_t tnet =
+            tit->second.rep.net_sf + static_cast<uint64_t>(age_us / tit->second.rep.period_us);
+        bool there = false;
+        for (const f1::UeMeas &q : tit->second.rep.meas)
+          there = there || (q.ue == fl.cmd.target_ue && live(tit->second, q.age_ms));
+        if (there && tnet >= fl.cmd.effective_net_sf) {
+          char b[220];
+          snprintf(b, sizeof b,
+                   "{\"ev\":\"ran.ho_done\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
+                   "\"target_ue\":%u,\"net_sf\":%llu,\"after_sf\":%lld}",
+                   fl.cmd.id, fl.cmd.ue, fl.cmd.source, fl.cmd.target, fl.cmd.target_ue,
+                   (unsigned long long)tnet, (long long)(tnet - fl.cmd.effective_net_sf));
+          emit(b);
+          moved_at[{fl.cmd.target, fl.cmd.target_ue}] = tms;
+          retired.insert({fl.cmd.source, fl.cmd.ue});
+          still_retired.insert({fl.cmd.source, fl.cmd.ue});
+          if (auto h = ho.find({fl.cmd.source, fl.cmd.ue}); h != ho.end()) {
+            if (h->second.firing)
+              log_clear(fl.cmd.ue, fl.cmd.source, *h->second.firing, "handed_over");
+            ho.erase(h);
+          }
+          it = flights.erase(it);
+          continue;
+        }
+        if (tnet > fl.cmd.effective_net_sf + 100) { /* ~10 s past: did not happen */
+          emit("{\"ev\":\"ran.ho_timeout\",\"id\":" + std::to_string(fl.cmd.id) + "}");
+          it = flights.erase(it);
+          continue;
+        }
+        /* Two-phase: the target first; the source (which tells the UE) only
+         * once the target has staged it, so a target that refuses never
+         * leaves a command on the air. */
+        if (tnet < fl.cmd.effective_net_sf && !(fl.src_ok && fl.tgt_ok)) {
+          fl.cmd.seq = next_seq();
+          const uint16_t du = fl.tgt_ok ? fl.cmd.source : fl.cmd.target;
+          send(dus.at(du), f1::encode_handover(du, fl.cmd, mac));
+        }
+        ++it;
+      }
+      /* A retired key the source no longer reports is forgotten (the id may
+       * be reused by a new UE there). */
+      retired = still_retired;
       /* A UE without a valid serving measurement this round: its evidence
        * is gone, so its timers go, and a logged candidate clears. */
       for (auto it = ho.begin(); it != ho.end();) {

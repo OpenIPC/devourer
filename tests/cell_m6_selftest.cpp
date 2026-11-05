@@ -15,6 +15,7 @@
 
 #include "cell/F1.h"
 #include "cell/Handover.h"
+#include "cell/HoCommand.h"
 
 using namespace devourer::cell;
 
@@ -27,6 +28,20 @@ static int failures = 0;
       failures++;                                                              \
     }                                                                          \
   } while (0)
+
+/* A keyed stand-in for HMAC-SHA1 (NOT cryptographic), as cell_m3/m5. */
+static Mac fake_mac(uint64_t key) {
+  return [key](const uint8_t *d, size_t n, uint8_t out[20]) {
+    uint64_t h = 1469598103934665603ull ^ key;
+    for (size_t i = 0; i < n; ++i)
+      h = (h ^ d[i]) * 1099511628211ull;
+    for (int i = 0; i < 20; ++i) {
+      h = (h ^ static_cast<uint64_t>(i)) * 1099511628211ull;
+      out[i] = static_cast<uint8_t>(h >> 32);
+    }
+    return true;
+  };
+}
 
 int main() {
   /* --- L3 filter: seeding, the k=4 step response, staleness. --- */
@@ -251,10 +266,75 @@ int main() {
     const auto w = f1::encode_report(r, {});
     auto d = f1::decode_report(w.data(), w.size(), {});
     CHECK(d && *d == r);
-    CHECK(w[2] == 3); /* version 3 on the wire */
+    CHECK(w[2] == f1::kVersion); /* the current version on the wire */
     auto old = w;
-    old[2] = 2; /* an older sender is refused, never half-parsed */
+    old[2] = static_cast<uint8_t>(f1::kVersion - 1); /* an older sender is refused */
     CHECK(!f1::decode_report(old.data(), old.size(), {}));
+  }
+
+  /* --- TSF continuity: the delta from (phase, net_off) is exact at every
+   * instant, and both grids sit on network superframe boundaries. --- */
+  {
+    const int64_t P = 102400;
+    const int64_t ps = 0, os = -17518355000ll, pt = 13450, ot = -17518354000ll + 7;
+    auto tsf = [&](int64_t t, int64_t ph, int64_t off) { return t - ph - off * P; };
+    const int64_t d = ho_tsf_delta_us(ps, os, pt, ot, P);
+    for (int64_t t : {int64_t{17518356123ll} * P + 777, int64_t{17518356999ll} * P + 51200,
+                      int64_t{17518357000ll} * P})
+      CHECK(tsf(t, pt, ot) - tsf(t, ps, os) == d);
+    const int64_t N = 17518356500ll; /* network superframe N: each DU's TBTT */
+    CHECK(tsf(ps + N * P, ps, os) % P == 0 && tsf(pt + N * P, pt, ot) % P == 0);
+    CHECK(tsf(ps + N * P, ps, os) / P == N - os && tsf(pt + N * P, pt, ot) / P == N - ot);
+  }
+
+  /* --- F1 Handover + Ack kind. --- */
+  {
+    const Mac k1 = fake_mac(1), k2 = fake_mac(2);
+    HoCommand h{1793880000u, 1, 1, 2, 3, 2, 17518356600ull, -1234567890123ll, 99};
+    const auto w = f1::encode_handover(2, h, k1);
+    CHECK(f1::peek_type(w.data(), w.size()) == f1::Type::Handover);
+    auto d = f1::decode_handover(w.data(), w.size(), k1);
+    CHECK(d && d->first == 2 && d->second == h);
+    CHECK(!f1::decode_handover(w.data(), w.size(), k2));
+    CHECK(!f1::decode_schedule(w.data(), w.size(), k1));
+    for (size_t cut = 0; cut < w.size(); ++cut)
+      CHECK(!f1::decode_handover(w.data(), cut, k1));
+    f1::Ack a{2, f1::AckKind::Handover, h.id, f1::AckStatus::Staged, 17518356590ull};
+    const auto wa = f1::encode_ack(a, k1);
+    auto da = f1::decode_ack(wa.data(), wa.size(), k1);
+    CHECK(da && *da == a);
+  }
+
+  /* --- The beacon IE: in an MPDU, CRC, tag, the newest id for this UE. --- */
+  {
+    const Mac k = fake_mac(7), other = fake_mac(8);
+    HoIe a{100, 1, 1, 2, 3, 3, 7, 4200, 13450 - 1000 * 102400ll};
+    HoIe newer = a;
+    newer.id = 101;
+    newer.target_ue = 4;
+    HoIe someone_else = a;
+    someone_else.ue = 2;
+    someone_else.id = 500;
+    std::vector<uint8_t> mpdu(36, 0); /* beacon header + fixed fields */
+    mpdu[0] = 0x80;
+    for (const HoIe &x : {a, newer, someone_else}) {
+      auto ie = encode_ho_ie(x, k);
+      CHECK(ie.size() == 2 + 3 + 33 + 2 + kHoTagLen);
+      mpdu.insert(mpdu.end(), ie.begin(), ie.end());
+    }
+    auto got = find_ho_ie(mpdu.data(), mpdu.size(), 1, 1, k);
+    CHECK(got && *got == newer); /* the newest id addressed to (cell 1, UE 1) */
+    CHECK(!find_ho_ie(mpdu.data(), mpdu.size(), 1, 1, other)); /* wrong key: inert */
+    CHECK(!find_ho_ie(mpdu.data(), mpdu.size(), 2, 1, k));     /* another cell's UE */
+    auto torn = mpdu;
+    torn[36 + 5 + 10] ^= 0x40; /* inside the first IE's body */
+    auto t = find_ho_ie(torn.data(), torn.size(), 1, 1, k);
+    CHECK(t && *t == newer); /* the torn one is dropped, the intact newer one stays */
+    auto plain = encode_ho_ie(a, {});
+    std::vector<uint8_t> m2(36, 0);
+    m2.insert(m2.end(), plain.begin(), plain.end());
+    CHECK(find_ho_ie(m2.data(), m2.size(), 1, 1, {}));  /* unkeyed cell: tag ignored */
+    CHECK(!find_ho_ie(m2.data(), m2.size(), 1, 1, k));  /* keyed UE: zero tag refused */
   }
 
   if (failures == 0)

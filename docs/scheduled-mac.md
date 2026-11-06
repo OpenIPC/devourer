@@ -101,6 +101,11 @@ beacons **autonomously**, so a beaconing session that ends without a device
 power-cycle must call it — a killed process leaves the beacon airing
 indefinitely (bench-bitten: a stale beacon with the same SA contaminated the
 next test's witness).
+On Kestrel it must also undo the port's TBTT protection (`TBTT_PROHIB_EN`,
+`BRK_SETUP`), which `StartBeacon` turns on. Left set, the port went on
+holding the UE's later injected frames to a fixed phase of its old beacon
+grid. A stopped UE re-joining through the RACH sent every msgA ~6 ms past
+the slot (M6 rig, `docs/cell-m6.md`).
 
 Per generation: Jaguar2 replaces the retained `_bcn_mpdu` and re-downloads via
 the steer path (the J2 engine loses the bcn-valid latch on re-latch, so the

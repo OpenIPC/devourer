@@ -140,6 +140,12 @@
 //                             due near its beacon's superframe means the DU
 //                             restarted: the grant state starts over
 //                             (cell.ue.reattach). 0 = never.
+//   CELL_DU_TX_RAMP           DU, test: T:DB,T:DB,... the TX power offset
+//                             (dB against the calibrated base; beacons and DL)
+//                             piecewise linear in seconds from
+//                             CELL_DU_TX_RAMP_T0 (unix s) or the service
+//                             start, held at the ends (cell.du.txpwr): an
+//                             emulated crossing.
 //   CELL_DU_TEST_TSF_STEP     DU, test only: US@SF — add US to the TSF once at
 //                             local superframe SF, behind the discipline's back
 //                             (cell.test.tsf_step); the discipline undoes it.
@@ -778,6 +784,32 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
     emit(l);
   }
+  /* CELL_DU_TX_RAMP=T:DB,T:DB,...: TX power offset (dB, against the
+   * calibrated base) piecewise linear in seconds since the DU starts serving;
+   * held at the ends. Test only (an emulated crossing). */
+  std::vector<std::pair<double, double>> tx_ramp;
+  if (const char *rp = std::getenv("CELL_DU_TX_RAMP"); rp && *rp) {
+    std::string t = rp;
+    for (size_t p0 = 0; p0 < t.size();) {
+      const size_t q = t.find(',', p0);
+      const std::string item = t.substr(p0, q == std::string::npos ? std::string::npos : q - p0);
+      double ts = 0, db = 0;
+      if (std::sscanf(item.c_str(), "%lf:%lf", &ts, &db) != 2 || ts < 0 || db < -40 || db > 20 ||
+          (!tx_ramp.empty() && ts <= tx_ramp.back().first)) {
+        fprintf(stderr, "CELL_DU_TX_RAMP: T:DB,... with T increasing, -40 <= DB <= 20\n");
+        return 2;
+      }
+      tx_ramp.push_back({ts, db});
+      if (q == std::string::npos)
+        break;
+      p0 = q + 1;
+    }
+  }
+  /* The ramp's zero: CELL_DU_TX_RAMP_T0 (unix seconds: the DUs of one test
+   * ramp together, on their hosts' synced clocks), else service start. */
+  const double ramp_t0_unix = std::getenv("CELL_DU_TX_RAMP_T0") ? std::atof(std::getenv("CELL_DU_TX_RAMP_T0")) : 0;
+  std::chrono::steady_clock::time_point ramp_t0{};
+  int ramp_set_qdb = INT_MIN;
   auto bcn = build_du_beacon(map, auth);
   if (bcn.empty() || !dev->StartBeacon(bcn.data(), bcn.size(), c.tu)) {
     fprintf(stderr, "StartBeacon failed\n");
@@ -1255,6 +1287,12 @@ int run_du(IRadio *dev, const Cfg &c) {
   });
 
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
+  ramp_t0 = std::chrono::steady_clock::now();
+  if (ramp_t0_unix > 0) {
+    const double now_unix = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+    ramp_t0 -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(now_unix - ramp_t0_unix));
+  }
   auto next_ta = std::chrono::steady_clock::now() + std::chrono::seconds(ta_every_s);
   auto next_sync = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_loop_ms);
   int64_t sf = grid->at(static_cast<int64_t>(dev->ReadTsf())).superframe + 1;
@@ -1633,6 +1671,33 @@ int run_du(IRadio *dev, const Cfg &c) {
                "\"rate\":%d,\"late_us\":%lld,\"ok\":%d}",
                ue, (long long)sf, tx->seq, tx->attempt, rate, (long long)(sub - start), ok ? 1 : 0);
       emit(l);
+    }
+    /* CELL_DU_TX_RAMP (test): the DU's TX power offset over time, beacons
+     * and DL alike — what a UE crossing from this cell to another sees. */
+    if (!tx_ramp.empty()) {
+      const double ts = std::chrono::duration<double>(std::chrono::steady_clock::now() - ramp_t0).count();
+      double want = tx_ramp.back().second;
+      for (size_t i = 0; i < tx_ramp.size(); ++i) {
+        if (ts < tx_ramp[i].first) {
+          if (i == 0) {
+            want = tx_ramp[0].second;
+          } else {
+            const auto &a = tx_ramp[i - 1], &b = tx_ramp[i];
+            want = a.second + (b.second - a.second) * (ts - a.first) / (b.first - a.first);
+          }
+          break;
+        }
+      }
+      const int want_qdb = static_cast<int>(std::lround(want * 4));
+      if (std::abs(want_qdb - ramp_set_qdb) >= 2 || ramp_set_qdb == INT_MIN) { /* 0.5 dB steps */
+        const int applied = dev->SetTxPowerOffsetQdb(want_qdb);
+        ramp_set_qdb = want_qdb;
+        char l[160];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.du.txpwr\",\"sf\":%lld,\"t_s\":%.2f,\"want_qdb\":%d,\"applied_qdb\":%d}",
+                 (long long)sf, ts, want_qdb, applied);
+        emit(l);
+      }
     }
     // Idle part of the superframe: refresh the freerun reference, run the TA
     // loop, republish the map when a TA moved.
@@ -2904,6 +2969,18 @@ int run_ue(IRadio *dev, const Cfg &c) {
           /* Its generation: the serving superframe, strictly increasing (the
            * DU refuses anything not newer, and far from its own count). */
           mr_gen = std::max(mr_gen + 1, static_cast<uint32_t>(du_now / P));
+          {
+            std::string cells;
+            for (const auto &e : mr) {
+              char b2[48];
+              snprintf(b2, sizeof b2, "%s\"%u\":%d", cells.empty() ? "" : ",", e.cell, e.rssi_dbm);
+              cells += b2;
+            }
+            char l[300];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.ue.mr\",\"ue\":%d,\"cell\":%u,\"sf\":%lld,\"rssi\":{%s}}",
+                     me, cell_a.load(), (long long)(du_now / P), cells.c_str());
+            emit(l);
+          }
           const auto ie =
               devourer::cell::encode_mr_ie(cell_a.load(), static_cast<uint16_t>(me), mr_gen, mr, auth);
           b.insert(b.end(), ie.begin(), ie.end());

@@ -497,6 +497,53 @@ crystal), past the RACH slot, whatever offset the UE drew.
   - clock-fit restart and transient 1 + 1;
   - same-channel handover 1.
 
+## An emulated crossing (nothing forced)
+
+Every earlier handover here had its trigger forced or was a standing
+difference between two cells. Here the UE crosses. Both cells are on one
+channel, with one UE (UE1, starting in cell 1).
+- **The emulation** (`CELL_DU_TX_RAMP`): the DUs ramp their TX power
+  against each other, piecewise linear on one wall-clock zero
+  (`CELL_DU_TX_RAMP_T0`; the DU hosts are NTP-synced). Beacons and DL alike
+  follow it.
+- **What the UE sees:** it measures both beacons (no gaps on one channel)
+  and reports them (`cell.ue.mr`).
+- **Who decides:** the CU's A3 at its defaults (offset 3 dB, hysteresis
+  1 dB, time-to-trigger 640 ms, dwell 2 s).
+
+**The ramps** (testrig `scripts/m6_crossing.sh`): cell 1 fades by 16 dB over
+15 s while cell 2 rises by as much. They hold, then reverse.
+- **The UE's measured margin** (the other cell against the serving one)
+  sweeps from about −13 to +24 dB and back.
+- **The rig's power-to-RSSI curve** is not linear: −8 dB of offset reads
+  about −9 dB at the UE, and −9 dB about −12 dB. Its cause is not
+  established; the tests use the measured margins, not the offsets.
+
+**Crossing, there and back** (3 runs, all pass: exactly 1 → 2 then 2 → 1 in
+each).
+
+| KPI (6 handovers) | min | median | max |
+|---|---|---|---|
+| UE margin reaching the A3 entry (4 dB) → switch | 38 sf | 41.5 sf | 51 sf |
+| margin at the CU's trigger | 7 dB | 9.5 dB | 13 dB |
+| interruption (first in-slot uplink at the target) | 1 sf | 1 sf | 2 sf |
+| uplinks missing at the CU over the run (DAPS) | 0 | 0 | 0 |
+
+- **Where the time goes:** 24 sf of the crossing-to-switch is the
+  handover lead (`RAN_HO_LEAD_SF`). The rest is the time-to-trigger plus the
+  1 s reporting chain: the UE's MR (`CELL_UE_MR_MS`), the DU's F1 report
+  (`CELL_F1_REPORT_MS`) and the CU's A3 round (`RAN_PLAN_MS`).
+- **Why the trigger overshoots:** at this ramp rate the margin keeps moving
+  during that chain, so the trigger lands 3–9 dB past the entry.
+- **Each switch** keeps TSF continuity and is heard in slot at the target
+  (≥ 99 %), and the source releases the UE.
+
+**Hover** (3 runs, all pass). The ramps stop with the margin held just under
+the entry: median +3 dB, p10–p90 +2 to +4 dB. 20–23 % of the UE's reports
+were at or above the entry, and **no handover** happened in any run. The
+time-to-trigger and the filtering never let a noise excursion through. The
+test allows at most one handover and never a switch back.
+
 ## Grant-map authentication, and the suite keyed
 
 The grant map IE (v2, `src/cell/GrantMap.h`) carries the cell key's tag
@@ -625,17 +672,14 @@ superframe when there is nothing to serve.
   - downlink duplication;
   - the different-channel (sequential) variant, with its retune and deaf-time
     budget.
-- **A moving UE:** the rig's UEs are stationary, so the crossing is forced
-  with a negative A3 offset.
 - **Phase planning beyond two cells:** a joining cell is placed against the
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
-- **No crossing test:** every handover result here is from stationary UEs.
-  The trigger is either forced or the measured standing difference between
-  two cells. No A→B path-loss ramp has been run, so none of these numbers
-  validates a crossing. An emulated crossing (the source DU ramping its TX
-  power, which its beacons follow) is the way to get one.
+- **A real moving UE:** the crossing below is emulated by the DUs' TX
+  power. The uplink path loss stays the same, there is one UE, and the ramp
+  rate is one setting (~2 dB/s of margin). No over-the-air motion,
+  fading or crowd has been run.
 - **Security context:** the cells share one key (`CELL_PSK`). Pre-staging a
   per-cell context (802.11r-style) is open.
 - **Keyed rig runs only from the grant-map authentication on:** the

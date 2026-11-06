@@ -411,8 +411,13 @@ heard in the new grid.
   instance, as on a handover switch. That is the DL HARQ sequence space, the
   MR generation (the DU checks it against its own new count), the neighbour
   list and gap parking, and any handover IE the old instance aired.
-- **The residual:** grant maps carry no tag (they never did), so the epoch
-  rule is an ordering rule, not authentication.
+- **The exposure:** grant maps carry no tag (they never did), so the epoch
+  rule orders maps; it does not authenticate them. A forged map could
+  already redirect a UE's slots. The restart path widens that: within the
+  re-attach window after a clock step, a forged lower-epoch map due near the
+  beacon's count also resets the UE's per-DU state (HARQ, MR generation,
+  neighbours, pending handover IEs). Grant-map authentication is open
+  (below).
 
 **Rig result** (testrig `scripts/m6_fitstep.sh`, restart case, 3 runs, all
 pass).
@@ -542,6 +547,10 @@ superframe when there is nothing to serve.
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
+- **Grant-map authentication:** the grant map IE has no tag, unlike the
+  NL, MR and handover IEs. A tag keyed per cell (as `CELL_PSK`), checked
+  before any `offer`, would close the forged-map exposure, including the
+  restart path. It is a wire change for the DU, UE and witness.
 - **A DU restart under RACH-joined UEs:** re-attachment (above) is for the
   rig's static UEs, whose id the restarted DU grants again. A UE that joined
   through the RACH holds an id the new DU instance does not know; re-joining

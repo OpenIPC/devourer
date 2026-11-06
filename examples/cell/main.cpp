@@ -2413,16 +2413,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
           if (const Grant *g = gm->find(static_cast<uint16_t>(me)))
             want = g->dl_slot;
       }
-      if (!want)
-        return;
+      /* No grant in force: still logged, as out of slot (granted 0). */
       char l[260];
       snprintf(l, sizeof l,
                "{\"ev\":\"cell.dl.rx\",\"ue\":%u,\"sf\":%llu,\"seq\":%u,\"attempt\":%u,"
-               "\"new\":%d,\"rx_sf\":%lld,\"phase_us\":%lld,\"in_slot\":%d,\"rssi\":%d,"
-               "\"snr_half_db\":%d}",
+               "\"new\":%d,\"rx_sf\":%lld,\"phase_us\":%lld,\"in_slot\":%d,\"granted\":%d,"
+               "\"rssi\":%d,\"snr_half_db\":%d}",
                me, (unsigned long long)d->sf, d->seq, d->harq.attempt, fresh ? 1 : 0,
                (long long)pos.superframe, (long long)pos.into_us,
-               pos.slot && *pos.slot == *want ? 1 : 0, p.RxAtrib.rssi[0] - 110, p.RxAtrib.snr[0]);
+               want && pos.slot && *pos.slot == *want ? 1 : 0, want ? 1 : 0,
+               p.RxAtrib.rssi[0] - 110, p.RxAtrib.snr[0]);
       emit(l);
     });
   });
@@ -2481,8 +2481,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
         nbrs.clear();
         have_nbrs_gen = false;
         gap_parked.clear();
+        next_gap_sf = -1;      /* deadlines on the old count: re-set on the new one */
+        no_step_until_sf = -1;
         ho_seen.reset();      /* commands aired by the old instance */
         ho_pending.reset();
+        /* A target that restarted mid-handover lost the staged UE: the way
+         * back stays, its deadline re-based on the new count. */
+        if (ho_back)
+          ho_back->deadline_sf = du_now / P + ho_fallback_sf;
         force_beacon = true;
         listen_from = -1;
         char l[200];

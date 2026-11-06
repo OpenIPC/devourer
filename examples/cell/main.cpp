@@ -909,8 +909,12 @@ int run_du(IRadio *dev, const Cfg &c) {
       const bool ok = dev->WriteTsf(dev->ReadTsf() + static_cast<uint64_t>(test_step_us));
       test_step_sf = -1;
       uint64_t t3 = 0, f3 = 0;
-      if (dev->ReadTsfAndFreeRun(t3, f3))
+      if (dev->ReadTsfAndFreeRun(t3, f3)) {
         publish_clock(t3, f3);
+      } else { /* as after any write: no stale offset until a fresh read */
+        std::lock_guard<std::mutex> lk(clk_mu);
+        clk.valid = false;
+      }
       char l2[120];
       snprintf(l2, sizeof l2, "{\"ev\":\"cell.test.tsf_step\",\"sf\":%lld,\"step_us\":%lld,\"ok\":%d}",
                (long long)sf_now, (long long)test_step_us, ok ? 1 : 0);

@@ -2316,6 +2316,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   const bool static_ue = me_a > 0;
   const int64_t rejoin_sf = envl("CELL_UE_REJOIN_SF", 30, 0, 100000); /* 0 = never */
   int64_t absent_from_sf = -1; /* first superframe of the current absence */
+  int rejoin_stop_fails = 0;   /* consecutive failed beacon stops before a re-join */
   devourer::cell::RachClient rach(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });
   std::vector<devourer::cell::RachResponse> rar_seen;
   const auto mac = rach_mac(c);
@@ -2795,8 +2796,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
       if (!static_ue && rejoin_sf > 0 && !ho_back && !ho_pending &&
           sf_now - absent_from_sf >= rejoin_sf) {
         const int old_ue = me;
-        if (beaconing && dev->StopBeacon())
-          beaconing = false;
+        /* The old id's beacon must be off first: a failed stop defers the
+         * re-join to the next pass (the absence stands), never a RACH
+         * beside a live old beacon. */
+        if (beaconing && !dev->StopBeacon()) {
+          if (rejoin_stop_fails++ == 0) {
+            char l[120];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.ue.rejoin_stop_fail\",\"ue\":%d}", old_ue);
+            emit(l);
+          }
+          continue;
+        }
+        beaconing = false;
+        rejoin_stop_fails = 0;
         dev->ClearAckResponder();
         nonce = (static_cast<uint64_t>(rng()) << 32) | rng();
         rach = devourer::cell::RachClient(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });

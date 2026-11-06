@@ -451,7 +451,7 @@ bool du_budget_ok(const Cfg &c, const std::vector<uint16_t> &ues) {
       rar[1] = 'B';
       rar[2] = static_cast<uint8_t>(devourer::cell::kRachMaxPerBeacon);
     }
-    const int64_t bcn_need = 22 + ofdm_airtime_us(build_du_beacon(probe, rar).size() + 4, 6);
+    const int64_t bcn_need = 22 + ofdm_airtime_us(build_du_beacon(probe, cell_auth(c), rar).size() + 4, 6);
     SlotBudget dl;
     dl.mpdu_len = build_dl_frame(c.cell, 1, 0, 0, pad).size() + 4;
     dl.acked = true;
@@ -773,7 +773,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
     emit(l);
   }
-  auto bcn = build_du_beacon(map);
+  auto bcn = build_du_beacon(map, auth);
   if (bcn.empty() || !dev->StartBeacon(bcn.data(), bcn.size(), c.tu)) {
     fprintf(stderr, "StartBeacon failed\n");
     return 1;
@@ -2017,7 +2017,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                             : ho_eff ? *ho_eff
                                      : static_cast<uint64_t>(sf + 3);
       }
-      const auto nb = build_du_beacon(next, rar_now, ho_ies);
+      const auto nb = build_du_beacon(next, auth, rar_now, ho_ies);
       const bool ok = !nb.empty() && dev->UpdateBeaconPayload(nb.data(), nb.size());
       beacon_fail_run = ok ? 0 : beacon_fail_run + 1;
       if (ok) {
@@ -2213,6 +2213,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
   double dl_snr_sum = 0;
   uint64_t dl_snr_n = 0;
   uint64_t dl_new = 0, dl_dup = 0;
+  /* Serving beacons whose grant map is intact but not authentic (another
+   * key, or none): refused (mu). */
+  uint64_t gm_ok = 0, gm_refused = 0;
   const int64_t P = static_cast<int64_t>(c.tu) * devourer::cell::kTuUs;
   /* The capacity grid (same env as the DU): positions never move. */
   const std::optional<SlotGrid> grid = grid_for(c);
@@ -2337,7 +2340,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
            * switch (they do not feed the clock: that is the source's until
            * the switch, then shifted, not re-acquired). */
           if (rxr_target && std::memcmp(p.Data.data() + 10, tgt_du_mac, 6) == 0)
-            if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size()))
+            if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size(), auth))
               rxr_target->offer(*m);
           return;
         }
@@ -2364,7 +2367,18 @@ int run_ue(IRadio *dev, const Cfg &c) {
           reattach_armed_steps = sync.Steps();
           reattach_until_ms = ue_ms() + reattach_sf * P / 1000;
         }
-        if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size())) {
+        auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size(), auth);
+        if (m) {
+          ++gm_ok;
+        } else if (auth && devourer::cell::find_grant_map(p.Data.data(), p.Data.size(), {})) {
+          if (gm_refused++ == 0) {
+            char l[120];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.ue.gm_refused\",\"ue\":%d,\"cell\":%u}",
+                     me_a.load(), cell_a.load());
+            emit(l);
+          }
+        }
+        if (m) {
           const uint32_t old_epoch = rxr.newest_epoch();
           if (!rxr.offer(*m) && ue_ms() < reattach_until_ms &&
               rxr.offer_after_restart(*m, static_cast<uint64_t>(*eg) / static_cast<uint64_t>(P))) {
@@ -3043,18 +3057,23 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->StopRxLoop();
   rx.join();
   dev->ClearAckResponder();
-  char l[200];
+  char l[300];
   snprintf(l, sizeof l,
            "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
-           "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu}",
+           "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu,"
+           "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
-           (unsigned long long)dl_new, (unsigned long long)dl_dup);
+           (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
+           (unsigned long long)gm_ok, (unsigned long long)gm_refused);
   emit(l);
   return 0;
 }
 
 // ---------------------------------------------------------------------------
 int run_witness(IRadio *dev, const Cfg &c) {
+  /* With CELL_PSK, a beacon's grant map counts only if authentic; without
+   * one the witness is a passive recorder (structure only). */
+  const CellMac wauth = cell_auth(c);
   /* CELL_WITNESS_CELLS [CELL_ID]: the cells to record (M5: two co-channel
    * cells on one receiver clock); each line names its cell. */
   std::vector<uint16_t> cells;
@@ -3091,7 +3110,7 @@ int run_witness(IRadio *dev, const Cfg &c) {
         if (st > 0) {
           if (auto ub = parse_ue_beacon(d, p.Data.size(), cell))
             ep = ub->epoch;
-        } else if (auto m = devourer::cell::find_grant_map(d, p.Data.size())) {
+        } else if (auto m = devourer::cell::find_grant_map(d, p.Data.size(), wauth)) {
           ep = m->epoch;
         }
         snprintf(l, sizeof l,

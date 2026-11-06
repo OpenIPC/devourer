@@ -10,18 +10,25 @@
  * (decode does not; that is UE state, see GrantMapReceiver).
  *
  * Wire format (little-endian), inside IE 221 (vendor) with OUI kGrantOui:
- *   'G' 'M' ver(1)=1 flags(1) cell_id(2) epoch(4) effective_sf(8)
+ *   'G' 'M' ver(1)=2 flags(1) cell_id(2) epoch(4) effective_sf(8)
  *   period_tu(2) n(1) n x {ue(2) dl_slot(1) ul_slot(1) rate_mbps(1)
- *   tx_pwr_qdb(1, signed) ta_us(2, signed)} crc16(2)
+ *   tx_pwr_qdb(1, signed) ta_us(2, signed)} crc16(2) tag(8)
  * The CRC (CCITT-FALSE, over 'G' through the last grant) detects a torn or
- * corrupted body from one frame. It is not authentication: integrity against
- * an active attacker (EPIC #254's envelope item) is out of M1's scope.
+ * corrupted body from one frame. The tag (v2, M6 #260) is the cell key's:
+ * the first 8 bytes of mac('G' || 'G' 'M' .. crc), as the scheduling IEs'
+ * (NL, MR, handover): a receiver with the key refuses a map that is not the
+ * DU's, so a forged map neither moves a UE's slots nor, after a DU restart,
+ * resets its grant state. Without a key (an unauthenticated development
+ * cell, a passive witness) the tag is zeros and only the structure is
+ * checked. Replay of a genuine map stays the epoch's job (GrantMapReceiver).
  * Pure header; cell_selftest covers encode/decode round trips and rejects. */
 #ifndef DEVOURER_CELL_GRANTMAP_H
 #define DEVOURER_CELL_GRANTMAP_H
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -30,8 +37,14 @@
 namespace devourer::cell {
 
 constexpr uint8_t kGrantOui[3] = {0x57, 0x42, 0x75}; /* devourer test OUI */
-constexpr uint8_t kGrantVersion = 1;
-constexpr size_t kGrantMax = kMaxUesPerCell; /* 3+21+24*8+2 = 218 <= 255 IE bytes */
+/* v2: the cell key's tag after the CRC (M6, #260). */
+constexpr uint8_t kGrantVersion = 2;
+constexpr size_t kGrantTagLen = 8;
+constexpr size_t kGrantMax = kMaxUesPerCell; /* 3+21+24*8+2+8 = 226 <= 255 IE bytes */
+
+/* HMAC-SHA1 keyed by the cell PSK: data -> 20-byte tag. False on failure.
+ * Empty = an unauthenticated cell: the tag is zeros and is not checked. */
+using Mac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
 /* GrantMap::flags. kGrantAutonomous (M4, #258): the DU has suspended its
  * COORDINATED schedule (it lost sync with the fabric, see src/cell/SyncHealth.h).
  * Its UEs fall back to carrier sense and a random uplink-beacon backoff, as
@@ -88,10 +101,26 @@ inline uint64_t get(const uint8_t *p, int n) {
 }
 constexpr size_t kHdrLen = 2 + 1 + 1 + 2 + 4 + 8 + 2 + 1; /* 'G'..n */
 constexpr size_t kGrantLen = 2 + 1 + 1 + 1 + 1 + 2;
+/* The first kGrantTagLen bytes of mac('G' || body), body = everything up to
+ * and including the CRC; zeros without a key. */
+inline bool grant_tag(const Mac &mac, const uint8_t *body, size_t n, uint8_t out[kGrantTagLen]) {
+  if (!mac) {
+    std::memset(out, 0, kGrantTagLen);
+    return true;
+  }
+  std::vector<uint8_t> m = {'G'};
+  m.insert(m.end(), body, body + n);
+  uint8_t full[20];
+  if (!mac(m.data(), m.size(), full))
+    return false;
+  std::memcpy(out, full, kGrantTagLen);
+  return true;
+}
 } /* namespace detail */
 
-/* The full IE (221, len, OUI, body). Empty when there are > kGrantMax grants. */
-inline std::vector<uint8_t> encode_grant_ie(const GrantMap &m) {
+/* The full IE (221, len, OUI, body, crc, tag). Empty when there are >
+ * kGrantMax grants or the Mac fails. */
+inline std::vector<uint8_t> encode_grant_ie(const GrantMap &m, const Mac &mac) {
   if (m.grants.size() > kGrantMax)
     return {};
   std::vector<uint8_t> body;
@@ -113,24 +142,29 @@ inline std::vector<uint8_t> encode_grant_ie(const GrantMap &m) {
     detail::put(body, static_cast<uint16_t>(g.ta_us), 2);
   }
   detail::put(body, detail::crc16_ccitt(body.data(), body.size()), 2);
+  uint8_t tag[kGrantTagLen];
+  if (!detail::grant_tag(mac, body.data(), body.size(), tag))
+    return {};
+  body.insert(body.end(), tag, tag + kGrantTagLen);
   std::vector<uint8_t> ie = {221, static_cast<uint8_t>(3 + body.size()),
                              kGrantOui[0], kGrantOui[1], kGrantOui[2]};
   ie.insert(ie.end(), body.begin(), body.end());
   return ie;
 }
 
-/* Decode one IE (starting at its 221 tag). nullopt on anything but an intact
- * version-1 grant map: wrong tag/OUI/magic/version, a length that disagrees
- * with n, or a CRC mismatch. */
-inline std::optional<GrantMap> decode_grant_ie(const uint8_t *ie, size_t len) {
+/* Decode one IE (starting at its 221 tag). nullopt on anything but an intact,
+ * authentic grant map: wrong tag/OUI/magic/version, a length that disagrees
+ * with n, a CRC mismatch, or (with a key) a tag mismatch — a forged map is
+ * inert. */
+inline std::optional<GrantMap> decode_grant_ie(const uint8_t *ie, size_t len, const Mac &mac) {
   if (ie == nullptr || len < 2 || ie[0] != 221 || static_cast<size_t>(ie[1]) + 2 > len)
     return std::nullopt;
   const size_t ie_len = ie[1];
-  if (ie_len < 3 + detail::kHdrLen + 2 || ie[2] != kGrantOui[0] ||
+  if (ie_len < 3 + detail::kHdrLen + 2 + kGrantTagLen || ie[2] != kGrantOui[0] ||
       ie[3] != kGrantOui[1] || ie[4] != kGrantOui[2])
     return std::nullopt;
   const uint8_t *b = ie + 5;
-  const size_t blen = ie_len - 3;
+  const size_t blen = ie_len - 3 - kGrantTagLen; /* up to and including the CRC */
   if (b[0] != 'G' || b[1] != 'M' || b[2] != kGrantVersion)
     return std::nullopt;
   const size_t n = b[detail::kHdrLen - 1];
@@ -138,6 +172,16 @@ inline std::optional<GrantMap> decode_grant_ie(const uint8_t *ie, size_t len) {
     return std::nullopt;
   if (detail::get(b + blen - 2, 2) != detail::crc16_ccitt(b, blen - 2))
     return std::nullopt;
+  if (mac) {
+    uint8_t want[kGrantTagLen];
+    if (!detail::grant_tag(mac, b, blen, want))
+      return std::nullopt;
+    uint8_t d = 0;
+    for (size_t i = 0; i < kGrantTagLen; ++i)
+      d |= static_cast<uint8_t>(want[i] ^ b[blen + i]);
+    if (d != 0)
+      return std::nullopt;
+  }
   GrantMap m;
   m.flags = b[3];
   m.cell_id = static_cast<uint16_t>(detail::get(b + 4, 2));
@@ -159,8 +203,9 @@ inline std::optional<GrantMap> decode_grant_ie(const uint8_t *ie, size_t len) {
 }
 
 /* Find and decode the grant IE in a beacon MPDU (24-byte header, 12 fixed
- * bytes, then IEs). nullopt when the beacon carries none or it is damaged. */
-inline std::optional<GrantMap> find_grant_map(const uint8_t *mpdu, size_t len) {
+ * bytes, then IEs). nullopt when the beacon carries none, it is damaged, or
+ * (with a key) it is not authentic. */
+inline std::optional<GrantMap> find_grant_map(const uint8_t *mpdu, size_t len, const Mac &mac) {
   if (mpdu == nullptr || len < 36 || mpdu[0] != 0x80)
     return std::nullopt;
   size_t off = 36;
@@ -171,7 +216,7 @@ inline std::optional<GrantMap> find_grant_map(const uint8_t *mpdu, size_t len) {
     if (mpdu[off] == 221 && l >= 5 && mpdu[off + 2] == kGrantOui[0] &&
         mpdu[off + 3] == kGrantOui[1] && mpdu[off + 4] == kGrantOui[2] &&
         mpdu[off + 5] == 'G' && mpdu[off + 6] == 'M')
-      return decode_grant_ie(mpdu + off, len - off);
+      return decode_grant_ie(mpdu + off, len - off, mac);
     off += 2 + l;
   }
   return std::nullopt;

@@ -38,14 +38,15 @@ int main() {
     g.epoch = 9;
     g.period_tu = 100;
     g.grants = {{1, 1, 4, 6, 0, -3}, {2, 2, 5, 6, 0, 7}};
-    const auto b = build_du_beacon(g);
+    const devourer::cell::Mac none;
+    const auto b = build_du_beacon(g, none);
     CHECK(!b.empty() && b[0] == 0x80 && cell_station(b.data() + 10, 5) == 0);
     CHECK(b[32] == 100 && b[33] == 0); /* beacon interval */
-    auto d = devourer::cell::find_grant_map(b.data(), b.size());
+    auto d = devourer::cell::find_grant_map(b.data(), b.size(), none);
     CHECK(d.has_value() && *d == g);
     GrantMap big = g;
     big.grants.resize(devourer::cell::kGrantMax + 1);
-    CHECK(build_du_beacon(big).empty());
+    CHECK(build_du_beacon(big, none).empty());
   }
 
   /* UE beacon round trip and rejects. */

@@ -137,9 +137,23 @@ int main() {
     m.effective_sf = 0x0102030405060708ull;
     m.period_tu = 100;
     m.grants = {{1, 1, 4, 6, -8, -12}, {2, 2, 5, 24, 4, 300}};
-    const auto ie = encode_grant_ie(m);
-    CHECK(ie.size() == 2 + 3 + 21 + 2 * 8 + 2);
-    auto d = decode_grant_ie(ie.data(), ie.size());
+    /* A keyed stand-in for HMAC-SHA1 (NOT cryptographic). */
+    auto key = [](uint64_t k) -> Mac {
+      return [k](const uint8_t *dd, size_t n, uint8_t out[20]) {
+        uint64_t h = 1469598103934665603ull ^ k;
+        for (size_t i = 0; i < n; ++i)
+          h = (h ^ dd[i]) * 1099511628211ull;
+        for (int i = 0; i < 20; ++i) {
+          h = (h ^ static_cast<uint64_t>(i)) * 1099511628211ull;
+          out[i] = static_cast<uint8_t>(h >> 32);
+        }
+        return true;
+      };
+    };
+    const Mac k = key(1), other = key(2), none;
+    const auto ie = encode_grant_ie(m, k);
+    CHECK(ie.size() == 2 + 3 + 21 + 2 * 8 + 2 + kGrantTagLen);
+    auto d = decode_grant_ie(ie.data(), ie.size(), k);
     CHECK(d.has_value() && *d == m);
     if (d) {
       CHECK(d->find(2) && d->find(2)->ta_us == 300);
@@ -152,30 +166,48 @@ int main() {
     const std::vector<uint8_t> ssid = {0, 3, 'G', 'N', 'T'};
     bcn.insert(bcn.end(), ssid.begin(), ssid.end());
     bcn.insert(bcn.end(), ie.begin(), ie.end());
-    auto f = find_grant_map(bcn.data(), bcn.size());
+    auto f = find_grant_map(bcn.data(), bcn.size(), k);
     CHECK(f.has_value() && *f == m);
-    CHECK(!find_grant_map(bcn.data(), 36 + ssid.size()).has_value()); /* no IE */
+    CHECK(!find_grant_map(bcn.data(), 36 + ssid.size(), k).has_value()); /* no IE */
 
+    /* Authentication (v2): a forged map is inert; a keyless receiver checks
+     * the structure only; a keyed one refuses an untagged (keyless) map. */
+    CHECK(!decode_grant_ie(ie.data(), ie.size(), other).has_value()); /* another key */
+    CHECK(!find_grant_map(bcn.data(), bcn.size(), other).has_value());
     auto bad = ie;
-    bad[10] ^= 0x01; /* body bit flip -> CRC */
-    CHECK(!decode_grant_ie(bad.data(), bad.size()).has_value());
+    bad.back() ^= 0x01; /* tag bit flip */
+    CHECK(!decode_grant_ie(bad.data(), bad.size(), k).has_value());
+    CHECK(decode_grant_ie(ie.data(), ie.size(), none).has_value()); /* passive: structure */
+    const auto open_ie = encode_grant_ie(m, none);
+    CHECK(open_ie.size() == ie.size() && decode_grant_ie(open_ie.data(), open_ie.size(), none));
+    CHECK(!decode_grant_ie(open_ie.data(), open_ie.size(), k).has_value()); /* zero tag */
+    GrantMap moved = m; /* a forger's edit, CRC recomputed: the tag still fails */
+    moved.grants[0].ul_slot = 9;
+    auto forged = encode_grant_ie(moved, other);
+    CHECK(!forged.empty() && !decode_grant_ie(forged.data(), forged.size(), k).has_value());
+
     bad = ie;
-    bad[7] = 2; /* version */
-    CHECK(!decode_grant_ie(bad.data(), bad.size()).has_value());
+    bad[10] ^= 0x01; /* body bit flip -> CRC */
+    CHECK(!decode_grant_ie(bad.data(), bad.size(), k).has_value());
+    bad = ie;
+    bad[7] = 1; /* version 1 (untagged): refused */
+    CHECK(!decode_grant_ie(bad.data(), bad.size(), k).has_value());
     bad = ie;
     bad[2] = 0x00; /* OUI */
-    CHECK(!decode_grant_ie(bad.data(), bad.size()).has_value());
+    CHECK(!decode_grant_ie(bad.data(), bad.size(), k).has_value());
     bad = ie;
     bad[1] = static_cast<uint8_t>(bad[1] - 1); /* length disagrees with n */
-    CHECK(!decode_grant_ie(bad.data(), bad.size()).has_value());
-    CHECK(!decode_grant_ie(ie.data(), ie.size() - 1).has_value()); /* truncated */
+    CHECK(!decode_grant_ie(bad.data(), bad.size(), k).has_value());
+    CHECK(!decode_grant_ie(ie.data(), ie.size() - 1, k).has_value()); /* truncated */
 
     GrantMap big;
     big.grants.resize(kGrantMax + 1);
-    CHECK(encode_grant_ie(big).empty());
+    CHECK(encode_grant_ie(big, k).empty());
     big.grants.resize(kGrantMax);
-    const auto full = encode_grant_ie(big);
-    CHECK(!full.empty() && full[1] <= 255 && decode_grant_ie(full.data(), full.size()));
+    const auto full = encode_grant_ie(big, k);
+    CHECK(!full.empty() && full[1] <= 255 && decode_grant_ie(full.data(), full.size(), k));
+    const Mac failing = [](const uint8_t *, size_t, uint8_t *) { return false; };
+    CHECK(encode_grant_ie(m, failing).empty()); /* a failing Mac: nothing aired */
   }
 
   /* Receiver: newer epochs only; a map takes effect at its superframe. */

@@ -524,25 +524,53 @@ each).
 
 | KPI (6 handovers) | min | median | max |
 |---|---|---|---|
-| UE margin reaching the A3 entry (4 dB) → switch | 38 sf | 41.5 sf | 51 sf |
-| margin at the CU's trigger | 7 dB | 9.5 dB | 13 dB |
+| UE margin reaching the A3 entry (4 dB) → switch | 40 sf | 48 sf | 55 sf |
+| margin at the CU's trigger | 9 dB | 11 dB | 15 dB |
 | interruption (first in-slot uplink at the target) | 1 sf | 1 sf | 2 sf |
-| uplinks missing at the CU over the run (DAPS) | 0 | 0 | 0 |
+| uplinks missing at the CU over the run (DAPS) | 0 | 0 | 1 |
 
 - **Where the time goes:** 24 sf of the crossing-to-switch is the
   handover lead (`RAN_HO_LEAD_SF`). The rest is the time-to-trigger plus the
   1 s reporting chain: the UE's MR (`CELL_UE_MR_MS`), the DU's F1 report
   (`CELL_F1_REPORT_MS`) and the CU's A3 round (`RAN_PLAN_MS`).
-- **Why the trigger overshoots:** at this ramp rate the margin keeps moving
-  during that chain, so the trigger lands 3–9 dB past the entry.
+- **Why the trigger overshoots:** at ~2 dB/s of margin, the margin keeps
+  moving during that chain, so the trigger lands 5–11 dB past the entry.
 - **Each switch** keeps TSF continuity and is heard in slot at the target
   (≥ 99 %), and the source releases the UE.
 
 **Hover** (3 runs, all pass). The ramps stop with the margin held just under
-the entry: median +3 dB, p10–p90 +2 to +4 dB. 20–23 % of the UE's reports
-were at or above the entry, and **no handover** happened in any run. The
-time-to-trigger and the filtering never let a noise excursion through. The
-test allows at most one handover and never a switch back.
+the entry: median +3 dB, p10–p90 +2 to +4 dB. 13–15 % of the UE's reports
+were at or above the entry.
+- **The criterion:** at most one handover, and never a switch back (no
+  ping-pong).
+- **The result:** no handover in any of the 3 runs. The time-to-trigger and
+  the filtering never let a noise excursion through.
+
+**The source failing mid-crossing** (2 + 2 runs). DU1 is killed the moment
+its UE accepts the handover, with the switch still the 24 sf lead away.
+- **The window:** uplinks missing from the CU's stream, from 24 sf before
+  the switch to 20 after (the uplink seq is the network superframe).
+- **With DAPS:** 0 and 0 missing (asserted ≤ 1). The target delivers the
+  UE's uplinks until the switch, and the switch happens.
+- **Without DAPS:** 11 and 13 missing (reported). The source's path dies
+  with the DU.
+- **Outside the window,** with one cell left, 4–5 isolated single losses
+  over the rest of the run are that path's own (~0.4 %).
+
+**A CU bug the crossing found.** At first the target heard the UE in slot
+only 91–98 % after a switch.
+- **The symptom:** the CU re-issued the target's two UE positions in turn,
+  every plan round. Each swap cost the moving UE one uplink in its old slot.
+- **The cause:** the CU planned from the DUs' *reported* positions. A
+  schedule takes effect `RAN_LEAD_SF` (12 sf) ahead, more than the plan
+  round, so the report still showed the positions before the last
+  schedule. With two equally good layouts, the planner "kept" the stale one
+  and reversed itself each round.
+- **Why M5 never saw it:** a move only ever went to a strictly better
+  position there. Here a handover arrival made two layouts equal.
+- **The fix:** the CU plans each UE from its own issued schedule, and from
+  the report only for a UE the schedule does not name yet (a handover
+  arrival). After it, 8 schedules in a whole run, and every switch in slot.
 
 ## Grant-map authentication, and the suite keyed
 

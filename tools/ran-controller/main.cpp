@@ -980,7 +980,19 @@ int main() {
       c.fixed = d.rep.fixed;
       c.positions = d.rep.positions;
       for (const CoordAssign &a : d.rep.ues) {
-        CoordUe u{a.ue, a.pos, {}};
+        /* Where the UE IS going: the CU's own issued schedule, not the
+         * report — a schedule takes effect RAN_LEAD_SF ahead, more than a
+         * plan round, so the report still shows the positions before it.
+         * Planned from those, two equally good layouts were re-issued in
+         * turn every round (each move an uplink in the old slot). A UE the
+         * schedule does not name yet (a handover arrival) is where the DU
+         * reports it. */
+        uint8_t pos = a.pos;
+        if (d.sched)
+          for (const CoordAssign &s : d.sched->ues)
+            if (s.ue == a.ue)
+              pos = s.pos;
+        CoordUe u{a.ue, pos, {}};
         for (long oid : expected) {
           const DuState &o = dus.at(static_cast<uint16_t>(oid));
           if (o.rep.du == c.du)

@@ -807,7 +807,20 @@ int run_du(IRadio *dev, const Cfg &c) {
   }
   /* The ramp's zero: CELL_DU_TX_RAMP_T0 (unix seconds: the DUs of one test
    * ramp together, on their hosts' synced clocks), else service start. */
-  const double ramp_t0_unix = std::getenv("CELL_DU_TX_RAMP_T0") ? std::atof(std::getenv("CELL_DU_TX_RAMP_T0")) : 0;
+  double ramp_t0_unix = 0;
+  if (const char *z = std::getenv("CELL_DU_TX_RAMP_T0"); z && *z) {
+    char *end = nullptr;
+    ramp_t0_unix = std::strtod(z, &end);
+    if (end == z || *end != '\0' || !(ramp_t0_unix > 0)) {
+      fprintf(stderr, "CELL_DU_TX_RAMP_T0: unix seconds (> 0), got \"%s\"\n", z);
+      return 2;
+    }
+  }
+  if (!tx_ramp.empty() && !dev->GetTxPowerCaps().supported) {
+    fprintf(stderr, "CELL_DU_TX_RAMP: this radio has no runtime TX power control\n");
+    return 2;
+  }
+  bool ramp_short_warned = false;
   std::chrono::steady_clock::time_point ramp_t0{};
   int ramp_set_qdb = INT_MIN;
   auto bcn = build_du_beacon(map, auth);
@@ -1293,6 +1306,12 @@ int run_du(IRadio *dev, const Cfg &c) {
     ramp_t0 -= std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(now_unix - ramp_t0_unix));
   }
+  if (!tx_ramp.empty()) { /* the anchor used: checkable afterwards */
+    char l[160];
+    snprintf(l, sizeof l, "{\"ev\":\"cell.du.txpwr_t0\",\"anchor\":\"%s\",\"t0_unix\":%.3f}",
+             ramp_t0_unix > 0 ? "unix" : "service_start", ramp_t0_unix);
+    emit(l);
+  }
   auto next_ta = std::chrono::steady_clock::now() + std::chrono::seconds(ta_every_s);
   auto next_sync = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_loop_ms);
   int64_t sf = grid->at(static_cast<int64_t>(dev->ReadTsf())).superframe + 1;
@@ -1691,7 +1710,13 @@ int run_du(IRadio *dev, const Cfg &c) {
       const int want_qdb = static_cast<int>(std::lround(want * 4));
       if (std::abs(want_qdb - ramp_set_qdb) >= 2 || ramp_set_qdb == INT_MIN) { /* 0.5 dB steps */
         const int applied = dev->SetTxPowerOffsetQdb(want_qdb);
+        /* The family clamps to its PA window (the applied value says so,
+         * logged below); retrying the same target cannot change that. */
         ramp_set_qdb = want_qdb;
+        if (applied != want_qdb && !ramp_short_warned) {
+          ramp_short_warned = true;
+          fprintf(stderr, "CELL_DU_TX_RAMP: wanted %d qdB, applied %d (clamped)\n", want_qdb, applied);
+        }
         char l[160];
         snprintf(l, sizeof l,
                  "{\"ev\":\"cell.du.txpwr\",\"sf\":%lld,\"t_s\":%.2f,\"want_qdb\":%d,\"applied_qdb\":%d}",

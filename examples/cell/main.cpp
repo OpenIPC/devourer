@@ -130,6 +130,11 @@
 //                             beacons outlast the DU's discipline pass
 //                             (CELL_SYNC_LOOP_MS 500): a jump the DU undoes
 //                             itself is never followed, only a lasting one.
+//   CELL_UE_REATTACH_SF [200] UE: for this long after a confirmed step of the
+//                             DU's clock, a grant map at a LOWER epoch that is
+//                             due near its beacon's superframe means the DU
+//                             restarted: the grant state starts over
+//                             (cell.ue.reattach). 0 = never.
 //   CELL_DU_TEST_TSF_STEP     DU, test only: US@SF — add US to the TSF once at
 //                             local superframe SF, behind the discipline's back
 //                             (cell.test.tsf_step); the discipline undoes it.
@@ -2191,6 +2196,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
   sync.SetStepDetect(envl("CELL_UE_FIT_STEP_US", 200, 0, 1000000),
                      static_cast<int>(envl("CELL_UE_FIT_CONFIRM", 6, 1, 50)));
   long long fit_steps_seen = 0, fit_rejected_seen = 0;
+  /* Re-attachment after a DU restart (mu): after a confirmed step of the
+   * DU's clock, for CELL_UE_REATTACH_SF superframes, a grant map at a lower
+   * epoch but due near the beacon's own superframe starts the UE's grant
+   * state over (GrantMapReceiver::offer_after_restart); the main loop then
+   * resets what belonged to the old DU instance. */
+  const int64_t reattach_sf = envl("CELL_UE_REATTACH_SF", 200, 0, 100000);
+  long long reattach_armed_steps = 0; /* sync.Steps() at the arming */
+  int64_t reattach_until_ms = 0;
+  bool reattached = false;
+  uint32_t reattach_old_epoch = 0, reattach_new_epoch = 0;
   Wrap32 wrap;
   GrantMapReceiver rxr(c.cell);
   /* DL HARQ receiver + the DL SNR since the last feedback publish (mu). */
@@ -2345,8 +2360,20 @@ int run_ue(IRadio *dev, const Cfg &c) {
                                                   static_cast<uint16_t>(me_a.load()), auth))
             ho_seen = h;
         wrap.feed(p.RxAtrib.tsfl);
-        if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size()))
-          rxr.offer(*m);
+        if (reattach_sf > 0 && sync.Steps() != reattach_armed_steps) {
+          reattach_armed_steps = sync.Steps();
+          reattach_until_ms = ue_ms() + reattach_sf * P / 1000;
+        }
+        if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size())) {
+          const uint32_t old_epoch = rxr.newest_epoch();
+          if (!rxr.offer(*m) && ue_ms() < reattach_until_ms &&
+              rxr.offer_after_restart(*m, static_cast<uint64_t>(*eg) / static_cast<uint64_t>(P))) {
+            reattached = true;
+            reattach_until_ms = 0;
+            reattach_old_epoch = old_epoch;
+            reattach_new_epoch = m->epoch;
+          }
+        }
         if (me_a == 0) {
           const auto rb = find_rach_responses(p.Data.data(), p.Data.size());
           if (rb.first) {
@@ -2379,8 +2406,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
           return;
         const int64_t du_at =
             sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(p.RxAtrib.tsfl)));
-        want = grid->find(SlotKind::Downlink, static_cast<uint16_t>(me));
         pos = grid->at(du_at);
+        /* The DL slot of our grant in the map in force (the CU may have
+         * moved us off the position matching our id). */
+        if (const GrantMap *gm = rxr.current(static_cast<uint64_t>(std::max<int64_t>(pos.superframe, 0))))
+          if (const Grant *g = gm->find(static_cast<uint16_t>(me)))
+            want = g->dl_slot;
       }
       if (!want)
         return;
@@ -2440,6 +2471,27 @@ int run_ue(IRadio *dev, const Cfg &c) {
         emit(l);
         fit_steps_seen = sync.Steps();
         fit_rejected_seen = sync.Rejected();
+      }
+      /* Re-attached to a restarted DU (the RX path started the grant state
+       * over): what belonged to the old DU instance goes, as on a switch. */
+      if (reattached) {
+        reattached = false;
+        hrx = HarqReceiver{}; /* its DL sequence space starts again */
+        mr_gen = 0;           /* its MR window is its new superframe count */
+        nbrs.clear();
+        have_nbrs_gen = false;
+        gap_parked.clear();
+        ho_seen.reset();      /* commands aired by the old instance */
+        ho_pending.reset();
+        force_beacon = true;
+        listen_from = -1;
+        char l[200];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.reattach\",\"ue\":%d,\"cell\":%u,\"old_epoch\":%u,"
+                 "\"new_epoch\":%u,\"sf\":%lld}",
+                 me_a.load(), cell_a.load(), reattach_old_epoch, reattach_new_epoch,
+                 (long long)(du_now / P));
+        emit(l);
       }
       int64_t sfn = du_now >= 0 ? du_now / P : 0;
       /* M6: a fresh handover command is accepted once (HoReceiver: newer

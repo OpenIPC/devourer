@@ -192,6 +192,7 @@ public:
 
   explicit GrantMapReceiver(uint16_t cell_id) : cell_id_(cell_id) {}
   uint16_t cell_id() const { return cell_id_; }
+  uint32_t newest_epoch() const { return newest_epoch_; }
 
   /* True when `m` was accepted (queued). */
   bool offer(const GrantMap &m) {
@@ -220,6 +221,23 @@ public:
       pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(due));
     }
     return current_ ? &*current_ : nullptr;
+  }
+  /* A restarted DU: its maps begin again at a low epoch, on another
+   * superframe count. A map offer() would refuse as old, but due within
+   * `window` superframes of the beacon carrying it (`beacon_sf`, that beacon's
+   * TSF / period: the DU's count NOW), starts the receiver over — the caller
+   * asks only once it has seen the DU's clock jump (a TsfSync step). A stale
+   * map from before the restart is due far from the new count and still
+   * refused. True when it started over. */
+  bool offer_after_restart(const GrantMap &m, uint64_t beacon_sf, uint64_t window = 16) {
+    /* Strictly lower: the same epoch again is the live map repeated. */
+    if (m.cell_id != cell_id_ || !have_any_ || m.epoch >= newest_epoch_)
+      return false;
+    const uint64_t d = m.effective_sf > beacon_sf ? m.effective_sf - beacon_sf : beacon_sf - m.effective_sf;
+    if (d > window)
+      return false;
+    rebind(cell_id_);
+    return offer(m);
   }
   /* Serve another cell from scratch (handover, re-association). */
   void rebind(uint16_t cell_id) {

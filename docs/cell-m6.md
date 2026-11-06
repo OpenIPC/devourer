@@ -544,9 +544,9 @@ were at or above the entry.
 - **Criterion and result:** at most one handover and never a switch back
   (0 handovers in all 3 runs). The time-to-trigger and the filtering never
   let a noise excursion through.
-- **Why the criterion allows one:** One handover at a hover is correct A3 behaviour, not a
-  failure: at +3 dB the filtered margin may hold the 4 dB entry for the
-  time-to-trigger. One hover run of an earlier set (the CU fix below does
+- **Why the criterion allows one:** one handover at a hover is correct A3
+  behaviour, not a failure: at +3 dB the filtered margin may hold the 4 dB
+  entry for the time-to-trigger. One hover run of an earlier set (the CU fix below does
   not touch the A3) did exactly that, once, and did not switch back. What
   the test must catch is the ping-pong: a switch back.
 

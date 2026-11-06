@@ -98,16 +98,16 @@ inline std::vector<uint8_t> beacon_head(const uint8_t sa[6], int interval_tu) {
 }
 }  // namespace detail
 
-// The DU beacon: header + the grant map IE (+ the RACH responses IE when
+// The DU beacon: header + the grant map IE (tagged with `mac`, the cell key) (+ the RACH responses IE when
 // `rach_rsp` — an encode_rach_responses body — has any entry). Empty if
 // either cannot encode.
-inline std::vector<uint8_t> build_du_beacon(const GrantMap &m,
+inline std::vector<uint8_t> build_du_beacon(const GrantMap &m, const devourer::cell::Mac &mac,
                                             const std::vector<uint8_t> &rach_rsp = {},
                                             const std::vector<uint8_t> &extra_ies = {}) {
   uint8_t sa[6];
   cell_mac(sa, m.cell_id, 0);
   auto f = detail::beacon_head(sa, m.period_tu);
-  const auto ie = devourer::cell::encode_grant_ie(m);
+  const auto ie = devourer::cell::encode_grant_ie(m, mac); /* tagged with the cell key */
   if (ie.empty())
     return {};
   f.insert(f.end(), ie.begin(), ie.end());

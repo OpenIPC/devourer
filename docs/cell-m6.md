@@ -411,13 +411,12 @@ heard in the new grid.
   instance, as on a handover switch. That is the DL HARQ sequence space, the
   MR generation (the DU checks it against its own new count), the neighbour
   list and gap parking, and any handover IE the old instance aired.
-- **The exposure:** grant maps carry no tag (they never did), so the epoch
-  rule orders maps; it does not authenticate them. A forged map could
-  already redirect a UE's slots. The restart path widens that: within the
-  re-attach window after a clock step, a forged lower-epoch map due near the
-  beacon's count also resets the UE's per-DU state (HARQ, MR generation,
-  neighbours, pending handover IEs). Grant-map authentication is open
-  (below).
+- **Authentication:** grant maps carry the cell key's tag (v2,
+  `src/cell/GrantMap.h`), so with `CELL_PSK` a forged map is refused before
+  either rule sees it. It can neither move a UE's slots nor, through the
+  restart path, reset its per-DU state. What remains is a replayed genuine
+  map. A pre-restart one is due far from the new count and refused; one
+  from the new instance is that DU's own.
 
 **Rig result** (testrig `scripts/m6_fitstep.sh`, restart case, 3 runs, all
 pass).
@@ -446,6 +445,40 @@ pass).
   the slot matching its id, not the slot of its grant. A CU move to another
   position showed as DL out of slot (0.05 in slot); the frames themselves
   were right. It now uses the grant in force.
+
+## Grant-map authentication, and the suite keyed
+
+The grant map IE (v2, `src/cell/GrantMap.h`) carries the cell key's tag
+after its CRC, as the NL, MR and handover IEs do.
+- **With `CELL_PSK`:** a UE takes only authentic maps. A forged map neither
+  moves its slots nor, through the restart path, resets its grant state.
+- **Without a key:** an unauthenticated development cell, or a passive
+  witness, checks the structure only.
+- **v1 maps** (untagged) are refused.
+- **Counters:** the UE counts serving maps taken and refused (`gm_ok`,
+  `gm_refused` in `cell.ue.done`; the first refusal logs
+  `cell.ue.gm_refused`).
+
+**On air** (testrig `scripts/m6_gmauth.sh`, 2 runs, pass). Every role holds
+the cell key except UE2, which holds another. To UE2 each genuine map is a
+map under the wrong key, as a forged one is to a keyed UE.
+
+| | maps taken | maps refused | heard in slot by its DU |
+|---|---|---|---|
+| UE1 (cell key) | 586–587 | 0 | 99.8 % |
+| UE2 (another key) | 0 | 586–587 | never |
+
+**The M6 suite re-run keyed** (all roles on one `CELL_PSK`; all pass). No
+keyed UE refused a map, apart from UE2 above.
+
+| test | runs | result |
+|---|---|---|
+| same-channel handover + fallback | 2 + 1 | interruption 1 sf; fallback 10 sf |
+| inter-frequency handover | 2 | interruption 2–3 sf, retune 23.6 ms |
+| DAPS (source killed mid-crossing) | 2 + 2 | missing uplinks 0 / 0, against 11 / 16 without |
+| measurement-gap handover | 2 | deaf 54.1 ms, A3 fired at defaults |
+| phase planning | 2 | DU2 at 51200, both UEs 57 gaps heard |
+| clock-fit jump + DU restart | 1 + 1 | restart followed and re-attached; transient ignored |
 
 ## DAPS: the duplicated uplink (same channel)
 
@@ -547,10 +580,6 @@ superframe when there is nothing to serve.
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
-- **Grant-map authentication:** the grant map IE has no tag, unlike the
-  NL, MR and handover IEs. A tag keyed per cell (as `CELL_PSK`), checked
-  before any `offer`, would close the forged-map exposure, including the
-  restart path. It is a wire change for the DU, UE and witness.
 - **A DU restart under RACH-joined UEs:** re-attachment (above) is for the
   rig's static UEs, whose id the restarted DU grants again. A UE that joined
   through the RACH holds an id the new DU instance does not know; re-joining
@@ -560,6 +589,12 @@ superframe when there is nothing to serve.
   two cells. No A→B path-loss ramp has been run, so none of these numbers
   validates a crossing. An emulated crossing (the source DU ramping its TX
   power, which its beacons follow) is the way to get one.
-- **Security context:** the cells share one key on the rig (`CELL_PSK`).
-  Pre-staging a per-cell context (802.11r-style) is open.
+- **Security context:** the cells share one key (`CELL_PSK`). Pre-staging a
+  per-cell context (802.11r-style) is open.
+- **Keyed rig runs only from the grant-map authentication on:** the
+  handover, DAPS, inter-frequency, measurement-gap, phase-planning and
+  clock-fit rig results above were run without `CELL_PSK`, an
+  unauthenticated development cell. Their tags were zeros and were not
+  checked; F1 was keyed throughout. The testrig scripts now give every cell
+  role one key. The suite re-run keyed is in the next section.
 - **EVM:** not in the measurement reports.

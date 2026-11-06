@@ -52,8 +52,7 @@
 
 namespace devourer::cell {
 
-/* HMAC-SHA1 keyed by the cell PSK: data -> 20-byte tag. False on failure. */
-using Mac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
+/* Mac: cell/GrantMap.h (HMAC-SHA1 keyed by the cell PSK). */
 
 constexpr size_t kRachTagLen = 8;
 /* msgA envelope version: an unknown version is refused before anything else

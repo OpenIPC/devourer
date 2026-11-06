@@ -130,6 +130,11 @@
 //                             beacons outlast the DU's discipline pass
 //                             (CELL_SYNC_LOOP_MS 500): a jump the DU undoes
 //                             itself is never followed, only a lasting one.
+//   CELL_UE_REJOIN_SF [30]    UE that joined through the RACH: not granted by
+//                             the map in force this many superframes (its DU
+//                             restarted or released it) = drop the id and
+//                             join again, with a fresh nonce (cell.ue.rejoin).
+//                             0 = never. Static UEs never re-join.
 //   CELL_UE_REATTACH_SF [200] UE: for this long after a confirmed step of the
 //                             DU's clock, a grant map at a LOWER epoch that is
 //                             due near its beacon's superframe means the DU
@@ -2303,7 +2308,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
     joiner_mac = {0x02, 0xce, 0xfe, static_cast<uint8_t>(h >> 16), static_cast<uint8_t>(h >> 8),
                   static_cast<uint8_t>(h)};
   }
-  const uint64_t nonce = (static_cast<uint64_t>(rng()) << 32) | rng();
+  uint64_t nonce = (static_cast<uint64_t>(rng()) << 32) | rng();
+  /* A UE that got its id through the RACH re-joins once the DU's authentic
+   * map in force has not granted it for CELL_UE_REJOIN_SF superframes: the
+   * DU restarted (a new instance does not know the id) or released it. A
+   * static UE (CELL_UE > 0) never does: its DU grants it again. */
+  const bool static_ue = me_a > 0;
+  const int64_t rejoin_sf = envl("CELL_UE_REJOIN_SF", 30, 0, 100000); /* 0 = never */
+  int64_t absent_from_sf = -1; /* first superframe of the current absence */
   devourer::cell::RachClient rach(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });
   std::vector<devourer::cell::RachResponse> rar_seen;
   const auto mac = rach_mac(c);
@@ -2772,8 +2784,38 @@ int run_ue(IRadio *dev, const Cfg &c) {
       continue;
     const int me = me_a.load();
     const Grant *g = mcopy.find(static_cast<uint16_t>(me));
-    if (!g)
+    if (!g) {
+      /* Not granted by the map in force. A joined UE (not mid-handover)
+       * absent this long re-joins: a fresh nonce (the DU answers a
+       * repeated one from its cache: the old id), its uplink beacon off,
+       * the id's DL sequence space gone. */
+      const int64_t sf_now = du_now / P;
+      if (absent_from_sf < 0)
+        absent_from_sf = sf_now;
+      if (!static_ue && rejoin_sf > 0 && !ho_back && !ho_pending &&
+          sf_now - absent_from_sf >= rejoin_sf) {
+        const int old_ue = me;
+        if (beaconing && dev->StopBeacon())
+          beaconing = false;
+        dev->ClearAckResponder();
+        nonce = (static_cast<uint64_t>(rng()) << 32) | rng();
+        rach = devourer::cell::RachClient(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });
+        {
+          std::lock_guard<std::mutex> lk(mu);
+          rar_seen.clear();
+          hrx = HarqReceiver{};
+        }
+        me_a = 0;
+        char l[200];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.rejoin\",\"old_ue\":%d,\"cell\":%u,\"absent_sf\":%lld,\"sf\":%lld}",
+                 old_ue, cell_a.load(), (long long)(sf_now - absent_from_sf), (long long)sf_now);
+        emit(l);
+        absent_from_sf = -1;
+      }
       continue;
+    }
+    absent_from_sf = -1;
     /* The DU's slot indices must mean the same slots on this UE's grid (the
      * grid is built from the shared env): a disagreement is a configuration
      * error. Stop rather than transmit in someone else's slot. The pair may

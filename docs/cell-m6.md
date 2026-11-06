@@ -446,6 +446,57 @@ pass).
   position showed as DL out of slot (0.05 in slot); the frames themselves
   were right. It now uses the grant in force.
 
+## Re-joining through the RACH after a DU restart
+
+Re-attachment (above) brings back a static UE: the restarted DU grants its
+id again. A UE that joined through the RACH holds an id the new DU instance
+does not know, so after re-attaching it is in no map.
+
+- **The rule:** a joined UE that the authentic map in force has not granted
+  for `CELL_UE_REJOIN_SF` (30) superframes drops its id and joins again
+  (`cell.ue.rejoin`). That covers a DU that restarted and one that released
+  it. The rule is skipped mid-handover; static UEs never re-join.
+- **What the re-join resets:** its uplink beacon goes off and its ACK
+  responder is cleared. The DL HARQ space of the old id goes. The RACH
+  client is new, with a **fresh nonce**: a DU answers a repeated (MAC,
+  nonce) request from its cache, which would be the old id.
+- **The stable joiner MAC** (`CELL_JOINER_MAC`, or derived from host and
+  radio) is kept. A DU that still holds the UE's registry entry gives the
+  same position back.
+
+**A driver bug it found.** The first re-joins never got an answer. Every
+msgA arrived at the same phase (~29.9 ms, drifting with the UE's own
+crystal), past the RACH slot, whatever offset the UE drew.
+- **Not the cause:** the UE's timing checks passed.
+- **The A/B:** with its uplink beacon left running, the msgA landed in slot.
+- **The cause:** Kestrel's `StopBeacon` cleared the beacon-TX enable but
+  left the TBTT protection `StartBeacon` turns on (`TBTT_PROHIB_EN`,
+  `BRK_SETUP`). The port went on holding injected frames to its old beacon
+  grid. `StopBeacon` now clears both.
+- **Not established:** that 400 × 32 µs of `BCN_HOLD` after the UE's TBTT
+  is exactly the ~13 ms observed.
+
+**Rig result** (testrig `scripts/m6_rejoin.sh`).
+- **The case:** UE1 joins cell 1 through the RACH (`CELL_UE=0`, an 8 ms RACH
+  slot), and DU1 is killed and restarted under it 35 s in. Keyed, as all
+  runs now are. 3 runs, all pass.
+
+| KPI (3 runs) | value |
+|---|---|
+| re-attach, then one re-join | every run |
+| second join, after the restarted DU's service start | −4 to +28 sf (median 11) |
+| its RACH attempts | 4–8 (the first fall in the restarted DU's acquisition, its grid still moving) |
+| uplink of the new id at the restarted DU, from 10 sf after the join | heard 100 %, in slot 100 % |
+
+- **With `CELL_UE_REJOIN_SF=0`** (the counterfactual, 1 run), the UE keeps a
+  dead id and the restarted DU never hears it.
+- **Regression for the `StopBeacon` change,** all passing:
+  - inter-frequency handover 2, plus fallback 1 (each a beacon stop and
+    restart);
+  - measurement-gap handover 2;
+  - clock-fit restart and transient 1 + 1;
+  - same-channel handover 1.
+
 ## Grant-map authentication, and the suite keyed
 
 The grant map IE (v2, `src/cell/GrantMap.h`) carries the cell key's tag
@@ -580,10 +631,6 @@ superframe when there is nothing to serve.
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
-- **A DU restart under RACH-joined UEs:** re-attachment (above) is for the
-  rig's static UEs, whose id the restarted DU grants again. A UE that joined
-  through the RACH holds an id the new DU instance does not know; re-joining
-  it is open.
 - **No crossing test:** every handover result here is from stationary UEs.
   The trigger is either forced or the measured standing difference between
   two cells. No A→B path-loss ramp has been run, so none of these numbers

@@ -1764,6 +1764,9 @@ bool HalKestrel::stop_beacon() {
   p = r::set_clr_word(p, r::MAC_AX_NET_TYPE_NO_LINK, r::B_AX_NET_TYPE_P0_MSK,
                       r::B_AX_NET_TYPE_P0_SH);
   p &= ~r::B_AX_BCNTX_EN_P0;
+  /* And the TBTT protection start_beacon turned on (BCN_PRCT): left set, the
+   * port keeps prohibiting TX around a TBTT no beacon uses any more. */
+  p &= ~(r::B_AX_TBTT_PROHIB_EN_P0 | r::B_AX_BRK_SETUP_P0);
   return _device.rtw_write32(r::R_AX_PORT_CFG_P0, p);
 }
 

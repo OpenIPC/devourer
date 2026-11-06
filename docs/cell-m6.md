@@ -382,7 +382,7 @@ pass; both cells on ch149).
 
 | case | steps followed | UE skew, max \|ppm\| | DL frames in the DL area after | uplinks off-slot, 20 sf after |
 |---|---|---|---|---|
-| restart, detection on | the restart jump (−30.5 to −31.1 s) and the acquisition steps | 8.0–10.1 | 100 % | not judged (below) |
+| restart, detection on | the restart jump (−30.5 to −31.1 s) and the acquisition steps | 8.0–10.1 | 100 % | see re-attachment (below) |
 | restart, detection off (1 run) | — | 996 125 | 11 % | not judged |
 | transient, detection on | none (5 beacons held, then dropped) | 8.4–11.9 | 100 % | 0 |
 
@@ -392,7 +392,62 @@ pass; both cells on ch149).
   undo), the UE followed the transient out and back, 3 beacons late each way.
   That put 4–5 of the next 20 uplinks off-slot, in 3 of 3 runs.
 
-## DAPS: the duplicated uplink (same channel)## DAPS: the duplicated uplink (same channel)
+## Re-attachment after a DU restart
+
+A restarted DU's clock is followed (above), but its grant maps begin again
+at a low epoch on the new superframe count. A UE's grant receiver refuses
+them as old, so without re-attachment the UE keeps its old map and is never
+heard in the new grid.
+
+- **The rule** (`GrantMapReceiver::offer_after_restart`): a map at a strictly
+  lower epoch than the newest accepted, but due within 16 superframes of the
+  beacon carrying it, starts the receiver over. A stale map from before the
+  restart is due far from the new count, so it is still refused. The same
+  epoch again is the live map repeated, not a restart.
+- **When:** only for `CELL_UE_REATTACH_SF` (200) superframes after the UE's
+  clock fit confirms a step of the DU's TSF. A DU that never jumped is never
+  re-attached to.
+- **What else resets** (`cell.ue.reattach`): what belonged to the old DU
+  instance, as on a handover switch. That is the DL HARQ sequence space, the
+  MR generation (the DU checks it against its own new count), the neighbour
+  list and gap parking, and any handover IE the old instance aired.
+- **The exposure:** grant maps carry no tag (they never did), so the epoch
+  rule orders maps; it does not authenticate them. A forged map could
+  already redirect a UE's slots. The restart path widens that: within the
+  re-attach window after a clock step, a forged lower-epoch map due near the
+  beacon's count also resets the UE's per-DU state (HARQ, MR generation,
+  neighbours, pending handover IEs). Grant-map authentication is open
+  (below).
+
+**Rig result** (testrig `scripts/m6_fitstep.sh`, restart case, 3 runs, all
+pass).
+- **The case:** DU1 is killed 30 s in and restarted at once, under its
+  attached UE. Service start is the restarted DU's first in-loop discipline
+  pass.
+
+| KPI (3 runs) | value |
+|---|---|
+| re-attachments per run | 1 (old epoch 7–11 → epoch 1, at the new DU's superframe 6) |
+| uplink heard by the restarted DU, from 10 sf after service start | 99.8–100 % of superframes |
+| of them in slot | 99.8 % |
+| first in-slot uplink after service start | superframe 0 |
+| UE DL frames in their granted slot after the re-attach | 100 % |
+
+- **Before the restarted DU serves,** its grid is still moving: it is
+  acquiring, with its beacon on. The UE has already re-attached to it, and
+  its uplinks in that time are off-slot against the moving grid. They are
+  not counted.
+- **With detection off,** the UE's clock fit breaks (above). Re-attachment
+  is never armed, and the restarted DU never hears the UE.
+- **No spurious re-attachment** was seen in the transient runs or in the
+  regression runs. Those were same-channel handover 2/2 plus fallback 1/1,
+  measurement-gap handover 1/1 and phase planning 1/1, all passing.
+- **A logging fix found on the way:** the UE judged its DL frames against
+  the slot matching its id, not the slot of its grant. A CU move to another
+  position showed as DL out of slot (0.05 in slot); the frames themselves
+  were right. It now uses the grant in force.
+
+## DAPS: the duplicated uplink (same channel)
 
 **Common sequence.** A UE uplinks once per superframe. Every DU that hears
 one transmission hears it at the same instant on the shared PTP timebase,
@@ -492,11 +547,14 @@ superframe when there is nothing to serve.
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
-- **A DU restart under attached UEs:** the UE's clock now follows it, but
-  its grant state does not. The restarted DU's grant maps start again at a
-  low epoch and another superframe count. The UE keeps its old map and is
-  not heard in the new grid. Re-attachment after a DU restart (a fresh map
-  epoch base, or the UE dropping a map no longer in force) is open.
+- **Grant-map authentication:** the grant map IE has no tag, unlike the
+  NL, MR and handover IEs. A tag keyed per cell (as `CELL_PSK`), checked
+  before any `offer`, would close the forged-map exposure, including the
+  restart path. It is a wire change for the DU, UE and witness.
+- **A DU restart under RACH-joined UEs:** re-attachment (above) is for the
+  rig's static UEs, whose id the restarted DU grants again. A UE that joined
+  through the RACH holds an id the new DU instance does not know; re-joining
+  it is open.
 - **No crossing test:** every handover result here is from stationary UEs.
   The trigger is either forced or the measured standing difference between
   two cells. No A→B path-loss ramp has been run, so none of these numbers

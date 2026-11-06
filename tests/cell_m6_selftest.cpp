@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cell/F1.h"
+#include "cell/GrantMap.h"
 #include "cell/Handover.h"
 #include "cell/HoCommand.h"
 #include "cell/MeasGap.h"
@@ -587,6 +588,39 @@ int main() {
     TsfDiscipline disc(dc);
     disc.set_phase(51200);
     CHECK(disc.phase() == 51200);
+  }
+
+  /* --- Re-attachment after a DU restart (GrantMap.h offer_after_restart). --- */
+  {
+    GrantMapReceiver rx(1);
+    GrantMap m;
+    m.cell_id = 1;
+    m.epoch = 13;
+    m.effective_sf = 400;
+    m.grants = {{}};
+    m.grants[0].ue = 1;
+    CHECK(rx.offer(m) && rx.newest_epoch() == 13);
+    /* The restarted DU: epoch 2, due at 97 while its beacons read sf 94. */
+    GrantMap n = m;
+    n.epoch = 2;
+    n.effective_sf = 97;
+    CHECK(!rx.offer(n));                              /* an old epoch: refused */
+    CHECK(!rx.offer_after_restart(n, 400));           /* not near the beacon's count */
+    GrantMap stale = m;
+    stale.epoch = 12;
+    stale.effective_sf = 390;
+    CHECK(!rx.offer_after_restart(stale, 94));        /* a map from before the restart */
+    GrantMap other = n;
+    other.cell_id = 2;
+    CHECK(!rx.offer_after_restart(other, 94));        /* another cell's */
+    CHECK(rx.offer_after_restart(n, 94));             /* starts over */
+    CHECK(rx.newest_epoch() == 2 && rx.current(97) && rx.current(97)->epoch == 2);
+    GrantMap n2 = n;
+    n2.epoch = 3;
+    n2.effective_sf = 115;
+    CHECK(rx.offer(n2) && rx.current(115)->epoch == 3); /* and runs on normally */
+    CHECK(!rx.offer_after_restart(m, 115));            /* never back to a higher epoch this way */
+    CHECK(!rx.offer_after_restart(n2, 115));           /* the live map repeated: no restart */
   }
 
   if (failures == 0)

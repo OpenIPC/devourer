@@ -541,10 +541,10 @@ each).
 **Hover** (3 runs, all pass). The ramps stop with the margin held just under
 the entry: median +3 dB, p10–p90 +2 to +4 dB. 13–15 % of the UE's reports
 were at or above the entry.
-- **The result:** no handover in any of the 3 runs. The time-to-trigger and
-  the filtering never let a noise excursion through.
-- **The criterion is looser on purpose:** at most one handover, and never a
-  switch back. One handover at a hover is correct A3 behaviour, not a
+- **Criterion and result:** at most one handover and never a switch back
+  (0 handovers in all 3 runs). The time-to-trigger and the filtering never
+  let a noise excursion through.
+- **Why the criterion allows one:** One handover at a hover is correct A3 behaviour, not a
   failure: at +3 dB the filtered margin may hold the 4 dB entry for the
   time-to-trigger. One hover run of an earlier set (the CU fix below does
   not touch the A3) did exactly that, once, and did not switch back. What

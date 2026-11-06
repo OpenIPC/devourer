@@ -497,6 +497,85 @@ crystal), past the RACH slot, whatever offset the UE drew.
   - clock-fit restart and transient 1 + 1;
   - same-channel handover 1.
 
+## An emulated crossing (nothing forced)
+
+Every earlier handover here had its trigger forced or was a standing
+difference between two cells. Here the UE crosses. Both cells are on one
+channel, with one UE (UE1, starting in cell 1).
+- **The emulation** (`CELL_DU_TX_RAMP`): the DUs ramp their TX power
+  against each other, piecewise linear on one wall-clock zero
+  (`CELL_DU_TX_RAMP_T0`; the DU hosts are NTP-synced). Beacons and DL alike
+  follow it.
+- **What the UE sees:** it measures both beacons (no gaps on one channel)
+  and reports them (`cell.ue.mr`).
+- **Who decides:** the CU's A3 at its defaults (offset 3 dB, hysteresis
+  1 dB, time-to-trigger 640 ms, dwell 2 s).
+
+**The ramps** (testrig `scripts/m6_crossing.sh`): cell 1 fades by 16 dB over
+15 s while cell 2 rises by as much. They hold, then reverse.
+- **The UE's measured margin** (the other cell against the serving one)
+  sweeps from about −13 to +24 dB and back.
+- **The rig's power-to-RSSI curve** is not linear: −8 dB of offset reads
+  about −9 dB at the UE, and −9 dB about −12 dB. Its cause is not
+  established; the tests use the measured margins, not the offsets.
+
+**Crossing, there and back** (3 runs, all pass: exactly 1 → 2 then 2 → 1 in
+each).
+
+| KPI (6 handovers) | min | median | max |
+|---|---|---|---|
+| UE margin reaching the A3 entry (4 dB) → switch | 40 sf | 48 sf | 55 sf |
+| margin at the CU's trigger | 9 dB | 11 dB | 15 dB |
+| interruption (first in-slot uplink at the target) | 1 sf | 1 sf | 2 sf |
+| uplinks missing at the CU over the run (DAPS) | 0 | 0 | 1 |
+
+- **Where the time goes:** 24 sf of the crossing-to-switch is the
+  handover lead (`RAN_HO_LEAD_SF`). The rest is the time-to-trigger plus the
+  1 s reporting chain: the UE's MR (`CELL_UE_MR_MS`), the DU's F1 report
+  (`CELL_F1_REPORT_MS`) and the CU's A3 round (`RAN_PLAN_MS`).
+- **Why the trigger overshoots:** at ~2 dB/s of margin, the margin keeps
+  moving during that chain, so the trigger lands 5–11 dB past the entry.
+- **Each switch** keeps TSF continuity and is heard in slot at the target
+  (≥ 99 %), and the source releases the UE.
+
+**Hover** (3 runs, all pass). The ramps stop with the margin held just under
+the entry: median +3 dB, p10–p90 +2 to +4 dB. 13–15 % of the UE's reports
+were at or above the entry.
+- **Criterion and result:** at most one handover and never a switch back
+  (0 handovers in all 3 runs). The time-to-trigger and the filtering never
+  let a noise excursion through.
+- **Why the criterion allows one:** one handover at a hover is correct A3
+  behaviour, not a failure: at +3 dB the filtered margin may hold the 4 dB
+  entry for the time-to-trigger. One hover run of an earlier set (the CU fix below does
+  not touch the A3) did exactly that, once, and did not switch back. What
+  the test must catch is the ping-pong: a switch back.
+
+**The source failing mid-crossing** (2 + 2 runs). DU1 is killed the moment
+its UE accepts the handover, with the switch still the 24 sf lead away.
+- **The window:** uplinks missing from the CU's stream, from 24 sf before
+  the switch to 20 after (the uplink seq is the network superframe).
+- **With DAPS:** 0 and 0 missing (asserted ≤ 1). The target delivers the
+  UE's uplinks until the switch, and the switch happens.
+- **Without DAPS:** 11 and 13 missing (reported). The source's path dies
+  with the DU.
+- **Outside the window,** with one cell left, 4–5 isolated single losses
+  over the rest of the run are that path's own (~0.4 %).
+
+**A CU bug the crossing found.** At first the target heard the UE in slot
+only 91–98 % after a switch.
+- **The symptom:** the CU re-issued the target's two UE positions in turn,
+  every plan round. Each swap cost the moving UE one uplink in its old slot.
+- **The cause:** the CU planned from the DUs' *reported* positions. A
+  schedule takes effect `RAN_LEAD_SF` (12 sf) ahead, more than the plan
+  round, so the report still showed the positions before the last
+  schedule. With two equally good layouts, the planner "kept" the stale one
+  and reversed itself each round.
+- **Why M5 never saw it:** a move only ever went to a strictly better
+  position there. Here a handover arrival made two layouts equal.
+- **The fix:** the CU plans each UE from its own issued schedule, and from
+  the report only for a UE the schedule does not name yet (a handover
+  arrival). After it, 8 schedules in a whole run, and every switch in slot.
+
 ## Grant-map authentication, and the suite keyed
 
 The grant map IE (v2, `src/cell/GrantMap.h`) carries the cell key's tag
@@ -625,17 +704,14 @@ superframe when there is nothing to serve.
   - downlink duplication;
   - the different-channel (sequential) variant, with its retune and deaf-time
     budget.
-- **A moving UE:** the rig's UEs are stationary, so the crossing is forced
-  with a negative A3 offset.
 - **Phase planning beyond two cells:** a joining cell is placed against the
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
-- **No crossing test:** every handover result here is from stationary UEs.
-  The trigger is either forced or the measured standing difference between
-  two cells. No A→B path-loss ramp has been run, so none of these numbers
-  validates a crossing. An emulated crossing (the source DU ramping its TX
-  power, which its beacons follow) is the way to get one.
+- **A real moving UE:** the crossing below is emulated by the DUs' TX
+  power. The uplink path loss stays the same, there is one UE, and the ramp
+  rate is one setting (~2 dB/s of margin). No over-the-air motion,
+  fading or crowd has been run.
 - **Security context:** the cells share one key (`CELL_PSK`). Pre-staging a
   per-cell context (802.11r-style) is open.
 - **Keyed rig runs only from the grant-map authentication on:** the

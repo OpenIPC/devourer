@@ -3,6 +3,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <utility>
+#include <vector>
 
 #include "RxPacket.h"
 
@@ -26,7 +29,17 @@
  * Least-squares in offset coordinates for numerical conditioning; the local
  * 32-bit tsfl is reconstructed to 64 bits across its ~71.6 min wrap. Header-only,
  * no chip dependency. Not internally synchronised — feed it from one thread
- * (typically the RX callback). */
+ * (typically the RX callback).
+ *
+ * Step detection (opt-in, SetStepDetect): the fit is cumulative, so one
+ * jump of the transmitter's clock (a TSF write on its side) would otherwise
+ * be absorbed as skew and bias every translation for a long time. With it
+ * on, a beacon more than `threshold_us` off the line is held out of the fit;
+ * `confirm` consecutive held beacons that agree on one new offset (within a
+ * quarter of the threshold) are a STEP: the remote axis is re-anchored by it
+ * (ShiftRemote — a TSF step is an offset change, the rate is the crystals')
+ * and the held beacons join the fit. Held beacons that never agree are
+ * dropped (a stray frame never bends the line). */
 namespace devourer {
 
 class TsfSync {
@@ -37,6 +50,43 @@ class TsfSync {
   void Add(uint64_t remote_tsf, uint32_t local_tsfl) {
     const int64_t local = ReconLocal(local_tsfl);
     const int64_t remote = static_cast<int64_t>(remote_tsf);
+    if (_step_thr > 0 && _init) {
+      const int64_t res = remote - RemoteForLocal(static_cast<uint64_t>(local));
+      if (std::llabs(res) > _step_thr) {
+        if (!_held.empty() && std::llabs(res - _held_res) > _step_thr / 4) {
+          _rejected += static_cast<long long>(_held.size());
+          _held.clear();
+        }
+        if (_held.empty())
+          _held_res = res;
+        _held.push_back({remote, local});
+        if (static_cast<int>(_held.size()) < _step_confirm)
+          return;
+        ShiftAxis(_held_res);
+        ++_steps;
+        _last_step = _held_res;
+        for (const auto &h : _held)
+          Ingest(h.first, h.second);
+        _held.clear();
+        return;
+      }
+      _rejected += static_cast<long long>(_held.size());
+      _held.clear();
+    }
+    Ingest(remote, local);
+  }
+
+  /* Step detection (see the header); threshold 0 = off (the default). */
+  void SetStepDetect(int64_t threshold_us, int confirm) {
+    _step_thr = threshold_us > 0 ? threshold_us : 0;
+    _step_confirm = confirm > 1 ? confirm : 1;
+  }
+  long long Steps() const { return _steps; }      /* confirmed transmitter steps */
+  int64_t LastStepUs() const { return _last_step; }
+  long long Rejected() const { return _rejected; } /* held beacons never confirmed */
+
+ private:
+  void Ingest(int64_t remote, int64_t local) {
     if (!_init) {
       _x0 = static_cast<double>(remote);
       _y0 = static_cast<double>(local);
@@ -52,6 +102,8 @@ class TsfSync {
     _last_remote = remote;
     _last_local = local;
   }
+
+ public:
 
   /* Convenience: feed a received Packet. Returns true iff it carried an egress
    * TSF (a beacon / probe response) and was ingested — so a caller can simply
@@ -100,8 +152,8 @@ class TsfSync {
    * src/cell/HoCommand.h ho_tsf_delta_us): it keeps its clock, no
    * re-acquisition, and the new transmitter's beacons extend the same line. */
   void ShiftRemote(int64_t delta_us) {
-    _x0 += static_cast<double>(delta_us);
-    _last_remote += delta_us;
+    ShiftAxis(delta_us);
+    _held.clear(); /* beacons held from the previous transmitter */
   }
 
   /* Instantaneous (local − remote) offset at the most recent beacon, µs — the
@@ -109,6 +161,10 @@ class TsfSync {
   int64_t OffsetUs() const { return _last_local - _last_remote; }
 
  private:
+  void ShiftAxis(int64_t delta_us) {
+    _x0 += static_cast<double>(delta_us);
+    _last_remote += delta_us;
+  }
   double Intercept(double a) const {
     return (_sy - a * _sx) / (_n ? static_cast<double>(_n) : 1.0);
   }
@@ -124,6 +180,12 @@ class TsfSync {
   long long _n = 0;
   int64_t _hi = 0, _last_remote = 0, _last_local = 0;
   uint32_t _plo = 0;
+  int64_t _step_thr = 0;
+  int _step_confirm = 3;
+  std::vector<std::pair<int64_t, int64_t>> _held; /* (remote, local) off the line */
+  int64_t _held_res = 0;                           /* the first held beacon's offset */
+  long long _steps = 0, _rejected = 0;
+  int64_t _last_step = 0;
 };
 
 }  // namespace devourer

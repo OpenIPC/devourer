@@ -122,6 +122,17 @@
 //                             superframes = the DU's beacon is not reaching
 //                             them. Three failed beacon updates in a row also
 //                             count.
+//   CELL_UE_FIT_STEP_US [200] CELL_UE_FIT_CONFIRM [6]   UE: a serving beacon
+//                             this far off the clock fit is held out of it;
+//                             that many in a row agreeing on one offset are a
+//                             step of the DU's TSF, re-anchored (TsfSync step
+//                             detection, cell.ue.fit_step). 0 = off. 6
+//                             beacons outlast the DU's discipline pass
+//                             (CELL_SYNC_LOOP_MS 500): a jump the DU undoes
+//                             itself is never followed, only a lasting one.
+//   CELL_DU_TEST_TSF_STEP     DU, test only: US@SF — add US to the TSF once at
+//                             local superframe SF, behind the discipline's back
+//                             (cell.test.tsf_step); the discipline undoes it.
 //   DEVOURER_CHANNEL [149]
 // Output: JSONL on stdout ("ev":"cell.*").
 #include <algorithm>
@@ -827,6 +838,18 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::atomic<bool> net_ok{false};
   uint64_t sync_samples = 0;
   std::array<uint64_t, 3> sync_in_state{};
+  /* CELL_DU_TEST_TSF_STEP=US@SF (test only): one TSF jump the discipline
+   * did not ask for, what a UE's clock fit must survive. */
+  int64_t test_step_us = 0, test_step_sf = -1;
+  if (const char *ts = std::getenv("CELL_DU_TEST_TSF_STEP"); ts && *ts) {
+    long long us = 0, at = 0;
+    if (std::sscanf(ts, "%lld@%lld", &us, &at) != 2 || at < 0 || us == 0 || std::llabs(us) > P) {
+      fprintf(stderr, "CELL_DU_TEST_TSF_STEP: US@SF, 0 < |US| <= period\n");
+      return 2;
+    }
+    test_step_us = us;
+    test_step_sf = at;
+  }
   auto sync_once = [&](int64_t sf_now, bool beacon_ok) {
     uint64_t t = 0, f = 0;
     double r1 = 0, r2 = 0;
@@ -879,6 +902,24 @@ int run_du(IRadio *dev, const Cfg &c) {
              d.phase_err_us, (long long)d.step_us, wok ? 1 : 0, d.ppm, rok ? 1 : 0,
              beacon_ok ? 1 : 0);
     emit(l);
+    /* The test step goes in AFTER this pass's sample, so it stays on air
+     * until the next pass (CELL_SYNC_LOOP_MS) undoes it; the RX offset is
+     * re-read as after any write. */
+    if (test_step_sf >= 0 && sf_now >= test_step_sf) {
+      const bool ok = dev->WriteTsf(dev->ReadTsf() + static_cast<uint64_t>(test_step_us));
+      test_step_sf = -1;
+      uint64_t t3 = 0, f3 = 0;
+      if (dev->ReadTsfAndFreeRun(t3, f3)) {
+        publish_clock(t3, f3);
+      } else { /* as after any write: no stale offset until a fresh read */
+        std::lock_guard<std::mutex> lk(clk_mu);
+        clk.valid = false;
+      }
+      char l2[120];
+      snprintf(l2, sizeof l2, "{\"ev\":\"cell.test.tsf_step\",\"sf\":%lld,\"step_us\":%lld,\"ok\":%d}",
+               (long long)sf_now, (long long)test_step_us, ok ? 1 : 0);
+      emit(l2);
+    }
   };
   auto set_mode = [&](bool coord, int64_t sf_now) {
     if (coord == coordinated || !apply_mode(coord))
@@ -2145,6 +2186,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
   const CellMac auth = cell_auth(c);
   std::mutex mu;  // guards sync, wrap, rxr
   devourer::TsfSync sync;
+  /* A step of the DU's TSF re-anchors the fit instead of reading as skew:
+   * on the rig a ~1.3 ms jump once ran a UE's skew to thousands of ppm. */
+  sync.SetStepDetect(envl("CELL_UE_FIT_STEP_US", 200, 0, 1000000),
+                     static_cast<int>(envl("CELL_UE_FIT_CONFIRM", 6, 1, 50)));
+  long long fit_steps_seen = 0, fit_rejected_seen = 0;
   Wrap32 wrap;
   GrantMapReceiver rxr(c.cell);
   /* DL HARQ receiver + the DL SNR since the last feedback publish (mu). */
@@ -2384,6 +2430,17 @@ int run_ue(IRadio *dev, const Cfg &c) {
       if (!sync.Ready() || !wrap.ready())
         continue;
       du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
+      if (sync.Steps() != fit_steps_seen || sync.Rejected() != fit_rejected_seen) {
+        char l[200];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.fit_step\",\"ue\":%d,\"steps\":%lld,\"last_step_us\":%lld,"
+                 "\"rejected\":%lld,\"skew_ppm\":%.2f}",
+                 me_a.load(), sync.Steps(), (long long)sync.LastStepUs(), sync.Rejected(),
+                 sync.SkewPpm());
+        emit(l);
+        fit_steps_seen = sync.Steps();
+        fit_rejected_seen = sync.Rejected();
+      }
       int64_t sfn = du_now >= 0 ? du_now / P : 0;
       /* M6: a fresh handover command is accepted once (HoReceiver: newer
        * id, instant ahead); at its instant the UE switches: the clock is

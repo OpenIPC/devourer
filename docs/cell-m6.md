@@ -349,11 +349,50 @@ after the DUs, with the DU asking for its phase after its beacon had started.
 - **What changed:** the DU now asks before starting its beacon, and the rig
   starts the UEs only once both DUs log `cell.du.start`. Five runs since
   have the UEs' skew at −3 to −8 ppm.
-- **Not established:** the source of the jump. Neither is how often a UE
-  meets one in service, for example on a DU restart under attached UEs.
-  That case is an open item below.
+- **Not established:** the source of the jump. The UE now survives one
+  (next section).
 
-## DAPS: the duplicated uplink (same channel)
+## The UE's clock fit across a jump of its DU's TSF
+
+The UE fits the DU's TSF against its own free-running counter
+(`src/TsfSync.h`), which no TSF write on the UE side touches. So a
+discontinuity can only come from the DU's side. The fit is cumulative: a
+jump read as skew biases every translation for a long time, as in the first
+phase-planning runs above.
+
+**Step detection** (`TsfSync::SetStepDetect`; the UE's settings are in the
+`examples/cell/main.cpp` env header):
+- **Held out:** a beacon more than 200 µs off the fit is not fitted.
+- **Confirmed:** six in a row agreeing on one offset (within 50 µs) are a
+  step. Six beacons outlast the DU's own discipline pass (500 ms), so a jump
+  the DU undoes itself is never followed. The remote axis is re-anchored by it (`ShiftRemote`: a TSF step
+  changes the offset, never the crystals' rate) and the held beacons join
+  the fit (`cell.ue.fit_step`).
+- **Dropped:** held beacons that never agree are discarded, so one stray
+  frame never bends the line.
+
+**Rig result** (testrig `scripts/m6_fitstep.sh`, 3 runs of each case, all
+pass; both cells on ch149).
+- **Restart:** DU1 is killed and restarted under its attached UE. Its new
+  TSF lands on another superframe count, a lasting jump (about −31 s), and
+  the restarted DU's acquisition adds a few more steps.
+- **Transient:** DU1 adds 1300 µs to its TSF behind its discipline's back
+  (`CELL_DU_TEST_TSF_STEP`, test only). The discipline undoes it one pass
+  (~500 ms) later.
+
+| case | steps followed | UE skew, max \|ppm\| | DL frames in the DL area after | uplinks off-slot, 20 sf after |
+|---|---|---|---|---|
+| restart, detection on | the restart jump (−30.5 to −31.1 s) and the acquisition steps | 8.0–10.1 | 100 % | not judged (below) |
+| restart, detection off (1 run) | — | 996 125 | 11 % | not judged |
+| transient, detection on | none (5 beacons held, then dropped) | 8.4–11.9 | 100 % | 0 |
+
+- **Without detection,** the restart wrecks the fit: the skew reads about
+  10⁶ ppm and the DL frames scatter over the whole superframe.
+- **The confirm window matters:** with 3 beacons (shorter than the DU's
+  undo), the UE followed the transient out and back, 3 beacons late each way.
+  That put 4–5 of the next 20 uplinks off-slot, in 3 of 3 runs.
+
+## DAPS: the duplicated uplink (same channel)## DAPS: the duplicated uplink (same channel)
 
 **Common sequence.** A UE uplinks once per superframe. Every DU that hears
 one transmission hears it at the same instant on the shared PTP timebase,
@@ -453,10 +492,11 @@ superframe when there is nothing to serve.
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure
   both ways. Re-phasing live cells, or longer superframes, is open.
-- **A UE's clock fit after a jump in its serving beacon's timing:**
-  `TsfSync` never forgets, so one discontinuity (seen as about 1.3 ms, source
-  not established) skews the UE for a long time. A UE-side reset on a
-  detected discontinuity is open.
+- **A DU restart under attached UEs:** the UE's clock now follows it, but
+  its grant state does not. The restarted DU's grant maps start again at a
+  low epoch and another superframe count. The UE keeps its old map and is
+  not heard in the new grid. Re-attachment after a DU restart (a fresh map
+  epoch base, or the UE dropping a map no longer in force) is open.
 - **No crossing test:** every handover result here is from stationary UEs.
   The trigger is either forced or the measured standing difference between
   two cells. No A→B path-loss ramp has been run, so none of these numbers

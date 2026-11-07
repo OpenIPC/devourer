@@ -1362,6 +1362,19 @@ int run_du(IRadio *dev, const Cfg &c) {
         if (std::chrono::steady_clock::now() >= next_report) {
           next_report += std::chrono::milliseconds(f1_report_ms);
           f1::Report r;
+          /* The RACH-joined UEs and their joiner MACs (their UE keys are the
+           * CU's to derive: Keys.h joiner_key); a static UE or a handover
+           * arrival holds the cell's synthetic MAC. Taken before f1_mu: no
+           * nesting of the two locks. */
+          {
+            std::lock_guard<std::mutex> lk(mu);
+            for (const auto &o : reg.owners()) {
+              std::array<uint8_t, 6> syn{};
+              cell_mac(syn.data(), c.cell, static_cast<uint8_t>(o.first));
+              if (o.second != syn && r.joined.size() < f1::kMaxUes)
+                r.joined.push_back({o.first, o.second});
+            }
+          }
           {
             std::lock_guard<std::mutex> lk(f1_mu);
             r.du = c.cell;

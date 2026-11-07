@@ -18,6 +18,7 @@
 #include "cell/Handover.h"
 #include "cell/HoCommand.h"
 #include "cell/Keys.h"
+#include "cell/UeRegistry.h"
 #include "cell/MeasGap.h"
 #include "cell/PhasePlan.h"
 #include "cell/SlotGrid.h"
@@ -654,6 +655,32 @@ int main() {
     CHECK(!unwrap_context(uk, 77, 2, Context{}));                 /* none */
     CHECK(*wrap_context(uk, 78, 2, *b2) != *ctx);                 /* the pad is per id */
     CHECK(!wrap_context(Mac{}, 77, 2, *b2));                      /* no UE key: no context */
+    /* A joiner's key: bound to the MAC it joins with, distinct from any
+     * static UE key and from another joiner's. */
+    const std::array<uint8_t, 6> jm = {0x02, 0xce, 0xfe, 0x51, 0x99, 0x46};
+    auto jm2 = jm;
+    jm2[5] ^= 1;
+    const auto kj = joiner_key(master, jm);
+    CHECK(kj && kj->size() == 40 && *kj == *joiner_key(master, jm));
+    CHECK(*kj != *joiner_key(master, jm2) && *kj != *u11 && *kj != *k1);
+    /* The DU reports its RACH-joined UEs with their MACs (F1 v10). */
+    f1::Report jr;
+    jr.du = 1;
+    jr.joined = {{2, jm}, {3, jm2}};
+    const auto wj = f1::encode_report(jr, fake_mac(0xF1));
+    auto dj = f1::decode_report(wj.data(), wj.size(), fake_mac(0xF1));
+    CHECK(dj && dj->joined == jr.joined);
+    jr.joined.resize(f1::kMaxUes + 1);
+    CHECK(f1::encode_report(jr, fake_mac(0xF1)).empty());
+    /* The registry names who holds each id (a joiner's MAC). */
+    UeRegistry reg({{1, 4}, {2, 5}, {3, 6}});
+    std::array<uint8_t, 6> st{};
+    st[5] = 1;
+    reg.bind(st);
+    reg.admit(jm);
+    const auto own = reg.owners();
+    CHECK(own.size() == 2 && own[0].first == 1 && own[0].second == st && own[1].first == 2 &&
+          own[1].second == jm);
     /* It rides the handover command (F1 v9) and the IE (v3) intact. */
     HoCommand cmd;
     cmd.id = 77;

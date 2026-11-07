@@ -50,6 +50,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -75,7 +76,7 @@ namespace devourer::cell::f1 {
  * 6: Handover carries the target's channel (inter-frequency). */
 /* 8: Phase (CU -> DU: a joining DU's TBTT phase, src/cell/PhasePlan.h); a
  * Report with phase_us < 0 asks for one. */
-constexpr uint8_t kVersion = 9; /* v9: the handover's security context */
+constexpr uint8_t kVersion = 10; /* v10: the joined UEs' MACs (UE keys of joiners) */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -97,6 +98,15 @@ inline const char *ack_status_name(AckStatus s) {
   default: return "invalid";
   }
 }
+
+/* A UE this DU admitted through the RACH, and the joiner MAC it joined with:
+ * what the CU derives its UE key from (src/cell/Keys.h joiner_key) to wrap a
+ * handover's context for it. */
+struct JoinedUe {
+  uint16_t ue = 0;
+  std::array<uint8_t, 6> mac{};
+  bool operator==(const JoinedUe &) const = default;
+};
 
 struct HeardUe {
   uint16_t cell = 0, ue = 0;
@@ -148,6 +158,7 @@ struct Report {
   std::vector<HeardUe> heard;
   std::vector<UeMeas> meas;
   std::vector<UeCellMeas> ue_meas;
+  std::vector<JoinedUe> joined;
   bool operator==(const Report &) const = default;
 };
 
@@ -308,7 +319,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
   using namespace detail;
   if (r.fixed.size() > kMaxFixed || r.positions.size() > kMaxPositions ||
       r.ues.size() > kMaxUes || r.heard.size() > kMaxHeard || r.meas.size() > kMaxUes ||
-      r.ue_meas.size() > kMaxUeMeas)
+      r.ue_meas.size() > kMaxUeMeas || r.joined.size() > kMaxUes)
     return {};
   auto m = head(Type::Report);
   put(m, r.du, 2);
@@ -354,6 +365,11 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
     put(m, static_cast<uint16_t>(q.rssi_qdbm), 2);
     put(m, static_cast<uint16_t>(q.snr_qdb), 2);
     put(m, q.age_ms, 2);
+  }
+  m.push_back(static_cast<uint8_t>(r.joined.size()));
+  for (const JoinedUe &j : r.joined) {
+    put(m, j.ue, 2);
+    m.insert(m.end(), j.mac.begin(), j.mac.end());
   }
   return seal(std::move(m), mac);
 }
@@ -427,6 +443,16 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     q.snr_qdb = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     q.age_ms = static_cast<uint16_t>(r.get(2));
     x.ue_meas.push_back(q);
+  }
+  const size_t nj = r.get(1);
+  if (nj > kMaxUes)
+    return std::nullopt;
+  for (size_t i = 0; i < nj && r.ok; ++i) {
+    JoinedUe j;
+    j.ue = static_cast<uint16_t>(r.get(2));
+    for (auto &b : j.mac)
+      b = static_cast<uint8_t>(r.get(1));
+    x.joined.push_back(j);
   }
   if (!r.ok || r.i != r.n)
     return std::nullopt;

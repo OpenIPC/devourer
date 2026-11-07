@@ -86,6 +86,14 @@ public:
       return std::nullopt;
     return slot_of(it->second);
   }
+  /* (UE id, the MAC it was admitted with), in position order. */
+  std::vector<std::pair<uint16_t, std::array<uint8_t, 6>>> owners() const {
+    std::vector<std::pair<uint16_t, std::array<uint8_t, 6>>> v;
+    for (size_t i = 0; i < owner_.size(); ++i)
+      if (owner_[i])
+        v.push_back({static_cast<uint16_t>(i + 1), *owner_[i]});
+    return v;
+  }
   /* The admitted UEs, in position order. */
   std::vector<UeSlot> admitted() const {
     std::vector<UeSlot> v;

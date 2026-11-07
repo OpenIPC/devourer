@@ -7,12 +7,18 @@
  *   area key   K_A       = hex(HMAC(master, 'A'))
  *   cell key   K_c       = hex(HMAC(master, 'C' cell(2)))
  *   UE key     K_(c,u)   = hex(HMAC(master, 'U' home_cell(2) home_ue(2)))
+ *   joiner key K_j       = hex(HMAC(master, 'J' joiner_mac(6)))  (a UE that
+ *                          joins through the RACH: its UE key, provisioned out
+ *                          of band against the MAC it joins with, as a SIM's)
  * (little-endian fields; the master is the HMAC key as given).
  *
  * Who holds what:
  *   DU of cell c   K_c (its CELL_PSK) and K_A (CELL_AREA_KEY)
  *   UE (home c,u)  K_c of its serving cell, K_A, and its own K_(c,u)
- *                  (CELL_UE_KEY)
+ *                  (CELL_UE_KEY); a joiner: its K_j there
+ * A DU reports the UEs it admitted through the RACH with their joiner MACs
+ * (F1 Report.joined), so the CU wraps a joiner's context under K_j. Claiming
+ * another UE's MAC at the join gains nothing: only K_j's holder unwraps.
  *   CU             the master (RAN_MASTER_KEY)
  *
  * What each key tags:
@@ -121,6 +127,13 @@ inline std::optional<std::string> ue_key(const Mac &master, uint16_t home_cell, 
   std::vector<uint8_t> i = {'U'};
   key_detail::le(i, home_cell, 2);
   key_detail::le(i, home_ue, 2);
+  auto k = key_detail::prf(master, i);
+  return k ? std::optional<std::string>(key_to_hex(*k)) : std::nullopt;
+}
+
+inline std::optional<std::string> joiner_key(const Mac &master, const std::array<uint8_t, 6> &mac) {
+  std::vector<uint8_t> i = {'J'};
+  i.insert(i.end(), mac.begin(), mac.end());
   auto k = key_detail::prf(master, i);
   return k ? std::optional<std::string>(key_to_hex(*k)) : std::nullopt;
 }

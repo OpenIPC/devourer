@@ -295,10 +295,25 @@ int main() {
   /* The per-cell security context (src/cell/Keys.h): with RAN_MASTER_KEY the
    * CU wraps the target cell's key for the UE in every handover command. A
    * UE's key is its HOME identity's — where it was provisioned — which
-   * home_of follows across handovers (a target identity -> its home). */
+   * home_of follows across handovers (a target identity -> its home). A home
+   * is a static (cell, UE), or a joiner's MAC (its DU reports the UEs it
+   * admitted through the RACH: Report.joined; Keys.h joiner_key). */
   const char *master_env = std::getenv("RAN_MASTER_KEY");
   const auto master = master_env && *master_env ? hmac_sha1(master_env) : devourer::cell::Mac{};
-  std::map<std::pair<uint16_t, uint16_t>, std::pair<uint16_t, uint16_t>> home_of;
+  struct Home {
+    bool joiner = false;
+    uint16_t cell = 0, ue = 0;
+    std::array<uint8_t, 6> mac{};
+    std::string name() const {
+      char b[24];
+      if (joiner)
+        snprintf(b, sizeof b, "J:%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      else
+        snprintf(b, sizeof b, "%u:%u", cell, ue);
+      return b;
+    }
+  };
+  std::map<std::pair<uint16_t, uint16_t>, Home> home_of;
   std::map<std::pair<uint16_t, uint16_t>, int64_t> moved_at; /* new key -> switch time (ms) */
   /* Old keys of UEs that handed over: the source keeps reporting their last
    * measurement until it goes stale, which must not trigger again. */
@@ -847,11 +862,19 @@ int main() {
                 cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
                                                                    tr.net_off, sr.period_us);
                 const auto hi = home_of.find({cmd.source, cmd.ue});
-                const auto home = hi != home_of.end() ? hi->second : std::make_pair(cmd.source, cmd.ue);
+                Home home{false, cmd.source, cmd.ue, {}};
+                if (hi != home_of.end()) {
+                  home = hi->second;
+                } else { /* first handover: a joiner if its DU says so */
+                  for (const f1::JoinedUe &j : sr.joined)
+                    if (j.ue == cmd.ue)
+                      home = Home{true, 0, 0, j.mac};
+                }
                 bool ctx_ok = false;
                 if (master) {
                   const auto tk = devourer::cell::cell_key(master, cmd.target);
-                  const auto uk = devourer::cell::ue_key(master, home.first, home.second);
+                  const auto uk = home.joiner ? devourer::cell::joiner_key(master, home.mac)
+                                              : devourer::cell::ue_key(master, home.cell, home.ue);
                   const auto raw = tk ? devourer::cell::key_from_hex(*tk) : std::nullopt;
                   if (raw && uk)
                     if (auto cx = devourer::cell::wrap_context(hmac_sha1(*uk), cmd.id, cmd.target, *raw)) {
@@ -871,10 +894,10 @@ int main() {
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
                          "\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,\"delta_us\":%lld,"
-                         "\"ctx\":%d,\"home\":\"%u:%u\"}",
+                         "\"ctx\":%d,\"home\":\"%s\"}",
                          cmd.id, cmd.ue, cmd.source, cmd.target, cmd.target_ue, cmd.target_pos,
                          (unsigned long long)cmd.effective_net_sf, (long long)cmd.tsf_delta_us,
-                         ctx_ok ? 1 : 0, home.first, home.second);
+                         ctx_ok ? 1 : 0, home.name().c_str());
                 emit(b);
               }
             }

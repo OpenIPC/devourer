@@ -32,13 +32,28 @@
  * (the serving beacon, its own DL and UL slots). A UE that cannot fit a gap
  * simply does not measure that neighbour (no uplink is ever sacrificed).
  *
+ * Signed neighbour lists (per-cell keys): an HMAC tag a UE can check is one
+ * it could forge, so with the area key every UE could fake any cell's NL. A
+ * DU therefore also SIGNS its NL (Ed25519, its own key) and airs a
+ * certificate for that key signed by the area CA:
+ *   NS IE: 'N' 'S' ver(1)=1 cell(2) gen(4) sig(64)   sig over 'S' || the NL IE
+ *   NC IE: 'N' 'C' ver(1)=1 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
+ * A UE holding only the CA's PUBLIC key (CELL_CA_PUB) checks the chain
+ * (NlVerifier) — and can forge nothing. It caches the NL bytes it verified
+ * per cell, so a signature is checked once per list, not per beacon. The
+ * residual is the one any provenance has: a genuine beacon replayed.
+ * The crypto is injected (examples fill it from OpenSSL), as the HMAC is.
+ *
  * Pure header; the cell_m6 ctest covers it. */
 #ifndef DEVOURER_CELL_MEASGAP_H
 #define DEVOURER_CELL_MEASGAP_H
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -246,6 +261,143 @@ inline std::optional<MrIe> find_mr_ie(const uint8_t *mpdu, size_t len, uint16_t 
   });
   return out;
 }
+
+/* --- Signed neighbour lists (see the header). --- */
+constexpr uint8_t kNlSigVersion = 1;
+using Ed25519Pub = std::array<uint8_t, 32>;
+using Ed25519Sig = std::array<uint8_t, 64>;
+/* msg -> its signature under the signer's key. False on failure. */
+using NlSigner = std::function<bool(const uint8_t *msg, size_t n, uint8_t sig[64])>;
+/* (public key, msg, signature) -> valid. */
+using NlSigVerifier = std::function<bool(const uint8_t pub[32], const uint8_t *msg, size_t n, const uint8_t sig[64])>;
+
+/* What the CA signs: 'C' cell(2) pub(32). */
+inline std::vector<uint8_t> nl_cert_message(uint16_t cell, const Ed25519Pub &pub) {
+  std::vector<uint8_t> m = {'C'};
+  mg_detail::put(m, cell, 2);
+  m.insert(m.end(), pub.begin(), pub.end());
+  return m;
+}
+
+namespace mg_detail {
+/* A full vendor IE (221, len, OUI, body), no CRC/tag: the signature and the
+ * certificate carry their own integrity. */
+inline std::vector<uint8_t> plain_ie(const std::vector<uint8_t> &body) {
+  if (3 + body.size() > 255)
+    return {};
+  std::vector<uint8_t> ie = {221, static_cast<uint8_t>(3 + body.size()), kGrantOui[0], kGrantOui[1],
+                             kGrantOui[2]};
+  ie.insert(ie.end(), body.begin(), body.end());
+  return ie;
+}
+/* The raw bytes (from the 221) of cell `cell`'s NL IE in a beacon — only
+ * when the beacon carries exactly ONE for that cell: with two, which one the
+ * signature covers and which one would be parsed could differ (a genuine
+ * signed list followed by a forged one). */
+inline std::optional<std::vector<uint8_t>> raw_nl_ie(const uint8_t *mpdu, size_t len, uint16_t cell) {
+  if (mpdu == nullptr || len < 36 || mpdu[0] != 0x80)
+    return std::nullopt;
+  std::optional<std::vector<uint8_t>> one;
+  for (size_t off = 36; off + 2 <= len;) {
+    const size_t l = mpdu[off + 1];
+    if (off + 2 + l > len)
+      break;
+    const uint8_t *v = mpdu + off + 2;
+    if (mpdu[off] == 221 && l > 7 && v[0] == kGrantOui[0] && v[1] == kGrantOui[1] &&
+        v[2] == kGrantOui[2] && v[3] == 'N' && v[4] == 'L' && get(v + 6, 2) == cell) {
+      if (one)
+        return std::nullopt; /* more than one list for this cell */
+      one = std::vector<uint8_t>(mpdu + off, mpdu + off + 2 + l);
+    }
+    off += 2 + l;
+  }
+  return one;
+}
+} /* namespace mg_detail */
+
+/* The NS IE for an NL IE (its full bytes, as aired). Empty if signing fails. */
+inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, const std::vector<uint8_t> &nl_ie,
+                                             const NlSigner &sign) {
+  using namespace mg_detail;
+  std::vector<uint8_t> msg = {'S'};
+  msg.insert(msg.end(), nl_ie.begin(), nl_ie.end());
+  uint8_t sig[64];
+  if (!sign || !sign(msg.data(), msg.size(), sig))
+    return {};
+  std::vector<uint8_t> b = {'N', 'S', kNlSigVersion};
+  put(b, cell, 2);
+  put(b, gen, 4);
+  b.insert(b.end(), sig, sig + 64);
+  return plain_ie(b);
+}
+/* The NC IE: this cell's signing key and the CA's signature over it. */
+inline std::vector<uint8_t> encode_nl_cert_ie(uint16_t cell, const Ed25519Pub &pub, const Ed25519Sig &ca_sig) {
+  using namespace mg_detail;
+  std::vector<uint8_t> b = {'N', 'C', kNlSigVersion};
+  put(b, cell, 2);
+  b.insert(b.end(), pub.begin(), pub.end());
+  b.insert(b.end(), ca_sig.begin(), ca_sig.end());
+  return plain_ie(b);
+}
+
+/* The UE's side: an NL counts only through the chain CA -> cell key -> NL.
+ * Holds only public keys. Not thread-safe (the UE calls it under its lock). */
+class NlVerifier {
+public:
+  NlVerifier(Ed25519Pub ca_pub, NlSigVerifier verify) : ca_(ca_pub), verify_(std::move(verify)) {}
+
+  /* Cell `cell`'s neighbour list in this beacon, if it is signed by that
+   * cell's certified key (or is exactly the list last verified for it). */
+  std::optional<NlIe> check(const uint8_t *mpdu, size_t len, uint16_t cell) {
+    using namespace mg_detail;
+    auto raw = raw_nl_ie(mpdu, len, cell); /* the one list: what is verified IS what is parsed */
+    if (!raw)
+      return std::nullopt;
+    /* Parse exactly those bytes (structure; the area tag is not the proof). */
+    std::vector<uint8_t> only(36, 0);
+    only[0] = 0x80;
+    only.insert(only.end(), raw->begin(), raw->end());
+    auto nl = find_nl_ie(only.data(), only.size(), cell, Mac{});
+    if (!nl)
+      return std::nullopt;
+    if (auto it = ok_.find(cell); it != ok_.end() && it->second == *raw)
+      return nl; /* verified before, byte for byte */
+    /* The cell's certificate (verified once per key). */
+    for_each_ie(mpdu, len, 'N', 'C', [&](const uint8_t *b, size_t n) {
+      if (n != 5 + 32 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell)
+        return;
+      Ed25519Pub pub;
+      std::copy(b + 5, b + 37, pub.begin());
+      if (auto it = keys_.find(cell); it != keys_.end() && it->second == pub)
+        return;
+      const auto m = nl_cert_message(cell, pub);
+      if (verify_ && verify_(ca_.data(), m.data(), m.size(), b + 37))
+        keys_[cell] = pub;
+    });
+    auto key = keys_.find(cell);
+    if (key == keys_.end())
+      return std::nullopt;
+    bool good = false;
+    for_each_ie(mpdu, len, 'N', 'S', [&](const uint8_t *b, size_t n) {
+      if (good || n != 9 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
+          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen)
+        return;
+      std::vector<uint8_t> m = {'S'};
+      m.insert(m.end(), raw->begin(), raw->end());
+      good = verify_ && verify_(key->second.data(), m.data(), m.size(), b + 9);
+    });
+    if (!good)
+      return std::nullopt;
+    ok_[cell] = *raw;
+    return nl;
+  }
+
+private:
+  Ed25519Pub ca_;
+  NlSigVerifier verify_;
+  std::map<uint16_t, Ed25519Pub> keys_;              /* certified cell keys */
+  std::map<uint16_t, std::vector<uint8_t>> ok_;      /* last verified NL IE, per cell */
+};
 
 /* An interval on the serving grid, [start, start + len) mod P. */
 struct GridSpan {

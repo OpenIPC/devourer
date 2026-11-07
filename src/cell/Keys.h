@@ -29,8 +29,15 @@
  *         IE, the DL body, the UE beacon's own tag (HARQ feedback), the MR IE,
  *         the RACH. A compromised DU or UE of one cell forges that cell only.
  *   K_A   what a UE must check of ANOTHER cell: the neighbour list (the
- *         provenance of a neighbour beacon it measures). Anyone in the area
- *         can forge that — measurement provenance, never control.
+ *         provenance of a neighbour beacon it measures) — unless the DUs SIGN
+ *         it: then a UE checks it with the CA's public key alone (below) and
+ *         nobody but the cell's DU can make it.
+ *   Ed25519 seeds (32 bytes = HMAC(master, info 0) || HMAC(master, info 1)[0..12]):
+ *     a DU's NL signing key  info 'S' cell(2)  (CELL_NL_SIGN_KEY)
+ *     the area CA            info 'R'          (its public key: CELL_CA_PUB;
+ *                                               its signature over each DU's
+ *                                               public key: CELL_NL_CERT)
+ *     — the signing itself is provisioning's (MeasGap.h signed NL).
  *   A_u   the UE's own area key, hex(HMAC(K_u, 'V')): its beacon's second
  *         (area) tag, which neighbour DUs check before counting it as heard
  *         or forwarding it for DAPS. The CU derives every A_u from the homes
@@ -136,6 +143,28 @@ inline std::optional<std::string> ue_key(const Mac &master, uint16_t home_cell, 
   key_detail::le(i, home_ue, 2);
   auto k = key_detail::prf(master, i);
   return k ? std::optional<std::string>(key_to_hex(*k)) : std::nullopt;
+}
+
+/* A 32-byte Ed25519 seed from the master (see the header). */
+inline std::optional<std::array<uint8_t, 32>> ed25519_seed(const Mac &master, std::vector<uint8_t> info) {
+  info.push_back(0);
+  auto a = key_detail::prf(master, info);
+  info.back() = 1;
+  auto b = key_detail::prf(master, info);
+  if (!a || !b)
+    return std::nullopt;
+  std::array<uint8_t, 32> seed{};
+  std::copy(a->begin(), a->end(), seed.begin());
+  std::copy(b->begin(), b->begin() + 12, seed.begin() + 20);
+  return seed;
+}
+inline std::optional<std::array<uint8_t, 32>> nl_sign_seed(const Mac &master, uint16_t cell) {
+  std::vector<uint8_t> i = {'S'};
+  key_detail::le(i, cell, 2);
+  return ed25519_seed(master, i);
+}
+inline std::optional<std::array<uint8_t, 32>> ca_seed(const Mac &master) {
+  return ed25519_seed(master, {'R'});
 }
 
 /* A UE's home identity: where its UE key comes from. */

@@ -67,10 +67,10 @@ int main() {
     du[15] = 0;                                            /* SA = the DU */
     CHECK(!parse_ue_beacon(du.data(), du.size(), 5));
     auto bad = b;
-    bad[bad.size() - 28] = 4;                              /* body ue != SA */
+    bad[bad.size() - 36] = 4;                              /* body ue != SA */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     bad = b;
-    bad[bad.size() - 27] = 1;                              /* ue high byte: 0x0103 != 3 */
+    bad[bad.size() - 35] = 1;                              /* ue high byte: 0x0103 != 3 */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     CHECK(!parse_ue_beacon(b.data(), b.size() - 1, 5));   /* torn IE */
     CHECK(!parse_ue_beacon(nullptr, 0, 5));
@@ -125,11 +125,21 @@ int main() {
     auto unsigned_ub = build_ue_beacon(5, 2, 100, 4, fb, 50, 1);
     CHECK(!parse_ue_beacon(unsigned_ub.data(), unsigned_ub.size(), 5, k1)); /* keyed: tag required */
     auto tampered = ub;
-    tampered[tampered.size() - 8 - 23 + 9] ^= 1; /* fb.base byte */
+    tampered[tampered.size() - 16 - 23 + 9] ^= 1; /* fb.base byte */
     CHECK(!parse_ue_beacon(tampered.data(), tampered.size(), 5, k1));
     auto ver = ub;
-    ver[ver.size() - 8 - 23 + 2] = 1; /* an older protocol version */
+    ver[ver.size() - 16 - 23 + 2] = 2; /* an older protocol version */
     CHECK(!parse_ue_beacon(ver.data(), ver.size(), 5));
+    /* The area tag (v3): another cell's DU checks it with the area key; the
+     * serving DU checks the cell tag. Each needs its own key. */
+    auto two = build_ue_beacon(5, 2, 100, 4, fb, 50, 1, k1, k2);
+    CHECK(parse_ue_beacon(two.data(), two.size(), 5, k1));              /* cell tag, cell key */
+    CHECK(parse_ue_beacon(two.data(), two.size(), 5, k2, true));        /* area tag, area key */
+    CHECK(!parse_ue_beacon(two.data(), two.size(), 5, k2));             /* area key on the cell tag */
+    CHECK(!parse_ue_beacon(two.data(), two.size(), 5, k1, true));       /* cell key on the area tag */
+    auto at = two;
+    at.back() ^= 1;                                                     /* area tag bit */
+    CHECK(parse_ue_beacon(at.data(), at.size(), 5, k1) && !parse_ue_beacon(at.data(), at.size(), 5, k2, true));
     auto dl = build_dl_frame(5, 2, 10, 20, 0, DlHarq{18, 4, 2}, k1);
     CHECK(parse_dl_frame(dl.data(), dl.size(), 5, k1).has_value());
     CHECK(!parse_dl_frame(dl.data(), dl.size(), 5, k2));

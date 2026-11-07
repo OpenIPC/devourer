@@ -38,6 +38,8 @@
 #ifndef DEVOURER_CELL_HOCOMMAND_H
 #define DEVOURER_CELL_HOCOMMAND_H
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -50,7 +52,8 @@
 namespace devourer::cell {
 
 /* 2: the target's channel (inter-frequency handover, the UE retunes). */
-constexpr uint8_t kHoIeVersion = 2;
+/* v3: the per-cell security context (src/cell/Keys.h) rides the IE. */
+constexpr uint8_t kHoIeVersion = 3;
 constexpr size_t kHoTagLen = 8;
 
 /* target TSF - source TSF, at any instant (see the header). */
@@ -72,6 +75,9 @@ struct HoCommand {
   uint64_t effective_net_sf = 0; /* the switch instant, network-wide */
   int64_t tsf_delta_us = 0;      /* target TSF - source TSF */
   uint64_t seq = 0;              /* F1 freshness (as Schedule::seq) */
+  /* The target cell's key wrapped for this UE, with its check (Keys.h
+   * wrap_context), opaque to both DUs; all zero = none (one shared key). */
+  std::array<uint8_t, 24> ctx{};
   bool operator==(const HoCommand &) const = default;
 };
 
@@ -85,6 +91,7 @@ struct HoIe {
   uint8_t channel = 0;              /* the target's channel (0 = the source's) */
   uint64_t effective_sf = 0;        /* in the source cell's count */
   int64_t tsf_delta_us = 0;
+  std::array<uint8_t, 24> ctx{};    /* HoCommand::ctx, relayed */
   bool operator==(const HoIe &) const = default;
 };
 
@@ -99,7 +106,7 @@ inline uint64_t get(const uint8_t *p, int n) {
     v |= static_cast<uint64_t>(p[i]) << (8 * i);
   return v;
 }
-constexpr size_t kBodyLen = 2 + 1 + 4 + 2 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8; /* 'H' 'O' .. delta */
+constexpr size_t kBodyLen = 2 + 1 + 4 + 2 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8 + 24; /* 'H' 'O' .. ctx */
 inline bool tag(const Mac &mac, const uint8_t *body, size_t n, uint8_t out[kHoTagLen]) {
   if (!mac) {
     std::memset(out, 0, kHoTagLen);
@@ -129,6 +136,7 @@ inline std::vector<uint8_t> encode_ho_ie(const HoIe &h, const Mac &mac) {
   b.push_back(h.channel);
   put(b, h.effective_sf, 8);
   put(b, static_cast<uint64_t>(h.tsf_delta_us), 8);
+  b.insert(b.end(), h.ctx.begin(), h.ctx.end());
   put(b, detail::crc16_ccitt(b.data(), b.size()), 2);
   uint8_t t[kHoTagLen];
   if (!tag(mac, b.data(), b.size(), t))
@@ -170,6 +178,7 @@ inline std::optional<HoIe> decode_ho_body(const uint8_t *b, size_t n, const Mac 
   h.channel = b[17];
   h.effective_sf = get(b + 18, 8);
   h.tsf_delta_us = static_cast<int64_t>(get(b + 26, 8));
+  std::copy(b + 34, b + 58, h.ctx.begin());
   return h;
 }
 

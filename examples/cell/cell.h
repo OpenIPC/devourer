@@ -186,7 +186,7 @@ inline std::optional<RachFrame> parse_rach_frame(const uint8_t *p, size_t len, u
  * the DU accepts a UE's feedback only with a gen_sf no older than the last it
  * accepted (main.cpp); a replayed DL frame is a HARQ duplicate. */
 using CellMac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
-constexpr uint8_t kCellProtoVersion = 2;
+constexpr uint8_t kCellProtoVersion = 3; /* v3: the UE IE's area tag (src/cell/Keys.h) */
 constexpr size_t kCellTagLen = 8;
 
 namespace detail {
@@ -216,9 +216,13 @@ inline bool cell_tag_ok(const CellMac &mac, char label, uint16_t cell, const uin
 }  // namespace detail
 
 /* UE IE body after the OUI: 'C' 'U' ver ue(2) epoch(4) base(4) bitmap(4)
- * gen_sf(4, low 32 bits) snr(1) snr_gen(1) | tag(8). */
+ * gen_sf(4, low 32 bits) snr(1) snr_gen(1) | tag(8) | area tag(8).
+ * The tag (label 'U') is the serving cell's key: its DU acts on the body.
+ * The area tag (label 'V', the area key, src/cell/Keys.h) is what ANOTHER
+ * cell's DU checks before it counts the UE as heard or forwards it for DAPS;
+ * with one shared key both are that key. */
 constexpr size_t kUeBodyLen = 2 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 1;
-constexpr uint8_t kUeIeLen = static_cast<uint8_t>(3 + kUeBodyLen + kCellTagLen);
+constexpr uint8_t kUeIeLen = static_cast<uint8_t>(3 + kUeBodyLen + 2 * kCellTagLen);
 
 // The UE uplink beacon: header + the 'C' 'U' vendor IE above. dl_snr_half_db
 // is the mean DL SNR (0.5 dB units, 0 = none) and snr_gen counts SNR
@@ -228,7 +232,7 @@ inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int inter
                                             uint32_t epoch,
                                             devourer::cell::HarqFeedback fb = {},
                                             uint8_t dl_snr_half_db = 0, uint8_t snr_gen = 0,
-                                            const CellMac &mac = {}) {
+                                            const CellMac &mac = {}, const CellMac &area = {}) {
   uint8_t sa[6];
   cell_mac(sa, cell, ue);
   auto f = detail::beacon_head(sa, interval_tu);
@@ -240,12 +244,14 @@ inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int inter
   detail::put(b, fb.gen_sf & 0xFFFFFFFFull, 4);
   b.push_back(dl_snr_half_db);
   b.push_back(snr_gen);
-  uint8_t t[kCellTagLen];
+  uint8_t t[kCellTagLen], at[kCellTagLen];
   detail::cell_tag(mac, 'U', cell, b.data(), b.size(), t);
+  detail::cell_tag(area, 'V', cell, b.data(), b.size(), at);
   f.insert(f.end(), {221, kUeIeLen, devourer::cell::kGrantOui[0], devourer::cell::kGrantOui[1],
                      devourer::cell::kGrantOui[2]});
   f.insert(f.end(), b.begin(), b.end());
   f.insert(f.end(), t, t + kCellTagLen);
+  f.insert(f.end(), at, at + kCellTagLen);
   return f;
 }
 
@@ -258,9 +264,11 @@ struct UeBeacon {
 };
 // Parse a UE uplink beacon of `cell` (MPDU, radiotap stripped): nullopt for
 // another cell, another protocol version, an SA/body mismatch, or (keyed
-// cell) a tag that does not verify.
+// cell) a tag that does not verify. `area` set: check the AREA tag instead
+// of the cell's (another cell's DU: presence and DAPS, never the body's
+// meaning for that cell).
 inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uint16_t cell,
-                                               const CellMac &mac = {}) {
+                                               const CellMac &mac = {}, bool area = false) {
   if (p == nullptr || len < 36 || p[0] != 0x80)
     return std::nullopt;
   const int st = cell_station(p + 10, cell);
@@ -280,7 +288,8 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
       const uint64_t ue = detail::get(b + 3, 2);  // 16 bits on air
       if (ue != static_cast<uint64_t>(st))
         return std::nullopt;  // SA and body disagree
-      if (!detail::cell_tag_ok(mac, 'U', cell, b, kUeBodyLen, b + kUeBodyLen))
+      if (!detail::cell_tag_ok(mac, area ? 'V' : 'U', cell, b, kUeBodyLen,
+                               b + kUeBodyLen + (area ? kCellTagLen : 0)))
         return std::nullopt;
       UeBeacon r;
       r.ue = static_cast<uint8_t>(ue);

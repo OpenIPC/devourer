@@ -17,6 +17,7 @@
 #include "cell/GrantMap.h"
 #include "cell/Handover.h"
 #include "cell/HoCommand.h"
+#include "cell/Keys.h"
 #include "cell/MeasGap.h"
 #include "cell/PhasePlan.h"
 #include "cell/SlotGrid.h"
@@ -324,7 +325,7 @@ int main() {
     mpdu[0] = 0x80;
     for (const HoIe &x : {a, newer, someone_else}) {
       auto ie = encode_ho_ie(x, k);
-      CHECK(ie.size() == 2 + 3 + 34 + 2 + kHoTagLen);
+      CHECK(ie.size() == 2 + 3 + 58 + 2 + kHoTagLen);
       mpdu.insert(mpdu.end(), ie.begin(), ie.end());
     }
     auto got = find_ho_ie(mpdu.data(), mpdu.size(), 1, 1, k);
@@ -621,6 +622,67 @@ int main() {
     CHECK(rx.offer(n2) && rx.current(115)->epoch == 3); /* and runs on normally */
     CHECK(!rx.offer_after_restart(m, 115));            /* never back to a higher epoch this way */
     CHECK(!rx.offer_after_restart(n2, 115));           /* the live map repeated: no restart */
+  }
+
+  /* --- The per-cell security context (Keys.h). --- */
+  {
+    const Mac master = fake_mac(0xA5);
+    const auto ka = area_key(master), k1 = cell_key(master, 1), k2 = cell_key(master, 2);
+    const auto u11 = ue_key(master, 1, 1), u12 = ue_key(master, 1, 2);
+    CHECK(ka && k1 && k2 && u11 && u12);
+    CHECK(k1->size() == 40 && *k1 != *k2 && *k1 != *ka && *u11 != *u12 && *u11 != *k1);
+    CHECK(*cell_key(master, 1) == *k1);                           /* deterministic */
+    CHECK(*cell_key(fake_mac(0xA6), 1) != *k1);                   /* another master */
+    const auto b2 = key_from_hex(*k2);
+    CHECK(b2 && key_to_hex(*b2) == *k2);                          /* hex round trip */
+    CHECK(!key_from_hex("zz") && !key_from_hex(std::string(40, 'g')));
+    /* The context: K_2 for UE (1,1), only that UE's key unwraps it. */
+    const Mac uk = fake_mac(0x11), other_ue = fake_mac(0x12);
+    const auto ctx = wrap_context(uk, 77, 2, *b2);
+    CHECK(ctx && !std::equal(b2->begin(), b2->end(), ctx->begin()));
+    CHECK(unwrap_context(uk, 77, 2, *ctx) == b2);
+    /* The key check refuses what is not this UE's for this handover. */
+    CHECK(!unwrap_context(other_ue, 77, 2, *ctx));                /* another UE */
+    CHECK(!unwrap_context(uk, 78, 2, *ctx));                      /* another handover id */
+    CHECK(!unwrap_context(uk, 77, 3, *ctx));                      /* another target */
+    auto bent = *ctx;
+    bent[3] ^= 1;
+    CHECK(!unwrap_context(uk, 77, 2, bent));                      /* a tampered key byte */
+    bent = *ctx;
+    bent[22] ^= 1;
+    CHECK(!unwrap_context(uk, 77, 2, bent));                      /* a tampered check */
+    CHECK(!unwrap_context(uk, 77, 2, Context{}));                 /* none */
+    CHECK(*wrap_context(uk, 78, 2, *b2) != *ctx);                 /* the pad is per id */
+    CHECK(!wrap_context(Mac{}, 77, 2, *b2));                      /* no UE key: no context */
+    /* It rides the handover command (F1 v9) and the IE (v3) intact. */
+    HoCommand cmd;
+    cmd.id = 77;
+    cmd.ue = 1;
+    cmd.source = 1;
+    cmd.target = 2;
+    cmd.target_ue = 2;
+    cmd.target_pos = 1;
+    cmd.ctx = *ctx;
+    const Mac f1k = fake_mac(0xF1);
+    const auto w = f1::encode_handover(2, cmd, f1k);
+    auto dc = f1::decode_handover(w.data(), w.size(), f1k);
+    CHECK(dc && dc->second == cmd);
+    HoIe ie;
+    ie.id = 77;
+    ie.cell = 1;
+    ie.ue = 1;
+    ie.target = 2;
+    ie.ctx = cmd.ctx;
+    std::vector<uint8_t> bcn(36, 0);
+    bcn[0] = 0x80;
+    const Mac ck1 = fake_mac(0xC1);
+    const auto hie = encode_ho_ie(ie, ck1);
+    bcn.insert(bcn.end(), hie.begin(), hie.end());
+    auto got = find_ho_ie(bcn.data(), bcn.size(), 1, 1, ck1);
+    CHECK(got && got->ctx == *ctx);
+    auto tamper = bcn;
+    tamper[36 + 5 + 34 + 3] ^= 1; /* a context byte: the CRC and the tag cover it */
+    CHECK(!find_ho_ie(tamper.data(), tamper.size(), 1, 1, ck1));
   }
 
   if (failures == 0)

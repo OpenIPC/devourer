@@ -19,6 +19,10 @@
 // Env (defaults in brackets):
 //   RAN_PORT [47254]          UDP port the DUs report to
 //   RAN_F1_KEY                the F1 key (HMAC-SHA1; = the DUs' CELL_F1_KEY)
+//   RAN_MASTER_KEY            per-cell keys (src/cell/Keys.h): the master. Each
+//                             handover command then carries the target cell's
+//                             key wrapped for the UE's home key (ran.ho_cmd
+//                             ctx 1); unset = one shared cell key (ctx 0).
 //   RAN_DUS                   expected DU (cell) ids, comma-separated
 //   RAN_PLAN [1]              1 = coordinate, 0 = identity (baseline)
 //   RAN_EDGE_DBM [-90]        RSSI from which another DU "hears" a UE
@@ -104,6 +108,7 @@
 #include "cell/Coord.h"
 #include "cell/F1.h"
 #include "cell/Handover.h"
+#include "cell/Keys.h"
 #include "cell/PhasePlan.h"
 
 namespace f1 = devourer::cell::f1;
@@ -157,7 +162,7 @@ devourer::cell::Mac hmac_sha1(const std::string &key) {
            len == 20;
   };
 #else
-  fprintf(stderr, "RAN_F1_KEY needs a build with OpenSSL\n");
+  fprintf(stderr, "an HMAC key (RAN_F1_KEY, RAN_MASTER_KEY) needs a build with OpenSSL\n");
   std::exit(2);
 #endif
 }
@@ -287,6 +292,13 @@ int main() {
     bool src_ok = false, tgt_ok = false, switched = false;
   };
   std::map<std::pair<uint16_t, uint16_t>, HoFlight> flights;
+  /* The per-cell security context (src/cell/Keys.h): with RAN_MASTER_KEY the
+   * CU wraps the target cell's key for the UE in every handover command. A
+   * UE's key is its HOME identity's — where it was provisioned — which
+   * home_of follows across handovers (a target identity -> its home). */
+  const char *master_env = std::getenv("RAN_MASTER_KEY");
+  const auto master = master_env && *master_env ? hmac_sha1(master_env) : devourer::cell::Mac{};
+  std::map<std::pair<uint16_t, uint16_t>, std::pair<uint16_t, uint16_t>> home_of;
   std::map<std::pair<uint16_t, uint16_t>, int64_t> moved_at; /* new key -> switch time (ms) */
   /* Old keys of UEs that handed over: the source keeps reporting their last
    * measurement until it goes stale, which must not trigger again. */
@@ -574,6 +586,7 @@ int main() {
                  * earlier Staged ack may have been lost): cancel, retried. */
                 cancels[fl.cmd.id] = Cancel{fl.cmd};
                 ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
+                home_of.erase({fl.cmd.target, fl.cmd.target_ue});
                 flights.erase(it); /* the A3 fires again later: a fresh command */
               } else if (!was) {
                 emit("{\"ev\":\"ran.ho_ack\",\"id\":" + std::to_string(fl.cmd.id) +
@@ -833,6 +846,20 @@ int main() {
                     sr.net_sf + static_cast<uint64_t>(age_us / sr.period_us) + ho_lead_sf;
                 cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
                                                                    tr.net_off, sr.period_us);
+                const auto hi = home_of.find({cmd.source, cmd.ue});
+                const auto home = hi != home_of.end() ? hi->second : std::make_pair(cmd.source, cmd.ue);
+                bool ctx_ok = false;
+                if (master) {
+                  const auto tk = devourer::cell::cell_key(master, cmd.target);
+                  const auto uk = devourer::cell::ue_key(master, home.first, home.second);
+                  const auto raw = tk ? devourer::cell::key_from_hex(*tk) : std::nullopt;
+                  if (raw && uk)
+                    if (auto cx = devourer::cell::wrap_context(hmac_sha1(*uk), cmd.id, cmd.target, *raw)) {
+                      cmd.ctx = *cx;
+                      ctx_ok = true;
+                    }
+                }
+                home_of[{cmd.target, cmd.target_ue}] = home;
                 flights[key] = HoFlight{cmd};
                 if (forcing) {
                   force_done = true;
@@ -843,9 +870,11 @@ int main() {
                 char b[300];
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
-                         "\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,\"delta_us\":%lld}",
+                         "\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,\"delta_us\":%lld,"
+                         "\"ctx\":%d,\"home\":\"%u:%u\"}",
                          cmd.id, cmd.ue, cmd.source, cmd.target, cmd.target_ue, cmd.target_pos,
-                         (unsigned long long)cmd.effective_net_sf, (long long)cmd.tsf_delta_us);
+                         (unsigned long long)cmd.effective_net_sf, (long long)cmd.tsf_delta_us,
+                         ctx_ok ? 1 : 0, home.first, home.second);
                 emit(b);
               }
             }
@@ -859,6 +888,7 @@ int main() {
         auto sit = dus.find(fl.cmd.source), tit = dus.find(fl.cmd.target);
         if (sit == dus.end() || tit == dus.end()) {
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
+          home_of.erase({fl.cmd.target, fl.cmd.target_ue});
           it = flights.erase(it);
           continue;
         }
@@ -878,6 +908,9 @@ int main() {
           emit(b);
           moved_at[{fl.cmd.target, fl.cmd.target_ue}] = tms;
           retired[{fl.cmd.source, fl.cmd.ue}] = tms;
+          /* The UE left its source identity: another UE may get it later, and
+           * must not inherit this one's home key. */
+          home_of.erase({fl.cmd.source, fl.cmd.ue});
           if (auto h = ho.find({fl.cmd.source, fl.cmd.ue}); h != ho.end()) {
             if (h->second.firing)
               log_clear(fl.cmd.ue, fl.cmd.source, *h->second.firing, "handed_over");
@@ -890,6 +923,7 @@ int main() {
           emit("{\"ev\":\"ran.ho_timeout\",\"id\":" + std::to_string(fl.cmd.id) + "}");
           cancels[fl.cmd.id] = Cancel{fl.cmd}; /* never committed: free the target */
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* and its provisional alias */
+          home_of.erase({fl.cmd.target, fl.cmd.target_ue});
           it = flights.erase(it);
           continue;
         }

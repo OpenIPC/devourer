@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "cell/GrantMap.h"
+#include "cell/Keys.h"
 #include "cell/Rach.h"
 
 namespace devourer::cell {
@@ -78,6 +79,9 @@ struct HoCommand {
   /* The target cell's key wrapped for this UE, with its check (Keys.h
    * wrap_context), opaque to both DUs; all zero = none (one shared key). */
   std::array<uint8_t, 24> ctx{};
+  /* The UE's home identity (Keys.h): the target records it for the id it
+   * gives the UE and reports it on, for the UE's next handover. */
+  HomeId home{};
   bool operator==(const HoCommand &) const = default;
 };
 

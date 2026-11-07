@@ -706,6 +706,12 @@ int run_du(IRadio *dev, const Cfg &c) {
     positions.push_back({static_cast<uint8_t>(*grid->find(SlotKind::Downlink, static_cast<uint16_t>(i))),
                          static_cast<uint8_t>(*grid->find(SlotKind::Uplink, static_cast<uint16_t>(i)))});
   devourer::cell::UeRegistry reg(positions);
+  /* Each UE's home identity (src/cell/Keys.h), recorded at its admission —
+   * static, a RACH joiner's MAC, or the home a handover command carries —
+   * and reported to the CU (F1 Report.homes) for the UE's handover context.
+   * Every admission writes it, so a reused id never keeps another UE's
+   * (f1_mu, after the threads start). */
+  std::map<uint16_t, devourer::cell::HomeId> ue_home;
   const bool rach_on = c.rach_us > 0;
   devourer::cell::RachServer srv(c.cell, reg, rach_mac(c));
   const auto rach_slot = grid->find(SlotKind::Rach, 0);
@@ -728,6 +734,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::array<uint8_t, 6> m{};
     cell_mac(m.data(), c.cell, static_cast<uint8_t>(ue));
     map.grants.push_back(grant_for(*reg.bind(m)));
+    ue_home[ue] = devourer::cell::HomeId{false, c.cell, ue, {}};
   }
   /* A UE's id is its identity; its slot pair (capacity position) is the
    * grant's, which the CU (F1) may move. Positions are 1..capacity. */
@@ -788,7 +795,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       pollfd pf{f1_fd.fd, POLLIN, 0};
       if (poll(&pf, 1, 50) <= 0 || !(pf.revents & POLLIN))
         continue;
-      uint8_t buf[2048];
+      uint8_t buf[f1::kMaxDatagram];
       sockaddr_storage from{};
       socklen_t fl = sizeof from;
       const ssize_t n = recvfrom(f1_fd.fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
@@ -1196,6 +1203,11 @@ int run_du(IRadio *dev, const Cfg &c) {
             std::lock_guard<std::mutex> lk(mu);
             a = srv.on_request(rf->msga, rf->msga_len, static_cast<uint64_t>(pos.superframe));
           }
+          if (a && a->status == devourer::cell::RachStatus::Granted) {
+            /* Its home: the (authenticated) MAC it joined with. */
+            std::lock_guard<std::mutex> lk(f1_mu);
+            ue_home[a->ue] = devourer::cell::HomeId{true, 0, 0, a->mac};
+          }
           char l[240];
           snprintf(l, sizeof l,
                    "{\"ev\":\"cell.rach\",\"sf\":%lld,\"phase_us\":%lld,\"in_slot\":%d,"
@@ -1384,6 +1396,11 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.fixed = layout.fixed;
             r.positions = layout.positions;
             r.ues = f1_view.ues;
+            /* The homes of exactly the UEs this report names, read under the
+             * same lock (one view). */
+            for (const auto &u : r.ues)
+              if (auto h = ue_home.find(u.ue); h != ue_home.end() && r.homes.size() < f1::kMaxUes)
+                r.homes.push_back({u.ue, h->second});
             f1::fill_report_measurements(r, c.cell, meas_tab.snapshot(now_ms()));
             /* The UEs' own measurements (their MR IEs): each entry's age is its
              * sample's plus the report's since; each UE's serving entry first,
@@ -1421,7 +1438,7 @@ int run_du(IRadio *dev, const Cfg &c) {
         pollfd pf{f1_fd.fd, POLLIN, 0};
         if (poll(&pf, 1, 50) <= 0 || !(pf.revents & POLLIN))
           continue;
-        uint8_t buf[2048];
+        uint8_t buf[f1::kMaxDatagram];
         sockaddr_storage from{};
         socklen_t fl = sizeof from;
         const ssize_t n = recvfrom(f1_fd.fd, buf, sizeof buf, 0, reinterpret_cast<sockaddr *>(&from), &fl);
@@ -1542,6 +1559,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                 /* DAPS: the UE's source identity, heard here until the switch
                  * (+ the release window, for its last old-identity beacons). */
                 daps_ids[{cmd.source, cmd.ue}] = static_cast<int64_t>(eff) + ho_release_sf;
+                ue_home[cmd.target_ue] = cmd.home; /* reported on, for its next handover */
               } else {
                 std::lock_guard<std::mutex> lk(f1_mu);
                 ho_in.erase(cmd.target_ue);

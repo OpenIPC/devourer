@@ -529,6 +529,27 @@ to take the target's grant maps.
 - **The CU follows a UE's home** across handovers (`home_of`), so a second
   handover still wraps for the UE's own key.
 
+**A RACH-joined UE's key, and where homes come from.** A joiner has no home
+(cell, UE) identity: its id comes from the join. Its UE key is therefore
+bound to the MAC it joins with (`CELL_JOINER_MAC`, or derived from host and
+radio).
+- **The key:** `K_j = HMAC(master, 'J' mac)`, provisioned out of band like a
+  SIM's (`CELL_UE_KEY`).
+- **Homes are the DUs' record:** a DU records every UE's home when it admits
+  it. A static UE gets its (cell, UE), a RACH joiner the authenticated MAC
+  it joined with, and a handover arrival the home its handover command
+  carries (F1 v10 `HoCommand::home`). The DU reports the homes of exactly the
+  UEs a report names, under the same lock (`Report.homes`).
+- **The CU keeps none of it:** it wraps each context for the home in the
+  *source* DU's current report. A restarted CU, or an id the DU has reused
+  for another UE, cannot select a stale home; every admission writes its
+  own. With no home reported there is no context, never a guessed key.
+- **A false MAC gains nothing:** a UE that joins claiming another's MAC
+  only gets contexts it cannot unwrap.
+- **The datagram bound:** both F1 receive buffers are `kMaxDatagram`
+  (8192). A report at every list bound is 3673 bytes, which the 2048-byte
+  buffers before this could already not hold.
+
 Without `CELL_AREA_KEY` all of this collapses to the one shared key, as
 before.
 
@@ -541,6 +562,21 @@ deriving every role's keys from one master; all pass).
 | a UE holding cell 2's key in cell 1 (a cell-2 insider forging cell 1) | 2 | 0 of 879 maps taken, never heard in slot; cell 2 unaffected |
 | a UE holding another UE's key | 2 | all 7 commands refused (no context), no switch, DU1 kept it (heard 100 %, in slot 99.8 %) |
 | coordination, "heard" from area-tagged UE beacons | 1 | `ran_coord_analyze` pass; both cells' UEs heard by the other DU |
+
+**A joined UE's handover** (testrig `scripts/m6_joinerkeys.sh`).
+UE1 joins cell 1 through the RACH with a fixed joiner MAC, holding that
+MAC's `K_j`, under per-cell keys. It is handed over by the A3 at a −2 dB
+offset. All runs pass.
+
+| case | runs | result |
+|---|---|---|
+| the joiner hands over | 2 | joined as UE 2; the command's context is for its MAC (home `J:02cefeaabb01`); switch, target in slot 99.9 %, `ran.ho_done` |
+| the joiner holds another MAC's key | 2 | every command refused (6–7, no context), no switch; DU1 kept it (heard ≥ 99.9 %, in slot 100 %) |
+| a crossing there and back, the CU killed and restarted between the two handovers | 1 | 1 → 2 → 1; the restarted CU, knowing nothing, wrapped the return for the joiner (home `J:02cefeaabb01`, from DU2's report of the home the first command carried) |
+
+Regression for F1 v10: the static per-cell key set (handover, forge,
+isolate, coordination) and the re-join after a DU restart under per-cell
+keys both pass.
 
 **The M6 suite under per-cell keys** (`M5_MASTER`, 1 run of each; all pass):
 - inter-frequency handover and fallback;
@@ -772,10 +808,6 @@ superframe when there is nothing to serve.
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,
   fading or crowd has been run.
-- **Per-cell context for joined UEs:** a RACH-joined UE has no provisioned
-  UE key, so the CU cannot wrap a context for it. Under per-cell keys it
-  refuses every handover command (`cell.ue.ho_no_context`) and stays in its
-  cell. Provisioning a key at the join, from the RACH exchange, is open.
 - **Area-key exposure:** anyone holding the area key can forge the
   neighbour list and a UE beacon's area tag. That can fake measurement
   provenance and "heard" or DAPS presence, but never a cell's control.

@@ -682,6 +682,41 @@ int main() {
     auto badk = wh;
     badk[badk.size() - 8 - 7] = 2; /* home kind 2: unknown */
     CHECK(!f1::decode_handover(badk.data(), badk.size(), Mac{}));
+    /* Per-UE area keys: A_u from the UE's key, wrapped for one DU. */
+    const auto au = ue_area_key(fake_mac(0x11));
+    CHECK(au && *au != *ue_area_key(fake_mac(0x12)));             /* per UE */
+    const auto raw = key_from_hex(*au);
+    const Mac duk = fake_mac(0xD2);
+    const auto w1 = wrap_area_key(duk, 1, 1, 100, *raw);
+    CHECK(w1 && *w1 != *raw && wrap_area_key(duk, 1, 1, 100, *w1) == raw); /* its own inverse */
+    CHECK(*wrap_area_key(duk, 1, 1, 101, *raw) != *w1);           /* a fresh nonce, a fresh pad */
+    CHECK(wrap_area_key(fake_mac(0xD3), 1, 1, 100, *w1) != raw);  /* another DU's key */
+    f1::AreaKeys ak;
+    ak.du = 2;
+    ak.seq = 5;
+    ak.keys = {{1, 1, 100, *w1}};
+    const auto wak = f1::encode_area_keys(ak, fake_mac(0xF1));
+    CHECK(f1::peek_type(wak.data(), wak.size()) == f1::Type::AreaKeys);
+    auto dak = f1::decode_area_keys(wak.data(), wak.size(), fake_mac(0xF1));
+    CHECK(dak && *dak == ak);
+    CHECK(!f1::decode_area_keys(wak.data(), wak.size(), fake_mac(0xF2)));
+    ak.keys.resize(f1::kMaxAreaKeys);
+    const auto wfull = f1::encode_area_keys(ak, fake_mac(0xF1));
+    CHECK(!wfull.empty() && wfull.size() <= f1::kMaxDatagram);
+    ak.keys.resize(f1::kMaxAreaKeys + 1);
+    CHECK(f1::encode_area_keys(ak, fake_mac(0xF1)).empty());
+    /* The report flags the DU's per-cell keys (F1 v11): a CU without the
+     * master refuses such a DU. Unknown flag bits are refused. */
+    f1::Report pf;
+    pf.du = 1;
+    pf.coordinated = true;
+    pf.per_cell_keys = true;
+    const auto wpf = f1::encode_report(pf, Mac{});
+    auto dpf = f1::decode_report(wpf.data(), wpf.size(), Mac{});
+    CHECK(dpf && dpf->per_cell_keys && dpf->coordinated);
+    auto bpf = wpf;
+    bpf[4 + 2 + 1 + 1] = 4; /* du(2) tier(1) sync_state(1), then the flags */
+    CHECK(!f1::decode_report(bpf.data(), bpf.size(), Mac{}));
     /* A report at EVERY list bound still fits the F1 datagram both sides
      * receive into. */
     f1::Report big;

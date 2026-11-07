@@ -59,9 +59,12 @@
 //                             With per-cell keys: THIS cell's key (K_c,
 //                             src/cell/Keys.h; a UE: its serving cell's).
 //   CELL_AREA_KEY             per-cell keys (Keys.h): the area key K_A, which
-//                             tags what another cell checks (the neighbour
-//                             list, the UE beacon's area tag). Unset = one
-//                             shared key (CELL_PSK) for everything.
+//                             tags the neighbour list (what a UE checks of
+//                             another cell). A UE beacon's area tag is then
+//                             the UE's OWN area key (from CELL_UE_KEY), which
+//                             a neighbour DU checks with the key the CU sends
+//                             it (F1 AreaKeys). Unset = one shared key
+//                             (CELL_PSK) for everything.
 //   CELL_UE_KEY               UE, per-cell keys: its own key K_(c,u) (home
 //                             cell and id), which unwraps the target cell's
 //                             key a handover carries. Without it, or for a
@@ -539,6 +542,8 @@ int run_du(IRadio *dev, const Cfg &c) {
   }
   const CellMac auth = cell_auth(c);
   const CellMac area = area_auth(c);
+  const char *area_env_du = std::getenv("CELL_AREA_KEY");
+  const bool per_cell_keys = area_env_du && *area_env_du;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
   /* M4 DU service mode (see the header): the PHC, the discipline loop, the
@@ -1123,6 +1128,12 @@ int run_du(IRadio *dev, const Cfg &c) {
   uint32_t nl_gen = 1; /* bumped whenever the list changes (UEs refuse older) */
   bool have_nb_seq = false;
   uint64_t last_nb_seq = 0;
+  /* Per-cell keys: the other cells' UEs' own area keys (Keys.h A_u, F1
+   * AreaKeys from the CU, unwrapped with this cell's key), by (cell, UE);
+   * a heard UE beacon counts only with its own (f1_mu). */
+  std::map<std::pair<uint16_t, uint16_t>, CellMac> ue_area_tab;
+  bool have_ak_seq = false;
+  uint64_t last_ak_seq = 0;
   struct UeReport {
     std::vector<devourer::cell::MeasEntryUe> m;
     int64_t at_ms = 0;
@@ -1230,8 +1241,17 @@ int run_du(IRadio *dev, const Cfg &c) {
         if (oc != c.cell && ou >= 1) {
           /* Only an authentic one counts (its AREA tag: this DU does not hold
            * the other cell's key) — as heard, and for DAPS forwarding of a
-           * handing-over UE under its other identity. */
-          if (!parse_ue_beacon(p.Data.data(), p.Data.size(), oc, area, true))
+           * handing-over UE under its other identity. Per-cell keys: with
+           * THAT UE's own area key (from the CU), none = not counted. */
+          CellMac amac = area;
+          if (per_cell_keys) {
+            std::lock_guard<std::mutex> lk(f1_mu);
+            auto it = ue_area_tab.find({oc, ou});
+            amac = it != ue_area_tab.end() ? it->second : CellMac{};
+            if (!amac)
+              return;
+          }
+          if (!parse_ue_beacon(p.Data.data(), p.Data.size(), oc, amac, true))
             return;
           bool fwd = false;
           {
@@ -1396,6 +1416,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.fixed = layout.fixed;
             r.positions = layout.positions;
             r.ues = f1_view.ues;
+            r.per_cell_keys = per_cell_keys;
             /* The homes of exactly the UEs this report names, read under the
              * same lock (one view). */
             for (const auto &u : r.ues)
@@ -1446,6 +1467,22 @@ int run_du(IRadio *dev, const Cfg &c) {
           continue;
         if (!f1_from_cu(from))
           continue;
+        if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::AreaKeys) {
+          auto ak = f1::decode_area_keys(buf, static_cast<size_t>(n), f1_mac);
+          if (!ak || ak->du != c.cell || !auth)
+            continue;
+          std::map<std::pair<uint16_t, uint16_t>, CellMac> t;
+          for (const auto &e : ak->keys)
+            if (auto k = devourer::cell::wrap_area_key(auth, e.cell, e.ue, e.nonce, e.wrapped))
+              t[{e.cell, e.ue}] = hmac_sha1(devourer::cell::key_to_hex(*k));
+          std::lock_guard<std::mutex> lk(f1_mu);
+          if (have_ak_seq && ak->seq <= last_ak_seq)
+            continue; /* a replay or reordering */
+          have_ak_seq = true;
+          last_ak_seq = ak->seq;
+          ue_area_tab = std::move(t);
+          continue;
+        }
         if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::Neighbours) {
           auto nb = f1::decode_neighbours(buf, static_cast<size_t>(n), f1_mac);
           if (!nb || nb->du != c.cell)
@@ -2368,8 +2405,20 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * handover carries. */
   const char *uk = std::getenv("CELL_UE_KEY");
   const CellMac ue_key_mac = uk && *uk ? hmac_sha1(uk) : CellMac{};
-  if (per_cell_keys && !ue_key_mac)
-    fprintf(stderr, "CELL_AREA_KEY without CELL_UE_KEY: this UE cannot hand over\n");
+  /* Its own area key (Keys.h A_u = HMAC(K_u, 'V')): its beacon's area tag,
+   * which only it (and, through the CU, the neighbour DUs) can produce. */
+  CellMac ue_area = area;
+  if (per_cell_keys && ue_key_mac)
+    if (auto a = devourer::cell::ue_area_key(ue_key_mac))
+      ue_area = hmac_sha1(*a);
+  if (per_cell_keys && !ue_key_mac) {
+    /* Its beacon's area tag is its own key (Keys.h A_u): without it no other
+     * cell's DU would ever count it as heard (or forward it for DAPS), and it
+     * could not hand over. */
+    fprintf(stderr, "CELL_AREA_KEY needs CELL_UE_KEY: without it no other cell hears this UE "
+                    "(its area tag) and it cannot hand over\n");
+    return 2;
+  }
   std::mutex mu;  // guards sync, wrap, rxr
   devourer::TsfSync sync;
   /* A step of the DU's TSF re-anchors the fit instead of reading as skew:
@@ -3092,7 +3141,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
                                fb.base != last_fb.base || fb.bitmap != last_fb.bitmap ||
                                snr_gen != last_snr_gen;
     if (content_moved) {
-      auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, area);
+      auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, ue_area);
       {
         std::vector<devourer::cell::MeasEntryUe> mr;
         {

@@ -28,11 +28,15 @@
  *   K_c   everything that controls cell c's UEs: the grant map, the handover
  *         IE, the DL body, the UE beacon's own tag (HARQ feedback), the MR IE,
  *         the RACH. A compromised DU or UE of one cell forges that cell only.
- *   K_A   what another cell must be able to check: the neighbour list (the
- *         provenance of a neighbour beacon a UE measures) and the UE beacon's
- *         second (area) tag, which neighbour DUs check before counting a UE as
- *         heard or forwarding it for DAPS. Anyone in the area can forge those
- *         two — measurements and DAPS presence, never control.
+ *   K_A   what a UE must check of ANOTHER cell: the neighbour list (the
+ *         provenance of a neighbour beacon it measures). Anyone in the area
+ *         can forge that — measurement provenance, never control.
+ *   A_u   the UE's own area key, hex(HMAC(K_u, 'V')): its beacon's second
+ *         (area) tag, which neighbour DUs check before counting it as heard
+ *         or forwarding it for DAPS. The CU derives every A_u from the homes
+ *         the DUs report and sends each DU the other cells' UEs' (F1
+ *         AreaKeys), each wrapped under that DU's cell key with a fresh
+ *         nonce: no UE can forge another UE's area tag.
  *
  * The handover context. The UE needs the target cell's key before it switches
  * (to take the target's grant maps; after the switch, for everything). The CU
@@ -151,6 +155,29 @@ inline std::optional<std::string> joiner_key(const Mac &master, const std::array
 
 inline std::optional<std::string> home_key(const Mac &master, const HomeId &h) {
   return h.joiner ? joiner_key(master, h.mac) : ue_key(master, h.cell, h.ue);
+}
+
+/* A UE's own area key, from its UE key (`ue_mac` = HMAC keyed by it). */
+inline std::optional<std::string> ue_area_key(const Mac &ue_mac) {
+  auto k = key_detail::prf(ue_mac, {'V'});
+  return k ? std::optional<std::string>(key_to_hex(*k)) : std::nullopt;
+}
+/* One UE's area key wrapped for one DU (`du_mac` = HMAC keyed by that DU's
+ * cell key): key XOR HMAC(K_du, 'W' cell(2) ue(2) nonce(8)). The nonce is
+ * fresh per wrap, so the pad never repeats. Its own inverse. */
+inline std::optional<KeyBytes> wrap_area_key(const Mac &du_mac, uint16_t cell, uint16_t ue,
+                                             uint64_t nonce, const KeyBytes &key) {
+  std::vector<uint8_t> i = {'W'};
+  key_detail::le(i, cell, 2);
+  key_detail::le(i, ue, 2);
+  key_detail::le(i, nonce, 8);
+  auto pad = key_detail::prf(du_mac, i);
+  if (!pad)
+    return std::nullopt;
+  KeyBytes out{};
+  for (size_t k = 0; k < out.size(); ++k)
+    out[k] = static_cast<uint8_t>(key[k] ^ (*pad)[k]);
+  return out;
 }
 
 /* The context for one handover: the target's key wrapped for one UE

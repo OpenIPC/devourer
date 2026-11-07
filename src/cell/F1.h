@@ -59,6 +59,7 @@
 
 #include "cell/Coord.h"
 #include "cell/HoCommand.h"
+#include "cell/Keys.h"
 #include "cell/Handover.h"
 #include "cell/MeasGap.h"
 #include "cell/Rach.h"
@@ -84,6 +85,9 @@ constexpr size_t kMaxUes = kMaxUesPerCell;
 constexpr size_t kMaxHeard = 64;
 /* Every UE of a full cell with a full MR (serving + kMaxNeighbours). */
 constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 256 */
+/* Every F1 message fits this (a report at every list bound is 3673 bytes;
+ * the cell_m6 ctest encodes one): the receive buffer on both sides. */
+constexpr size_t kMaxDatagram = 8192;
 
 enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6,
                             Phase = 7 };
@@ -99,13 +103,13 @@ inline const char *ack_status_name(AckStatus s) {
   }
 }
 
-/* A UE this DU admitted through the RACH, and the joiner MAC it joined with:
- * what the CU derives its UE key from (src/cell/Keys.h joiner_key) to wrap a
- * handover's context for it. */
-struct JoinedUe {
+/* A UE this DU serves and its home identity (src/cell/Keys.h HomeId), as
+ * recorded when the DU admitted it: what the CU derives its UE key from to
+ * wrap a handover's context for it. */
+struct UeHome {
   uint16_t ue = 0;
-  std::array<uint8_t, 6> mac{};
-  bool operator==(const JoinedUe &) const = default;
+  HomeId home;
+  bool operator==(const UeHome &) const = default;
 };
 
 struct HeardUe {
@@ -158,7 +162,7 @@ struct Report {
   std::vector<HeardUe> heard;
   std::vector<UeMeas> meas;
   std::vector<UeCellMeas> ue_meas;
-  std::vector<JoinedUe> joined;
+  std::vector<UeHome> homes;
   bool operator==(const Report &) const = default;
 };
 
@@ -208,6 +212,35 @@ struct Rd {
     return v;
   }
 };
+/* A home identity on the wire: kind(1) (0 static, 1 joiner) + 6 bytes (the
+ * static cell(2) ue(2) 0(2), or the joiner MAC). */
+inline void put_home(std::vector<uint8_t> &o, const HomeId &h) {
+  o.push_back(h.joiner ? 1 : 0);
+  if (h.joiner) {
+    o.insert(o.end(), h.mac.begin(), h.mac.end());
+  } else {
+    put(o, h.cell, 2);
+    put(o, h.ue, 2);
+    put(o, 0, 2);
+  }
+}
+inline HomeId get_home(Rd &r) {
+  HomeId h;
+  const uint64_t kind = r.get(1);
+  if (kind > 1)
+    r.ok = false;
+  h.joiner = kind == 1;
+  if (h.joiner) {
+    for (auto &b : h.mac)
+      b = static_cast<uint8_t>(r.get(1));
+  } else {
+    h.cell = static_cast<uint16_t>(r.get(2));
+    h.ue = static_cast<uint16_t>(r.get(2));
+    if (r.get(2) != 0)
+      r.ok = false;
+  }
+  return h;
+}
 inline bool tag(const Mac &mac, const uint8_t *d, size_t n, uint8_t out[kTagLen]) {
   if (!mac) {
     std::memset(out, 0, kTagLen);
@@ -319,7 +352,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
   using namespace detail;
   if (r.fixed.size() > kMaxFixed || r.positions.size() > kMaxPositions ||
       r.ues.size() > kMaxUes || r.heard.size() > kMaxHeard || r.meas.size() > kMaxUes ||
-      r.ue_meas.size() > kMaxUeMeas || r.joined.size() > kMaxUes)
+      r.ue_meas.size() > kMaxUeMeas || r.homes.size() > kMaxUes)
     return {};
   auto m = head(Type::Report);
   put(m, r.du, 2);
@@ -366,10 +399,10 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
     put(m, static_cast<uint16_t>(q.snr_qdb), 2);
     put(m, q.age_ms, 2);
   }
-  m.push_back(static_cast<uint8_t>(r.joined.size()));
-  for (const JoinedUe &j : r.joined) {
-    put(m, j.ue, 2);
-    m.insert(m.end(), j.mac.begin(), j.mac.end());
+  m.push_back(static_cast<uint8_t>(r.homes.size()));
+  for (const UeHome &h : r.homes) {
+    put(m, h.ue, 2);
+    put_home(m, h.home);
   }
   return seal(std::move(m), mac);
 }
@@ -448,11 +481,10 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
   if (nj > kMaxUes)
     return std::nullopt;
   for (size_t i = 0; i < nj && r.ok; ++i) {
-    JoinedUe j;
-    j.ue = static_cast<uint16_t>(r.get(2));
-    for (auto &b : j.mac)
-      b = static_cast<uint8_t>(r.get(1));
-    x.joined.push_back(j);
+    UeHome h;
+    h.ue = static_cast<uint16_t>(r.get(2));
+    h.home = get_home(r);
+    x.homes.push_back(h);
   }
   if (!r.ok || r.i != r.n)
     return std::nullopt;
@@ -537,6 +569,7 @@ inline std::vector<uint8_t> encode_handover(uint16_t du, const HoCommand &h, con
   put(m, static_cast<uint64_t>(h.tsf_delta_us), 8);
   put(m, h.seq, 8);
   m.insert(m.end(), h.ctx.begin(), h.ctx.end());
+  put_home(m, h.home);
   return seal(std::move(m), mac);
 }
 
@@ -562,6 +595,7 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
   h.seq = r.get(8);
   for (auto &b : h.ctx)
     b = static_cast<uint8_t>(r.get(1));
+  h.home = get_home(r);
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return std::make_pair(du, h);

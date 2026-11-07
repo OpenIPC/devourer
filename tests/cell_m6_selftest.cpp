@@ -18,7 +18,6 @@
 #include "cell/Handover.h"
 #include "cell/HoCommand.h"
 #include "cell/Keys.h"
-#include "cell/UeRegistry.h"
 #include "cell/MeasGap.h"
 #include "cell/PhasePlan.h"
 #include "cell/SlotGrid.h"
@@ -663,24 +662,40 @@ int main() {
     const auto kj = joiner_key(master, jm);
     CHECK(kj && kj->size() == 40 && *kj == *joiner_key(master, jm));
     CHECK(*kj != *joiner_key(master, jm2) && *kj != *u11 && *kj != *k1);
-    /* The DU reports its RACH-joined UEs with their MACs (F1 v10). */
+    /* The DU reports each UE's home (F1 v10): static or a joiner's MAC. */
     f1::Report jr;
     jr.du = 1;
-    jr.joined = {{2, jm}, {3, jm2}};
+    jr.homes = {{1, HomeId{false, 1, 1, {}}}, {2, HomeId{true, 0, 0, jm}}};
     const auto wj = f1::encode_report(jr, fake_mac(0xF1));
     auto dj = f1::decode_report(wj.data(), wj.size(), fake_mac(0xF1));
-    CHECK(dj && dj->joined == jr.joined);
-    jr.joined.resize(f1::kMaxUes + 1);
+    CHECK(dj && dj->homes == jr.homes);
+    CHECK(*home_key(master, jr.homes[0].home) == *u11 && *home_key(master, jr.homes[1].home) == *kj);
+    jr.homes.resize(f1::kMaxUes + 1);
     CHECK(f1::encode_report(jr, fake_mac(0xF1)).empty());
-    /* The registry names who holds each id (a joiner's MAC). */
-    UeRegistry reg({{1, 4}, {2, 5}, {3, 6}});
-    std::array<uint8_t, 6> st{};
-    st[5] = 1;
-    reg.bind(st);
-    reg.admit(jm);
-    const auto own = reg.owners();
-    CHECK(own.size() == 2 && own[0].first == 1 && own[0].second == st && own[1].first == 2 &&
-          own[1].second == jm);
+    /* The handover command carries the home to the target. */
+    HoCommand hc;
+    hc.id = 9;
+    hc.home = HomeId{true, 0, 0, jm};
+    const auto wh = f1::encode_handover(2, hc, fake_mac(0xF1));
+    auto dh = f1::decode_handover(wh.data(), wh.size(), fake_mac(0xF1));
+    CHECK(dh && dh->second.home == hc.home);
+    auto badk = wh;
+    badk[badk.size() - 8 - 7] = 2; /* home kind 2: unknown */
+    CHECK(!f1::decode_handover(badk.data(), badk.size(), Mac{}));
+    /* A report at EVERY list bound still fits the F1 datagram both sides
+     * receive into. */
+    f1::Report big;
+    big.fixed.resize(f1::kMaxFixed);
+    big.positions.resize(f1::kMaxPositions);
+    big.ues.resize(f1::kMaxUes);
+    big.heard.resize(f1::kMaxHeard);
+    big.meas.resize(f1::kMaxUes);
+    big.ue_meas.resize(f1::kMaxUeMeas);
+    big.homes.resize(f1::kMaxUes);
+    const auto wb = f1::encode_report(big, fake_mac(0xF1));
+    CHECK(!wb.empty() && wb.size() <= f1::kMaxDatagram);
+    std::printf("cell_m6: a report at every bound: %zu bytes (datagram %zu)\n", wb.size(), f1::kMaxDatagram);
+
     /* It rides the handover command (F1 v9) and the IE (v3) intact. */
     HoCommand cmd;
     cmd.id = 77;

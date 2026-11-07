@@ -529,19 +529,26 @@ to take the target's grant maps.
 - **The CU follows a UE's home** across handovers (`home_of`), so a second
   handover still wraps for the UE's own key.
 
-**A RACH-joined UE's key.** A joiner has no home (cell, UE) identity: its id
-comes from the join. Its UE key is therefore bound to the MAC it joins with
-(`CELL_JOINER_MAC`, or derived from host and radio).
+**A RACH-joined UE's key, and where homes come from.** A joiner has no home
+(cell, UE) identity: its id comes from the join. Its UE key is therefore
+bound to the MAC it joins with (`CELL_JOINER_MAC`, or derived from host and
+radio).
 - **The key:** `K_j = HMAC(master, 'J' mac)`, provisioned out of band like a
   SIM's (`CELL_UE_KEY`).
-- **The report:** a DU reports the UEs it admitted through the RACH with
-  their joiner MACs (F1 v10 `Report.joined`; a static UE or a handover
-  arrival holds the cell's synthetic MAC and is not listed).
-- **The command:** on a joiner's first handover, the CU takes its home from
-  that report and wraps the context under `K_j` (`ran.ho_cmd` home
-  `J:<mac>`). `home_of` then carries it to the next handover.
+- **Homes are the DUs' record:** a DU records every UE's home when it admits
+  it. A static UE gets its (cell, UE), a RACH joiner the authenticated MAC
+  it joined with, and a handover arrival the home its handover command
+  carries (F1 v10 `HoCommand::home`). The DU reports the homes of exactly the
+  UEs a report names, under the same lock (`Report.homes`).
+- **The CU keeps none of it:** it wraps each context for the home in the
+  *source* DU's current report. A restarted CU, or an id the DU has reused
+  for another UE, cannot select a stale home; every admission writes its
+  own. With no home reported there is no context, never a guessed key.
 - **A false MAC gains nothing:** a UE that joins claiming another's MAC
   only gets contexts it cannot unwrap.
+- **The datagram bound:** both F1 receive buffers are `kMaxDatagram`
+  (8192). A report at every list bound is 3673 bytes, which the 2048-byte
+  buffers before this could already not hold.
 
 Without `CELL_AREA_KEY` all of this collapses to the one shared key, as
 before.
@@ -565,6 +572,7 @@ offset. All runs pass.
 |---|---|---|
 | the joiner hands over | 2 | joined as UE 2; the command's context is for its MAC (home `J:02cefeaabb01`); switch, target in slot 99.9 %, `ran.ho_done` |
 | the joiner holds another MAC's key | 2 | every command refused (6–7, no context), no switch; DU1 kept it (heard ≥ 99.9 %, in slot 100 %) |
+| a crossing there and back, the CU killed and restarted between the two handovers | 1 | 1 → 2 → 1; the restarted CU, knowing nothing, wrapped the return for the joiner (home `J:02cefeaabb01`, from DU2's report of the home the first command carried) |
 
 Regression for F1 v10: the static per-cell key set (handover, forge,
 isolate, coordination) and the re-join after a DU restart under per-cell

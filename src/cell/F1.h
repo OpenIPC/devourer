@@ -143,6 +143,9 @@ struct Report {
   uint8_t tier = 0;       /* SyncTier */
   uint8_t sync_state = 0; /* SyncState */
   bool coordinated = false;
+  /* The DU runs per-cell keys (Keys.h): it needs the CU's AreaKeys, so a CU
+   * without the master key is a configuration error it reports. */
+  bool per_cell_keys = false;
   uint8_t channel = 0;
   int64_t phase_us = 0;
   int64_t period_us = 0;
@@ -358,7 +361,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
   put(m, r.du, 2);
   m.push_back(r.tier);
   m.push_back(r.sync_state);
-  m.push_back(r.coordinated ? 1 : 0);
+  m.push_back(static_cast<uint8_t>((r.coordinated ? 1 : 0) | (r.per_cell_keys ? 2 : 0)));
   m.push_back(r.channel);
   put(m, static_cast<uint64_t>(r.phase_us), 8);
   put(m, static_cast<uint64_t>(r.period_us), 8);
@@ -417,7 +420,13 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
   x.du = static_cast<uint16_t>(r.get(2));
   x.tier = static_cast<uint8_t>(r.get(1));
   x.sync_state = static_cast<uint8_t>(r.get(1));
-  x.coordinated = r.get(1) != 0;
+  {
+    const uint64_t f = r.get(1);
+    if (f > 3)
+      return std::nullopt;
+    x.coordinated = (f & 1) != 0;
+    x.per_cell_keys = (f & 2) != 0;
+  }
   x.channel = static_cast<uint8_t>(r.get(1));
   x.phase_us = static_cast<int64_t>(r.get(8));
   x.period_us = static_cast<int64_t>(r.get(8));

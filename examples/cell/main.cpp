@@ -1416,6 +1416,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.fixed = layout.fixed;
             r.positions = layout.positions;
             r.ues = f1_view.ues;
+            r.per_cell_keys = per_cell_keys;
             /* The homes of exactly the UEs this report names, read under the
              * same lock (one view). */
             for (const auto &u : r.ues)
@@ -2410,8 +2411,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
   if (per_cell_keys && ue_key_mac)
     if (auto a = devourer::cell::ue_area_key(ue_key_mac))
       ue_area = hmac_sha1(*a);
-  if (per_cell_keys && !ue_key_mac)
-    fprintf(stderr, "CELL_AREA_KEY without CELL_UE_KEY: this UE cannot hand over\n");
+  if (per_cell_keys && !ue_key_mac) {
+    /* Its beacon's area tag is its own key (Keys.h A_u): without it no other
+     * cell's DU would ever count it as heard (or forward it for DAPS), and it
+     * could not hand over. */
+    fprintf(stderr, "CELL_AREA_KEY needs CELL_UE_KEY: without it no other cell hears this UE "
+                    "(its area tag) and it cannot hand over\n");
+    return 2;
+  }
   std::mutex mu;  // guards sync, wrap, rxr
   devourer::TsfSync sync;
   /* A step of the DU's TSF re-anchors the fit instead of reading as skew:

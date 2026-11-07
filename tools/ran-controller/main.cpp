@@ -549,6 +549,15 @@ int main() {
               plan_joining(std::chrono::steady_clock::now());
             continue;
           }
+          if (r && r->per_cell_keys && !master) {
+            /* A per-cell DU needs AreaKeys (its heard UEs, DAPS) and handover
+             * contexts: both come from the master key. */
+            fprintf(stderr, "DU %u runs per-cell keys (CELL_AREA_KEY) but RAN_MASTER_KEY is unset\n",
+                    r->du);
+            emit("{\"ev\":\"ran.config_error\",\"du\":" + std::to_string(r->du) +
+                 ",\"why\":\"per-cell DU, no RAN_MASTER_KEY\"}");
+            return 2;
+          }
           if (r) {
             /* Running: no longer joining (its assignment stays). */
             joining.erase(r->du);
@@ -1001,21 +1010,34 @@ int main() {
         f1::AreaKeys ak;
         ak.du = kv.first;
         ak.seq = next_seq();
+        auto add_area_key = [&](f1::AreaKeys &a, const devourer::cell::Mac &dm, uint16_t cell,
+                                uint16_t ue, const devourer::cell::HomeId &home) {
+          if (a.keys.size() >= f1::kMaxAreaKeys || !dm)
+            return;
+          for (const auto &e : a.keys)
+            if (e.cell == cell && e.ue == ue)
+              return; /* once per identity */
+          const auto uk = devourer::cell::home_key(master, home);
+          const auto au = uk ? devourer::cell::ue_area_key(hmac_sha1(*uk)) : std::nullopt;
+          const auto raw = au ? devourer::cell::key_from_hex(*au) : std::nullopt;
+          const uint64_t nonce = area_rng();
+          if (auto w = raw ? devourer::cell::wrap_area_key(dm, cell, ue, nonce, *raw) : std::nullopt)
+            a.keys.push_back({cell, ue, nonce, *w});
+        };
         for (const auto &ov : dus) {
           if (ov.first == kv.first || now - ov.second.at >= std::chrono::seconds(3))
             continue;
-          for (const f1::UeHome &h : ov.second.rep.homes) {
-            if (ak.keys.size() >= f1::kMaxAreaKeys || !du_mac)
-              break;
-            const auto uk = devourer::cell::home_key(master, h.home);
-            const auto au = uk ? devourer::cell::ue_area_key(hmac_sha1(*uk)) : std::nullopt;
-            const auto raw = au ? devourer::cell::key_from_hex(*au) : std::nullopt;
-            const uint64_t nonce = area_rng();
-            const auto w = raw ? devourer::cell::wrap_area_key(du_mac, ov.first, h.ue, nonce, *raw)
-                               : std::nullopt;
-            if (w)
-              ak.keys.push_back({ov.first, h.ue, nonce, *w});
-          }
+          for (const f1::UeHome &h : ov.second.rep.homes)
+            add_area_key(ak, du_mac, ov.first, h.ue, h.home);
+        }
+        /* A handover's TARGET identity as soon as its command exists: the
+         * source hears the UE under it right after the switch (its DAPS
+         * window), before the target's report names it. */
+        for (const auto &f : flights) {
+          const auto &cmd = f.second.cmd;
+          if (cmd.target != kv.first && cmd.target_pos != 0 &&
+              (cmd.home.joiner || cmd.home.cell != 0))
+            add_area_key(ak, du_mac, cmd.target, cmd.target_ue, cmd.home);
         }
         send(kv.second, f1::encode_area_keys(ak, mac));
       }

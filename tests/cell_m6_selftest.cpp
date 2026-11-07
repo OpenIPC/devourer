@@ -705,6 +705,18 @@ int main() {
     CHECK(!wfull.empty() && wfull.size() <= f1::kMaxDatagram);
     ak.keys.resize(f1::kMaxAreaKeys + 1);
     CHECK(f1::encode_area_keys(ak, fake_mac(0xF1)).empty());
+    /* The report flags the DU's per-cell keys (F1 v11): a CU without the
+     * master refuses such a DU. Unknown flag bits are refused. */
+    f1::Report pf;
+    pf.du = 1;
+    pf.coordinated = true;
+    pf.per_cell_keys = true;
+    const auto wpf = f1::encode_report(pf, Mac{});
+    auto dpf = f1::decode_report(wpf.data(), wpf.size(), Mac{});
+    CHECK(dpf && dpf->per_cell_keys && dpf->coordinated);
+    auto bpf = wpf;
+    bpf[4 + 2 + 1 + 1] = 4; /* du(2) tier(1) sync_state(1), then the flags */
+    CHECK(!f1::decode_report(bpf.data(), bpf.size(), Mac{}));
     /* A report at EVERY list bound still fits the F1 datagram both sides
      * receive into. */
     f1::Report big;

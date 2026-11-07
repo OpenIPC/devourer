@@ -837,6 +837,25 @@ int main() {
     auto okb = beacon(2, 9, l2, k2, true, fake_pub(k2), cert2);
     CHECK(fresh.check(okb.data(), okb.size(), 2));
     CHECK(!fresh.check(okb.data(), okb.size(), 5));                  /* not cell 5's list */
+    {
+      /* A genuine signed list FOLLOWED by a forged CRC-valid one (same cell,
+       * same gen): refused — never the forged entries. Before any cache. */
+      NlVerifier v2(fake_pub(ca), verify);
+      auto dup = beacon(2, 11, l1, k2, true, fake_pub(k2), cert2);
+      const auto forged_nl = encode_nl_ie(2, 11, l2, Mac{});
+      dup.insert(dup.end(), forged_nl.begin(), forged_nl.end());
+      CHECK(!v2.check(dup.data(), dup.size(), 2));
+      /* ... and after the genuine one is cached. */
+      auto alone = beacon(2, 11, l1, k2, true, fake_pub(k2), cert2);
+      CHECK(v2.check(alone.data(), alone.size(), 2));
+      CHECK(!v2.check(dup.data(), dup.size(), 2));
+      /* The forged one first, the genuine one second: refused too. */
+      std::vector<uint8_t> rev(36, 0);
+      rev[0] = 0x80;
+      rev.insert(rev.end(), forged_nl.begin(), forged_nl.end());
+      rev.insert(rev.end(), alone.begin() + 36, alone.end());
+      CHECK(!v2.check(rev.data(), rev.size(), 2));
+    }
   }
 
   if (failures == 0)

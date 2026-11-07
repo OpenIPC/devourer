@@ -290,21 +290,28 @@ inline std::vector<uint8_t> plain_ie(const std::vector<uint8_t> &body) {
   ie.insert(ie.end(), body.begin(), body.end());
   return ie;
 }
-/* The raw bytes (from the 221) of cell `cell`'s NL IE in a beacon. */
+/* The raw bytes (from the 221) of cell `cell`'s NL IE in a beacon — only
+ * when the beacon carries exactly ONE for that cell: with two, which one the
+ * signature covers and which one would be parsed could differ (a genuine
+ * signed list followed by a forged one). */
 inline std::optional<std::vector<uint8_t>> raw_nl_ie(const uint8_t *mpdu, size_t len, uint16_t cell) {
   if (mpdu == nullptr || len < 36 || mpdu[0] != 0x80)
     return std::nullopt;
+  std::optional<std::vector<uint8_t>> one;
   for (size_t off = 36; off + 2 <= len;) {
     const size_t l = mpdu[off + 1];
     if (off + 2 + l > len)
       break;
     const uint8_t *v = mpdu + off + 2;
-    if (mpdu[off] == 221 && l > 10 && v[0] == kGrantOui[0] && v[1] == kGrantOui[1] &&
-        v[2] == kGrantOui[2] && v[3] == 'N' && v[4] == 'L' && get(v + 6, 2) == cell)
-      return std::vector<uint8_t>(mpdu + off, mpdu + off + 2 + l);
+    if (mpdu[off] == 221 && l > 7 && v[0] == kGrantOui[0] && v[1] == kGrantOui[1] &&
+        v[2] == kGrantOui[2] && v[3] == 'N' && v[4] == 'L' && get(v + 6, 2) == cell) {
+      if (one)
+        return std::nullopt; /* more than one list for this cell */
+      one = std::vector<uint8_t>(mpdu + off, mpdu + off + 2 + l);
+    }
     off += 2 + l;
   }
-  return std::nullopt;
+  return one;
 }
 } /* namespace mg_detail */
 
@@ -343,10 +350,14 @@ public:
    * cell's certified key (or is exactly the list last verified for it). */
   std::optional<NlIe> check(const uint8_t *mpdu, size_t len, uint16_t cell) {
     using namespace mg_detail;
-    auto raw = raw_nl_ie(mpdu, len, cell);
+    auto raw = raw_nl_ie(mpdu, len, cell); /* the one list: what is verified IS what is parsed */
     if (!raw)
       return std::nullopt;
-    auto nl = find_nl_ie(mpdu, len, cell, Mac{}); /* structure (the area tag is not the proof) */
+    /* Parse exactly those bytes (structure; the area tag is not the proof). */
+    std::vector<uint8_t> only(36, 0);
+    only[0] = 0x80;
+    only.insert(only.end(), raw->begin(), raw->end());
+    auto nl = find_nl_ie(only.data(), only.size(), cell, Mac{});
     if (!nl)
       return std::nullopt;
     if (auto it = ok_.find(cell); it != ok_.end() && it->second == *raw)

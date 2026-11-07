@@ -638,6 +638,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
   }
   std::vector<uint8_t> nl_signed_for, nl_sig_ie; /* the last NL signed, and its NS IE */
+  bool nl_sign_failed = false;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
   /* M4 DU service mode (see the header): the PHC, the discipline loop, the
@@ -2286,7 +2287,12 @@ int run_du(IRadio *dev, const Cfg &c) {
       if (nl_sign && !nl.empty()) { /* signed once per list, aired with it */
         if (nl != nl_signed_for) {
           nl_sig_ie = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, nl, nl_sign);
-          nl_signed_for = nl;
+          if (!nl_sig_ie.empty()) {
+            nl_signed_for = nl;
+          } else if (!nl_sign_failed) { /* retried next beacon; logged once */
+            nl_sign_failed = true;
+            emit("{\"ev\":\"cell.nl.sign_fail\"}");
+          }
         }
         ho_ies.insert(ho_ies.end(), nl_sig_ie.begin(), nl_sig_ie.end());
         ho_ies.insert(ho_ies.end(), nl_cert_ie.begin(), nl_cert_ie.end());

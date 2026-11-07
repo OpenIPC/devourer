@@ -506,8 +506,9 @@ holds what):
 - **The cell key** `K_c` tags everything that controls cell c's UEs: the
   grant map, the handover IE, the DL body, the UE beacon's own tag, the MR
   and the RACH. A compromised DU or UE of one cell can forge that cell only.
-- **The area key** `K_A` tags what a UE must check of *another* cell: the
-  neighbour list, the provenance of a measured neighbour beacon.
+- **The area key** `K_A` tags the neighbour list, the provenance of a
+  measured neighbour beacon. With signed neighbour lists (below) a UE no
+  longer takes it as proof.
 - **The UE's own area key** `A_u = HMAC(K_u, 'V')` tags the second, area
   tag on its beacon (v3). A neighbour DU checks that tag before it counts
   the UE as heard or forwards it for DAPS; before, it took "heard" from any
@@ -518,6 +519,12 @@ holds what):
     because F1 is authenticated but not encrypted.
   - **Strict:** under per-cell keys a heard UE counts only with its own
     key. One the DU has no key for is not counted.
+  - **The consequence of a wrong UE key:** such a UE is invisible to every
+    other DU, so coordination cannot keep another cell's UE off its slot.
+    On the rig, a UE holding another UE's key, on one channel with a
+    handover in flight, lost about 45 % of its uplinks to collisions with
+    cell 2's UE. A UE that cannot prove who it is gets no protection that
+    rests on its presence elsewhere.
 - **The UE key** `K_(c,u)` belongs to the UE's home identity.
 
 **The handover context.** The UE needs the target's key before the switch,
@@ -569,6 +576,44 @@ deriving every role's keys from one master; all pass).
 | a UE holding cell 2's key in cell 1 (a cell-2 insider forging cell 1) | 2 | 0 of 879 maps taken, never heard in slot; cell 2 unaffected |
 | a UE holding another UE's key | 2 | all 7 commands refused (no context), no switch, DU1 kept it (heard 100 %, in slot 99.8 %) |
 | coordination, "heard" from area-tagged UE beacons | 1 | `ran_coord_analyze` pass; both cells' UEs heard by the other DU |
+
+**Signed neighbour lists, per neighbour DU.** An HMAC tag a UE can check is
+one it could forge: with the area key, any UE could fake any cell's
+neighbour list, and with it which beacons count as that cell's. So each DU
+also signs its list with its own Ed25519 key (`src/cell/MeasGap.h`).
+- **What a DU airs:** its NL, an NS IE (the signature over the exact NL IE
+  bytes, 64 B) and an NC IE (its public key with the area CA's signature
+  over it: a certificate, 96 B). They ride every beacon; the budget check at
+  start counts them.
+- **What a UE holds:** only the CA's *public* key (`CELL_CA_PUB`). It
+  checks CA → cell key → NL (`NlVerifier`) and can forge nothing.
+- **Caching:** the UE verifies a certificate once per key and a list once per
+  content, then caches the exact verified bytes per cell. A beacon repeating
+  them costs a byte compare.
+- **Provisioning:** the DU signing seeds and the CA seed derive from the
+  master (`Keys.h`, two HMAC-SHA1 outputs to 32 bytes). The rig's Python
+  provisioning (testrig `scripts/cell_keys.py`) matches the C++ derivation
+  and OpenSSL's Ed25519 byte for byte.
+- **The residual** is the one any provenance has: a genuine beacon replayed.
+
+The rig result (testrig `scripts/m6_nlsign.sh`, per-cell keys and
+signing):
+| case | runs | result |
+|---|---|---|
+| both DUs certified | 2 | each UE reports the other cell in every measurement report (865–869 each); coordination passes |
+| DU2 holds the area key and every cell key but signs with a key the CA never certified | 2 | no UE ever counts a beacon of cell 2, not even its own UE (0 %); DU2 still serves that UE through its cell key, in slot 99.8 % |
+
+With signing on, the per-cell suite passes:
+- measurement-gap handover (the gap targets come from the UE's signed
+  serving list);
+- the emulated crossing;
+- DAPS;
+- phase planning;
+- the per-cell key set;
+- joiner keys;
+- per-UE area credentials.
+
+A shared-key handover passes too.
 
 **Per-UE area credentials** (testrig `scripts/m6_ueareakeys.sh`).
 Two co-channel cells under per-cell keys; all runs pass.
@@ -828,12 +873,10 @@ superframe when there is nothing to serve.
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,
   fading or crowd has been run.
-- **Area-key exposure, the neighbour list:** anyone holding the area key
-  (every UE does, to check other cells' beacons) can forge a neighbour
-  list, and with it the provenance of a neighbour beacon a UE measures.
-  That is measurement provenance only, never control, and no longer heard
-  or DAPS presence: those are per-UE. A UE checking a neighbour DU's own
-  key would need every neighbour's key, which is open.
+- **Unsigned neighbour lists:** without the signing material
+  (`CELL_NL_SIGN_KEY`, `CELL_NL_CERT`, `CELL_CA_PUB`), an area-key holder
+  can still forge a neighbour list, which is measurement provenance only.
+  With it, the residual is a genuine beacon replayed.
 - **Keyed rig runs only from the grant-map authentication on:** the
   handover, DAPS, inter-frequency, measurement-gap, phase-planning and
   clock-fit rig results above were run without `CELL_PSK`, an

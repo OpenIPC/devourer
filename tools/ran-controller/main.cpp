@@ -162,7 +162,7 @@ devourer::cell::Mac hmac_sha1(const std::string &key) {
            len == 20;
   };
 #else
-  fprintf(stderr, "RAN_F1_KEY needs a build with OpenSSL\n");
+  fprintf(stderr, "an HMAC key (RAN_F1_KEY, RAN_MASTER_KEY) needs a build with OpenSSL\n");
   std::exit(2);
 #endif
 }
@@ -908,6 +908,9 @@ int main() {
           emit(b);
           moved_at[{fl.cmd.target, fl.cmd.target_ue}] = tms;
           retired[{fl.cmd.source, fl.cmd.ue}] = tms;
+          /* The UE left its source identity: another UE may get it later, and
+           * must not inherit this one's home key. */
+          home_of.erase({fl.cmd.source, fl.cmd.ue});
           if (auto h = ho.find({fl.cmd.source, fl.cmd.ue}); h != ho.end()) {
             if (h->second.firing)
               log_clear(fl.cmd.ue, fl.cmd.source, *h->second.firing, "handed_over");

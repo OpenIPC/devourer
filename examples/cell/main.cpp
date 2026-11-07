@@ -377,6 +377,13 @@ CellMac area_auth(const Cfg &c) {
 devourer::cell::Mac rach_mac(const Cfg &c) { return cell_auth(c); }
 bool auth_ok(const Cfg &c) {
 #if !defined(DEVOURER_CELL_OPENSSL)
+  /* Without OpenSSL a key would become an EMPTY authenticator — silently
+   * unauthenticated: refused, for every key. */
+  for (const char *k : {"CELL_AREA_KEY", "CELL_UE_KEY"})
+    if (const char *v = std::getenv(k); v && *v) {
+      fprintf(stderr, "%s needs a build with OpenSSL\n", k);
+      return false;
+    }
   if (!c.psk.empty()) {
     fprintf(stderr, "CELL_PSK needs a build with OpenSSL\n");
     return false;

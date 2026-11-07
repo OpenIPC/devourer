@@ -91,6 +91,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <random>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -301,6 +302,7 @@ int main() {
    * stale home. No home reported: no context (the UE refuses the command). */
   const char *master_env = std::getenv("RAN_MASTER_KEY");
   const auto master = master_env && *master_env ? hmac_sha1(master_env) : devourer::cell::Mac{};
+  std::mt19937_64 area_rng{std::random_device{}()}; /* AreaKeys wrap nonces */
   auto home_name = [](const devourer::cell::HomeId &h) {
     char b[24];
     if (h.joiner)
@@ -990,6 +992,33 @@ int main() {
             nb.cells.size() < devourer::cell::kMaxNeighbours)
           nb.cells.push_back({ov.first, ov.second.rep.channel, ov.second.rep.phase_us});
       send(kv.second, f1::encode_neighbours(nb, mac));
+      /* Per-cell keys: the other cells' UEs' own area keys (Keys.h A_u, from
+       * the homes their DUs report), each wrapped for this DU under its cell
+       * key with a fresh nonce — what it checks a heard UE beacon with. */
+      if (master) {
+        const auto dk = devourer::cell::cell_key(master, kv.first);
+        const auto du_mac = dk ? hmac_sha1(*dk) : devourer::cell::Mac{};
+        f1::AreaKeys ak;
+        ak.du = kv.first;
+        ak.seq = next_seq();
+        for (const auto &ov : dus) {
+          if (ov.first == kv.first || now - ov.second.at >= std::chrono::seconds(3))
+            continue;
+          for (const f1::UeHome &h : ov.second.rep.homes) {
+            if (ak.keys.size() >= f1::kMaxAreaKeys || !du_mac)
+              break;
+            const auto uk = devourer::cell::home_key(master, h.home);
+            const auto au = uk ? devourer::cell::ue_area_key(hmac_sha1(*uk)) : std::nullopt;
+            const auto raw = au ? devourer::cell::key_from_hex(*au) : std::nullopt;
+            const uint64_t nonce = area_rng();
+            const auto w = raw ? devourer::cell::wrap_area_key(du_mac, ov.first, h.ue, nonce, *raw)
+                               : std::nullopt;
+            if (w)
+              ak.keys.push_back({ov.first, h.ue, nonce, *w});
+          }
+        }
+        send(kv.second, f1::encode_area_keys(ak, mac));
+      }
     }
     /* The keepalive, every round and whatever the planning state: every DU
      * keeps its current schedule (a fresh sequence each send) while one

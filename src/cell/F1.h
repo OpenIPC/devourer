@@ -77,7 +77,7 @@ namespace devourer::cell::f1 {
  * 6: Handover carries the target's channel (inter-frequency). */
 /* 8: Phase (CU -> DU: a joining DU's TBTT phase, src/cell/PhasePlan.h); a
  * Report with phase_us < 0 asks for one. */
-constexpr uint8_t kVersion = 10; /* v10: the joined UEs' MACs (UE keys of joiners) */
+constexpr uint8_t kVersion = 11; /* v11: AreaKeys (per-UE area credentials) */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -90,7 +90,7 @@ constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 25
 constexpr size_t kMaxDatagram = 8192;
 
 enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6,
-                            Phase = 7 };
+                            Phase = 7, AreaKeys = 8 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
 
 inline const char *ack_status_name(AckStatus s) {
@@ -342,7 +342,7 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {
   if (p == nullptr || n < 4 + kTagLen || p[0] != 'F' || p[1] != '1' || p[2] != kVersion)
     return std::nullopt;
-  if (p[3] < 1 || p[3] > 7)
+  if (p[3] < 1 || p[3] > 8)
     return std::nullopt;
   return static_cast<Type>(p[3]);
 }
@@ -655,6 +655,67 @@ struct Neighbours {
   std::vector<NeighbourEntry> cells;
   bool operator==(const Neighbours &) const = default;
 };
+
+/* CU -> DU: the area keys of the OTHER cells' UEs (src/cell/Keys.h A_u),
+ * each wrapped under this DU's cell key with a fresh nonce
+ * (wrap_area_key): what the DU checks a heard UE beacon's area tag with.
+ * Replaces the DU's whole table; `seq` is freshness. */
+struct AreaKeyEntry {
+  uint16_t cell = 0, ue = 0;
+  uint64_t nonce = 0;
+  std::array<uint8_t, 20> wrapped{};
+  bool operator==(const AreaKeyEntry &) const = default;
+};
+constexpr size_t kMaxAreaKeys = kMaxUes * kMaxNeighbours; /* 192 x 32 B: fits kMaxDatagram */
+struct AreaKeys {
+  uint16_t du = 0;
+  uint64_t seq = 0;
+  std::vector<AreaKeyEntry> keys;
+  bool operator==(const AreaKeys &) const = default;
+};
+
+inline std::vector<uint8_t> encode_area_keys(const AreaKeys &a, const Mac &mac) {
+  using namespace detail;
+  if (a.keys.size() > kMaxAreaKeys)
+    return {};
+  auto m = head(Type::AreaKeys);
+  put(m, a.du, 2);
+  put(m, a.seq, 8);
+  put(m, a.keys.size(), 2);
+  for (const AreaKeyEntry &e : a.keys) {
+    put(m, e.cell, 2);
+    put(m, e.ue, 2);
+    put(m, e.nonce, 8);
+    m.insert(m.end(), e.wrapped.begin(), e.wrapped.end());
+  }
+  return seal(std::move(m), mac);
+}
+
+inline std::optional<AreaKeys> decode_area_keys(const uint8_t *p, size_t n, const Mac &mac) {
+  using namespace detail;
+  auto o = open(p, n, Type::AreaKeys, mac);
+  if (!o)
+    return std::nullopt;
+  Rd &r = *o;
+  AreaKeys a;
+  a.du = static_cast<uint16_t>(r.get(2));
+  a.seq = r.get(8);
+  const size_t k = r.get(2);
+  if (k > kMaxAreaKeys)
+    return std::nullopt;
+  for (size_t i = 0; i < k && r.ok; ++i) {
+    AreaKeyEntry e;
+    e.cell = static_cast<uint16_t>(r.get(2));
+    e.ue = static_cast<uint16_t>(r.get(2));
+    e.nonce = r.get(8);
+    for (auto &b : e.wrapped)
+      b = static_cast<uint8_t>(r.get(1));
+    a.keys.push_back(e);
+  }
+  if (!r.ok || r.i != r.n)
+    return std::nullopt;
+  return a;
+}
 
 inline std::vector<uint8_t> encode_neighbours(const Neighbours &n, const Mac &mac) {
   using namespace detail;

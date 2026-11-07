@@ -75,7 +75,7 @@ namespace devourer::cell::f1 {
  * 6: Handover carries the target's channel (inter-frequency). */
 /* 8: Phase (CU -> DU: a joining DU's TBTT phase, src/cell/PhasePlan.h); a
  * Report with phase_us < 0 asks for one. */
-constexpr uint8_t kVersion = 8;
+constexpr uint8_t kVersion = 9; /* v9: the handover's security context */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -510,6 +510,7 @@ inline std::vector<uint8_t> encode_handover(uint16_t du, const HoCommand &h, con
   put(m, h.effective_net_sf, 8);
   put(m, static_cast<uint64_t>(h.tsf_delta_us), 8);
   put(m, h.seq, 8);
+  m.insert(m.end(), h.ctx.begin(), h.ctx.end());
   return seal(std::move(m), mac);
 }
 
@@ -533,6 +534,8 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
   h.effective_net_sf = r.get(8);
   h.tsf_delta_us = static_cast<int64_t>(r.get(8));
   h.seq = r.get(8);
+  for (auto &b : h.ctx)
+    b = static_cast<uint8_t>(r.get(1));
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return std::make_pair(du, h);

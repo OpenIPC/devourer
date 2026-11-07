@@ -56,6 +56,17 @@
 //   CELL_PSK                  the cell key (HMAC-SHA1, 8-byte tags): the HARQ
 //                             feedback IE, the DL body and the RACH; unset = an
 //                             unauthenticated development cell (no RACH).
+//                             With per-cell keys: THIS cell's key (K_c,
+//                             src/cell/Keys.h; a UE: its serving cell's).
+//   CELL_AREA_KEY             per-cell keys (Keys.h): the area key K_A, which
+//                             tags what another cell checks (the neighbour
+//                             list, the UE beacon's area tag). Unset = one
+//                             shared key (CELL_PSK) for everything.
+//   CELL_UE_KEY               UE, per-cell keys: its own key K_(c,u) (home
+//                             cell and id), which unwraps the target cell's
+//                             key a handover carries. Without it, or for a
+//                             context that is not its own, the UE refuses the
+//                             handover (cell.ue.ho_no_context).
 //   CELL_UE=0 (role ue)       a JOINING UE: it gets its id through the RACH
 //   CELL_JOINER_MAC           the joiner's MAC (default: derived from the host
 //                             name + DEVOURER_PCIE_BDF, so a restart re-joins
@@ -193,6 +204,7 @@
 #include "radio_open.h"
 #include "cell/Coord.h"
 #include "cell/F1.h"
+#include "cell/Keys.h"
 #include "cell/Rach.h"
 #include "cell/SyncHealth.h"
 #include "cell/TsfDiscipline.h"
@@ -355,6 +367,13 @@ CellMac hmac_sha1(const std::string &key) {
 #endif
 }
 CellMac cell_auth(const Cfg &c) { return hmac_sha1(c.psk); }
+/* The area key (src/cell/Keys.h): what another cell must be able to check —
+ * the neighbour list and the UE beacon's area tag. CELL_AREA_KEY, else the
+ * cell key (one shared key, as before). */
+CellMac area_auth(const Cfg &c) {
+  const char *a = std::getenv("CELL_AREA_KEY");
+  return a && *a ? hmac_sha1(a) : cell_auth(c);
+}
 devourer::cell::Mac rach_mac(const Cfg &c) { return cell_auth(c); }
 bool auth_ok(const Cfg &c) {
 #if !defined(DEVOURER_CELL_OPENSSL)
@@ -512,6 +531,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     return 2;
   }
   const CellMac auth = cell_auth(c);
+  const CellMac area = area_auth(c);
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
   /* M4 DU service mode (see the header): the PHC, the discipline loop, the
@@ -1189,6 +1209,11 @@ int run_du(IRadio *dev, const Cfg &c) {
         const uint16_t oc = static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]);
         const uint16_t ou = p.Data[15];
         if (oc != c.cell && ou >= 1) {
+          /* Only an authentic one counts (its AREA tag: this DU does not hold
+           * the other cell's key) — as heard, and for DAPS forwarding of a
+           * handing-over UE under its other identity. */
+          if (!parse_ue_beacon(p.Data.data(), p.Data.size(), oc, area, true))
+            return;
           bool fwd = false;
           {
             std::lock_guard<std::mutex> lk(f1_mu);
@@ -1196,10 +1221,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                             static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
             fwd = daps_on && daps_ids.count({oc, ou}) > 0;
           }
-          /* DAPS: a handing-over UE heard under its other identity, and only
-           * an authentic one (its tag verifies with the network key; with
-           * per-cell keys this needs the other cell's context pre-staged). */
-          if (fwd && parse_ue_beacon(p.Data.data(), p.Data.size(), oc, auth))
+          if (fwd)
             forward_ul(oc, ou, p);
           return;
         }
@@ -1538,6 +1560,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               ie.effective_sf = static_cast<uint64_t>(static_cast<int64_t>(cmd.effective_net_sf) - off);
               ie.tsf_delta_us = cmd.tsf_delta_us;
               ie.channel = cmd.target_channel != c.ch ? cmd.target_channel : 0;
+              ie.ctx = cmd.ctx; /* the target's key for this UE: relayed, opaque */
               auto bytes = devourer::cell::encode_ho_ie(ie, auth);
               if (!bytes.empty()) {
                 std::lock_guard<std::mutex> lk(f1_mu);
@@ -2102,7 +2125,7 @@ int run_du(IRadio *dev, const Cfg &c) {
      * learn a list went away, and its tag is what proves a beacon is this
      * cell's to anyone measuring it. */
     if (synced && f1_on) {
-      const auto nl = devourer::cell::encode_nl_ie(c.cell, nl_gen_snap, nb_snap, auth);
+      const auto nl = devourer::cell::encode_nl_ie(c.cell, nl_gen_snap, nb_snap, area);
       ho_ies.insert(ho_ies.end(), nl.begin(), nl.end());
     }
     if (changed || rar_now != rar_on_air || ho_ies != ho_on_air) {
@@ -2283,7 +2306,45 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->SetCcaMode(true);
   bool ue_autonomous = false; /* the DU's kGrantAutonomous, followed */
 
-  const CellMac auth = cell_auth(c);
+  /* The serving cell's key: a handover switches it (src/cell/Keys.h — per-
+   * cell keys when CELL_AREA_KEY is set; else one shared key that never
+   * changes). Read under a small lock: the RX thread verifies with it. */
+  struct CellKey {
+    std::mutex m;
+    std::string hex;
+    CellMac mac;
+  };
+  auto cur_key = std::make_shared<CellKey>();
+  cur_key->hex = c.psk;
+  cur_key->mac = hmac_sha1(c.psk);
+  const CellMac auth =
+      c.psk.empty() ? CellMac{}
+                    : CellMac([cur_key](const uint8_t *d, size_t n, uint8_t out[20]) {
+                        CellMac m;
+                        {
+                          std::lock_guard<std::mutex> lk(cur_key->m);
+                          m = cur_key->mac;
+                        }
+                        return m && m(d, n, out);
+                      });
+  auto cell_key_hex = [cur_key] {
+    std::lock_guard<std::mutex> lk(cur_key->m);
+    return cur_key->hex;
+  };
+  auto set_cell_key = [cur_key](const std::string &hex) {
+    std::lock_guard<std::mutex> lk(cur_key->m);
+    cur_key->hex = hex;
+    cur_key->mac = hmac_sha1(hex);
+  };
+  const CellMac area = area_auth(c);
+  const char *area_env = std::getenv("CELL_AREA_KEY");
+  const bool per_cell_keys = area_env && *area_env;
+  /* Its own key (home cell, home UE): unwraps the target cell's key a
+   * handover carries. */
+  const char *uk = std::getenv("CELL_UE_KEY");
+  const CellMac ue_key_mac = uk && *uk ? hmac_sha1(uk) : CellMac{};
+  if (per_cell_keys && !ue_key_mac)
+    fprintf(stderr, "CELL_AREA_KEY without CELL_UE_KEY: this UE cannot hand over\n");
   std::mutex mu;  // guards sync, wrap, rxr
   devourer::TsfSync sync;
   /* A step of the DU's TSF re-anchors the fit instead of reading as skew:
@@ -2324,6 +2385,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * serving DU's beacon addressed to us, the one accepted (fresh, instant
    * ahead), and the target's grant maps heard while waiting for it. */
   std::optional<devourer::cell::HoIe> ho_seen, ho_pending;
+  std::string ho_target_key;  /* the accepted handover's target key (hex) */
+  CellMac target_auth;        /* ... as a Mac: the target's buffered maps (mu) */
+  uint32_t ho_no_ctx_id = 0;  /* the last command refused for no context (logged once) */
   devourer::cell::HoReceiver horx;
   std::optional<GrantMapReceiver> rxr_target;
   uint8_t tgt_du_mac[6] = {0};
@@ -2363,6 +2427,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   std::optional<uint8_t> retune_to;
   std::atomic<int64_t> retune_done_us{0}; /* steady clock, 0 = none pending */
   struct HoBack {
+    std::string key;     /* the source cell's key, to return to */
     uint8_t channel = 0; /* the source's channel, to return to */
     uint16_t cell = 0, ue = 0;
     int64_t delta_us = 0;
@@ -2409,7 +2474,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int rejoin_stop_fails = 0;   /* consecutive failed beacon stops before a re-join */
   devourer::cell::RachClient rach(joiner_mac, nonce, [&rng] { return static_cast<uint32_t>(rng()); });
   std::vector<devourer::cell::RachResponse> rar_seen;
-  const auto mac = rach_mac(c);
+  const CellMac &mac = auth; /* the RACH: the serving cell's key */
   const auto rach_idx = grid->find(SlotKind::Rach, 0);
 
   std::thread rx([&] {
@@ -2425,7 +2490,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
          * measured: a frame merely carrying a cell-shaped address is not. */
         if (p.Data[10] == 0x02 && p.Data[11] == 0xce && p.Data[12] == 0x11 && p.Data[15] == 0) {
           const uint16_t bc = static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]);
-          if (auto nl = devourer::cell::find_nl_ie(p.Data.data(), p.Data.size(), bc, auth)) {
+          if (auto nl = devourer::cell::find_nl_ie(p.Data.data(), p.Data.size(), bc, area)) {
             ue_meas.update(bc, 0, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
                            static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, ue_ms());
             /* The serving cell's list: only a generation not older than the
@@ -2443,7 +2508,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
            * switch (they do not feed the clock: that is the source's until
            * the switch, then shifted, not re-acquired). */
           if (rxr_target && std::memcmp(p.Data.data() + 10, tgt_du_mac, 6) == 0)
-            if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size(), auth))
+            if (auto m = devourer::cell::find_grant_map(p.Data.data(), p.Data.size(), target_auth))
               rxr_target->offer(*m);
           return;
         }
@@ -2623,8 +2688,28 @@ int run_ue(IRadio *dev, const Cfg &c) {
        * identity becomes the target's, and the target's buffered grant
        * maps take over. No scan, no re-acquisition, no association. */
       if (ho_seen) {
-        if (horx.accept(*ho_seen, static_cast<uint64_t>(sfn))) {
+        /* Per-cell keys: the target's key, unwrapped from the context the IE
+         * carries for this UE alone. Without one (or a context not for this
+         * UE) the command is not taken — the target could not be verified. */
+        std::optional<std::string> tkey;
+        if (per_cell_keys) {
+          const bool none = std::all_of(ho_seen->ctx.begin(), ho_seen->ctx.end(),
+                                        [](uint8_t b) { return b == 0; });
+          if (auto k = none || !ue_key_mac ? std::nullopt
+                                           : devourer::cell::unwrap_context(ue_key_mac, ho_seen->id,
+                                                                            ho_seen->target, ho_seen->ctx))
+            tkey = devourer::cell::key_to_hex(*k);
+          if (!tkey && ho_seen->id != ho_no_ctx_id) {
+            ho_no_ctx_id = ho_seen->id;
+            char l[120];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.ue.ho_no_context\",\"id\":%u}", ho_seen->id);
+            emit(l);
+          }
+        }
+        if ((!per_cell_keys || tkey) && horx.accept(*ho_seen, static_cast<uint64_t>(sfn))) {
           ho_pending = ho_seen;
+          ho_target_key = tkey ? *tkey : cell_key_hex();
+          target_auth = hmac_sha1(ho_target_key);
           rxr_target.emplace(ho_pending->target);
           cell_mac(tgt_du_mac, ho_pending->target, 0);
           char l[220];
@@ -2643,6 +2728,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
         const int64_t before = du_now;
         sync.ShiftRemote(h.tsf_delta_us);
         du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
+        const std::string source_key = cell_key_hex();
+        set_cell_key(ho_target_key); /* the target's key from now (the same one if shared) */
         cell_a.store(h.target);
         me_a.store(h.target_ue);
         cell_mac(du_mac, h.target, 0);
@@ -2666,7 +2753,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
                  (long long)h.tsf_delta_us, (long long)before, (long long)du_now);
         emit(l);
         rearm_ack = true;
-        ho_back = HoBack{cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
+        ho_back = HoBack{source_key, cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
         if (h.channel != 0 && h.channel != cur_ch)
           retune_to = h.channel; /* inter-frequency: done right after this lock */
       }
@@ -2684,6 +2771,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
             retune_to = b.channel; /* back to the source's channel */
           sync.ShiftRemote(-b.delta_us);
           du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
+          set_cell_key(b.key); /* back to the source's key */
           cell_a.store(b.cell);
           me_a.store(b.ue);
           cell_mac(du_mac, b.cell, 0);
@@ -2979,7 +3067,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
                                fb.base != last_fb.base || fb.bitmap != last_fb.bitmap ||
                                snr_gen != last_snr_gen;
     if (content_moved) {
-      auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth);
+      auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, area);
       {
         std::vector<devourer::cell::MeasEntryUe> mr;
         {

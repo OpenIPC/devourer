@@ -66,6 +66,10 @@
 //   RAN_DL_DAPS [1]           duplicate each PDU to the handover target too,
 //                             from the command until ran.ho_done: the target
 //                             buffers them and airs them after the switch
+//   RAN_DL_DAPS_BACKLOG [16]  ... and at the command the stream's last this
+//                             many PDUs (a link fading before the command may
+//                             have lost them at the source; the UE drops the
+//                             ones it had as duplicates)
 //   RAN_MEAS_STALE_MS [2000]  a reported value counts until its sample age
 //                             (carried in F1) plus the report's age passes
 //                             this (= the DUs' CELL_MEAS_STALE_MS)
@@ -104,6 +108,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -257,6 +262,7 @@ int main() {
   const int64_t meas_stale_ms = envl("RAN_MEAS_STALE_MS", 2000, 100, 60000);
   const int dl_ms = static_cast<int>(envl("RAN_DL_MS", 0, 0, 10000));
   const bool dl_daps = envl("RAN_DL_DAPS", 1, 0, 1) != 0;
+  const size_t dl_backlog = static_cast<size_t>(envl("RAN_DL_DAPS_BACKLOG", 16, 0, 64));
   std::vector<uint8_t> spare;
   for (long ch : env_list("RAN_SPARE_CHANNELS", 1, 196))
     spare.push_back(static_cast<uint8_t>(ch));
@@ -360,9 +366,11 @@ int main() {
    * handover command until ran.ho_done also to the target, for the target
    * identity (`dup`). At ho_done the stream moves to the target identity. */
   struct DlStream {
+    uint64_t epoch = 0; /* the CU's realtime (us) at creation: a re-created stream is newer */
     uint32_t next_sn = 1;
     std::optional<std::pair<uint16_t, uint16_t>> dup;
     std::chrono::steady_clock::time_point reported;
+    std::deque<uint32_t> recent; /* the last RAN_DL_DAPS_BACKLOG sns sent */
   };
   std::map<std::pair<uint16_t, uint16_t>, DlStream> dls;
   auto dl_undup = [&](const devourer::cell::HoCommand &cmd) {
@@ -635,7 +643,6 @@ int main() {
                  * earlier Staged ack may have been lost): cancel, retried. */
                 cancels[fl.cmd.id] = Cancel{fl.cmd};
                 ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
-          dl_undup(fl.cmd);
                 dl_undup(fl.cmd);
                 flights.erase(it); /* the A3 fires again later: a fresh command */
               } else if (!was) {
@@ -696,6 +703,7 @@ int main() {
             target = target || (fl.second.cmd.target == id.first && fl.second.cmd.target_ue == id.second);
           if (!target) {
             dls[id].reported = now;
+            dls[id].epoch = next_seq();
             emit("{\"ev\":\"ran.dl_stream\",\"cell\":" + std::to_string(id.first) + ",\"ue\":" +
                  std::to_string(id.second) + "}");
           }
@@ -710,11 +718,15 @@ int main() {
           continue;
         }
         const uint32_t sn = d->second.next_sn++;
+        d->second.recent.push_back(sn);
+        while (d->second.recent.size() > dl_backlog)
+          d->second.recent.pop_front();
         if (auto du = dus.find(d->first.first); du != dus.end())
-          send(du->second, f1::encode_downlink({d->first.first, d->first.second, sn}, mac));
+          send(du->second, f1::encode_downlink({d->first.first, d->first.second, d->second.epoch, sn}, mac));
         if (d->second.dup)
           if (auto du = dus.find(d->second.dup->first); du != dus.end())
-            send(du->second, f1::encode_downlink({d->second.dup->first, d->second.dup->second, sn}, mac));
+            send(du->second,
+                 f1::encode_downlink({d->second.dup->first, d->second.dup->second, d->second.epoch, sn}, mac));
         ++d;
       }
     }
@@ -966,9 +978,25 @@ int main() {
                        std::to_string(cell) + ",\"to\":" + std::to_string(force->tgt) + "}");
                 }
                 ul.alias({cmd.target, cmd.target_ue}, {cmd.source, cmd.ue}); /* DAPS: one stream */
+                if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end()) {
+                  char db[200];
+                  snprintf(db, sizeof db,
+                           "{\"ev\":\"ran.dl_cmd\",\"id\":%u,\"stream\":\"%u:%u\",\"next_sn\":%u,"
+                           "\"dup\":%d,\"backlog\":%zu}",
+                           cmd.id, cmd.source, cmd.ue, d->second.next_sn, dl_daps ? 1 : 0,
+                           dl_daps ? d->second.recent.size() : 0);
+                  emit(db);
+                }
                 if (dl_daps)
-                  if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end())
+                  if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end()) {
                     d->second.dup = std::make_pair(cmd.target, cmd.target_ue); /* DL duplicated */
+                    /* The recent PDUs too, oldest first: a link fading before
+                     * the command may have lost them at the source. */
+                    if (auto tdu = dus.find(cmd.target); tdu != dus.end())
+                      for (uint32_t sn : d->second.recent)
+                        send(tdu->second,
+                             f1::encode_downlink({cmd.target, cmd.target_ue, d->second.epoch, sn}, mac));
+                  }
                 char b[300];
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
@@ -990,6 +1018,7 @@ int main() {
         auto sit = dus.find(fl.cmd.source), tit = dus.find(fl.cmd.target);
         if (sit == dus.end() || tit == dus.end()) {
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
+          dl_undup(fl.cmd);
           it = flights.erase(it);
           continue;
         }

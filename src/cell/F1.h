@@ -654,10 +654,15 @@ inline std::optional<UplinkFwd> decode_uplink(const uint8_t *p, size_t n, const 
  * handover): `sn` is its number in the UE's CU-side DL stream, which runs on
  * across handovers. The DU queues it and airs it in that UE's DL frames;
  * the UE delivers each sn once, whichever DU it came through. DAPS
- * duplicates a PDU to the source and the target. */
+ * duplicates a PDU to the source and the target. `epoch` names the stream
+ * (the CU's realtime clock in us when it created it, so a re-created stream
+ * or a restarted CU's is always newer): a DU takes a PDU only for a newer
+ * epoch than its queue's, or a newer sn in the same one, so a replayed
+ * datagram cannot displace live ones. */
 struct DownlinkPdu {
   uint16_t du = 0;
   uint16_t ue = 0;
+  uint64_t epoch = 0;
   uint32_t sn = 0;
   bool operator==(const DownlinkPdu &) const = default;
 };
@@ -667,6 +672,7 @@ inline std::vector<uint8_t> encode_downlink(const DownlinkPdu &d, const Mac &mac
   auto m = head(Type::Downlink);
   put(m, d.du, 2);
   put(m, d.ue, 2);
+  put(m, d.epoch, 8);
   put(m, d.sn, 4);
   return seal(std::move(m), mac);
 }
@@ -680,6 +686,7 @@ inline std::optional<DownlinkPdu> decode_downlink(const uint8_t *p, size_t n, co
   DownlinkPdu d;
   d.du = static_cast<uint16_t>(r.get(2));
   d.ue = static_cast<uint16_t>(r.get(2));
+  d.epoch = r.get(8);
   d.sn = static_cast<uint32_t>(r.get(4));
   if (!r.ok || r.i != r.n)
     return std::nullopt;

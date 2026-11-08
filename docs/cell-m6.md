@@ -841,48 +841,94 @@ them), so nothing ran on across a handover to lose. The downlink now has a
 - **The CU originates it** (`RAN_DL_MS`): one PDU per UE every 100 ms on the
   rig, numbered in the UE's stream (`sn` from 1), sent to its serving DU over
   F1 `Downlink` (v12).
+  - The stream has an **epoch**: the CU's realtime clock when it created the
+    stream. A re-created stream (a re-joined UE, a restarted CU) is always
+    newer.
 - **The DU queues it** per UE (64 deep, oldest dropped) and airs up to 8
-  sns per DL frame, inside the tagged body. A forged sn therefore cannot make
-  the UE drop a real PDU as a duplicate. A HARQ retransmission re-airs the
-  same sns. The DL frame is a fixed size (protocol v4, 33 bytes more than
-  before).
+  sns per DL frame, inside the tagged body, with their epoch.
+  - It takes a PDU only for a newer epoch, which replaces the queue, or for
+    a newer sn in the same epoch. A replayed datagram cannot displace live
+    ones; a reordered one is lost.
+  - A UE admitted under an id gets fresh DL state, and a joiner never
+    inherits a queue left under its id.
+  - A HARQ retransmission re-airs the same sns.
+  - The DL frame is a fixed size (protocol v4, 41 bytes more than before).
+  - A forged sn cannot make the UE drop a real PDU as a duplicate.
 - **The UE delivers** each sn once (`DlStreamRx`, `src/cell/Handover.h`),
-  whichever DU it came through. Its sn space lives as long as the UE does and
-  is never reset on a switch. A run of missing sns is a gap once it is 32
-  behind the newest; a late copy within that recovers it. Gaps are logged as
-  `cell.ue.dl_gap`, and the totals appear in `cell.ue.done` (`dl_pdus`).
+  whichever DU it came through.
+  - The sn space runs on across switches. A newer epoch starts over, and
+    what was still pending of the old stream is counted lost; an older epoch
+    is ignored.
+  - A run of missing sns is a gap once it is 32 behind the newest; a late
+    copy within that recovers it.
+  - Gaps are logged as `cell.ue.dl_gap`, and the totals appear in
+    `cell.ue.done` (`dl_pdus`).
 - **The stream follows the UE:** at `ran.ho_done` the CU moves it to the
   target identity (`ran.dl_moved`).
 
 **Duplication** (`RAN_DL_DAPS=1`, the default):
 - From the handover command until `ran.ho_done`, the CU sends every PDU to
   the target too, for the UE's target identity.
+- At the command it also sends the stream's last 16 PDUs
+  (`RAN_DL_DAPS_BACKLOG`; data forwarding). A link fading toward the command
+  loses PDUs at the source before any copy exists. The emulated crossing
+  showed it: without the backlog, 6 and 9 PDUs were lost on the return
+  handover, all first aired on the fading source just before the command.
 - The target queues them for the UE it has only staged, and airs them from
   its first DL frame after the switch, oldest first.
 - The UE drops what it already had from the source as duplicates.
 - Without duplication, PDUs go to the source until `ho_done`: what the
   source holds or is sent after the UE left is lost.
 
-A replayed F1 `Downlink` carries no freshness of its own; at worst it
-re-queues a PDU the UE then drops as a duplicate.
+**Rig result** (testrig `scripts/m6_daps_dl.sh`, all 16 runs pass). UE1
+goes from cell 1 to cell 2 on one channel. In the forced cases the A3 fires
+at a −2 dB offset; in the fault cases the source DU is killed the moment
+UE1 accepts, ~2 s before the switch. The crossing is the emulated one (TX
+ramps, the A3 at its defaults, there and back: two handovers per run).
 
-**Rig result** (testrig `scripts/m6_daps_dl.sh`, 2 runs per case, all
-pass). A forced same-channel handover of UE1 from cell 1 to cell 2. In the
-fault cases the source DU is killed the moment UE1 accepts, ~2 s before the
-switch.
-
-| UE1's DL PDUs missing | DAPS | no DAPS |
+| UE1's DL PDUs missing in the handover windows | DAPS | no DAPS |
 |---|---|---|
-| source killed mid-crossing | 0, 0 | 36, 23 (one gap each, from the kill to `ho_done`) |
-| plain handover | 0, 0 | 8, 11 (the switch to `ho_done`; one run also lost 3 early in the run) |
+| source killed mid-crossing (3 runs) | 0 / 0 / 0 | 21 / 23 / 33 |
+| plain handover (3 runs) | 0 / 0 / 0 | 8 / 18 / 19 |
+| emulated crossing, 2 handovers per run (2 runs) | 0 / 0 | 57 / 62 |
 
-- **What it costs:** the static UE2 lost none in any run. With DAPS the
-  target held ~24 PDUs at the switch and drained them in 4–5 DL frames
-  (~0.5 s), 8 per frame. Most are duplicates in a plain handover: UE1 saw
-  44–70 duplicates per run against 44–50 without DAPS.
+- **The window** of a handover runs from the stream's sn at the command,
+  less the 16-PDU backlog, to where the stream moved at `ho_done`, + 8. The
+  CU logs both points (`ran.dl_cmd`, `ran.dl_moved`). A random HARQ give-up
+  elsewhere in the run is not the handover's.
+- **Whole run:** DAPS lost 0 except one crossing, which lost 6 PDUs just
+  before its return handover's window (sns 576–582). They were first aired
+  on the fading source more than 16 PDUs (1.6 s) before the A3 fired, so
+  the backlog did not reach them. A longer backlog would, at the cost of
+  more duplicates.
+- **DL silence at UE1** (ms between frames that delivered a new PDU;
+  min / median / max over the case's runs):
+
+  | case | DAPS | no DAPS |
+  |---|---|---|
+  | source killed | 1447 / 1755 / 2062 | 2062 / 2369 / 3294 |
+  | plain | 525 / 526 / 731 | 833 / 1857 / 1857 |
+  | crossing | 3561 / 3912 / 4262 | 3036 / 3240 / 3444 |
+
+  DAPS recovers the PDUs, not the time. While the source link fades or is
+  dead, nothing new arrives until the target airs its buffer after the
+  switch.
+- **The cost:** DL duplicates per run were 58–104 with DAPS against 36–52
+  without. The target holds ~40 PDUs at the switch and drains them at 8 per
+  frame.
+- **The rest of the handover**, every run:
+  - one switch (two in the crossing), no fallback;
+  - no re-association: no RACH, re-join or re-attach by UE1;
+  - TSF continuity: the switch 2–200 ms after the network instant, under
+    2 P;
+  - the target heard UE1 in slot ≥ 99 % after each switch;
+  - control-plane completion (`ran.ho_done`) 5–17 superframes after the
+    switch instant;
+  - the static UE2 lost no PDU;
+  - with DAPS, the uplink through the target lost 0 uplinks (12–15 without,
+    when the source died).
 - **Not duplicated:** the source does not keep airing to the UE after the
-  switch, and the UE takes DL frames only from its serving cell. The target
-  delivers what the source could not, late by up to the buffer's age.
+  switch, and the UE takes DL frames only from its serving cell.
 
 ## Replay of a signed neighbour list
 

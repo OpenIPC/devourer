@@ -314,20 +314,21 @@ struct DlHarq {
   uint8_t attempt = 1; /* 1 = first transmission */
 };
 
-/* DL body: 'C' 'D' ver ue(2) sf(8) seq(4) low(4) pid(1) attempt(1) npdu(1)
- * sn(4) x kDlMaxPdus | tag(8). The sns are the CU's DL PDUs this frame
- * carries (F1 Downlink; npdu of the slots used, the rest zero: a fixed
- * length, so the DL slot budget is one size). A HARQ retransmission carries
- * the same ones. Under the tag: a forged sn cannot make the UE drop a real
- * PDU as a duplicate. */
+/* DL body: 'C' 'D' ver ue(2) sf(8) seq(4) low(4) pid(1) attempt(1)
+ * epoch(8) npdu(1) sn(4) x kDlMaxPdus | tag(8). The sns are the CU's DL PDUs
+ * this frame carries, of the stream `epoch` (F1 Downlink; npdu of the slots
+ * used, the rest zero: a fixed length, so the DL slot budget is one size).
+ * A HARQ retransmission carries the same ones. Under the tag: a forged sn
+ * cannot make the UE drop a real PDU as a duplicate. */
 constexpr size_t kDlMaxPdus = 8;
-constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1 + 1 + 4 * kDlMaxPdus;
+constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1 + 8 + 1 + 4 * kDlMaxPdus;
 constexpr size_t kDlBodyLen = kDlTaggedLen + kCellTagLen;
 
 // The DL frame MPDU (no FCS): QoS-Data, RA = UE, TA = BSSID = DU.
 inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf, uint32_t seq,
                                            size_t pad, DlHarq h = {}, const CellMac &mac = {},
-                                           const std::vector<uint32_t> &pdus = {}) {
+                                           const std::vector<uint32_t> &pdus = {},
+                                           uint64_t epoch = 0) {
   uint8_t ra[6], ta[6];
   cell_mac(ra, cell, ue);
   cell_mac(ta, cell, 0);
@@ -344,6 +345,7 @@ inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t s
   b.push_back(h.pid);
   b.push_back(h.attempt);
   const size_t np = std::min(pdus.size(), kDlMaxPdus);
+  detail::put(b, epoch, 8);
   b.push_back(static_cast<uint8_t>(np));
   for (size_t i = 0; i < kDlMaxPdus; ++i)
     detail::put(b, i < np ? pdus[i] : 0u, 4);
@@ -360,6 +362,7 @@ struct DlFrame {
   uint64_t sf = 0;
   uint32_t seq = 0;
   DlHarq harq;
+  uint64_t epoch = 0;         /* the CU DL stream they belong to */
   std::vector<uint32_t> pdus; /* the CU DL PDU sns it carries */
 };
 inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint16_t cell,
@@ -382,11 +385,12 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
   d.harq.low = static_cast<uint32_t>(detail::get(b + 17, 4));
   d.harq.pid = b[21];
   d.harq.attempt = b[22];
-  const size_t np = b[23];
+  d.epoch = detail::get(b + 23, 8);
+  const size_t np = b[31];
   if (np > kDlMaxPdus)
     return std::nullopt;
   for (size_t i = 0; i < np; ++i)
-    d.pdus.push_back(static_cast<uint32_t>(detail::get(b + 24 + 4 * i, 4)));
+    d.pdus.push_back(static_cast<uint32_t>(detail::get(b + 32 + 4 * i, 4)));
   return d;
 }
 

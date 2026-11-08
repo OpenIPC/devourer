@@ -394,9 +394,9 @@ gaps run one in 20 superframes.
 
 | case | each UE's reports carrying the other cell | suspend gaps per UE (heard) | uplink heard by its DU |
 |---|---|---|---|
-| suspend gaps (2) | 100 % | 43 (100 %) | UE1 90 %, UE2 95 % |
+| suspend gaps, idle gaps off (2) | 100 % | 43 (100 %) | UE1 90 %, UE2 95 % |
 | none, the counterfactual (2) | 0 % | 0 | 100 % |
-| suspend gaps + the A3 executing (2) | 99.3–100 % | 42–44 (100 %) | 90–95 % before the switch |
+| suspend gaps + the A3 executing (2) | 100 % | 42–44 (100 %) | 91–95 % before the switch |
 
 - **No DL frame in a deaf window:** in all suspend runs, no DU aired its UE
   a DL frame while the UE was in a suspend gap. Every skipped DL frame fell
@@ -404,14 +404,18 @@ gaps run one in 20 superframes.
 - **No stray beacon:** the witness on ch149 never saw a cell-2 uplink, so a
   stopped beacon never fired on the other channel.
 - **The cost** is the uplink's 1 or 2 superframes in 20.
-  - UE1's gap (its neighbour 20 ms into its grid) runs from 8 ms before its
-    suspend superframe S to 46 ms into it, so it covers S's uplink slot.
-  - UE2's gap (offset 82.4 ms) runs from 54 to 108 ms past S, clear of both
-    S's and S + 1's uplink slots.
-  - Both UEs also lose the first uplink slot after the gap (S + 1), though
-    UE1's gap ended ~70 ms before it: the restarted beacon first airs a
-    superframe later. Why is not established.
-- **The gaps:** deaf time 54.0–54.7 ms, the other cell at −57.8 to −45 dBm.
+  - UE1's gap (its neighbour 20 ms into its grid) runs from 94.4 ms into
+    its suspend superframe S to 46 ms into S + 1, so it covers S + 1's
+    uplink slot.
+  - UE2's gap (offset 82.4 ms) runs from 54.4 ms into S to 6 ms into S + 1,
+    clear of both uplink slots.
+  - Both UEs also lose the first uplink slot after the gap (UE1 S + 2, UE2
+    S + 1), though that slot comes 10–70 ms after the gap ends: the
+    restarted beacon first airs a superframe later. Why is not established.
+- **The gaps:** deaf time 54.0–54.6 ms, the other cell at −58 to −45.5 dBm.
+- **In slot:** each DU heard its UE in slot 100 % from the first suspend gap
+  on. One run had a single out-of-slot uplink 15 superframes before its
+  first gap (cause not established; not the gaps).
 - **Handover on suspend gaps alone:** in both handover runs UE1 handed over
   to cell 2 on measurements only suspend gaps gave it (A3 at defaults,
   metric `ue_rssi`). The target heard it in slot 99.7–100 %.

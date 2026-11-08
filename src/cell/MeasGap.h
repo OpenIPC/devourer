@@ -38,10 +38,11 @@
  * SUSPEND gap may cover the UE's own slots: only in its suspend superframes
  * (suspend_sf: one in `every`, staggered by UE id), the UE stops its uplink
  * beacon (it must never fire on the neighbour's channel), goes deaf for the
- * neighbour beacon in that superframe, and restarts it after. The DU knows
- * the same pattern and airs no DL frame to that UE in a suspend superframe
- * or the one after (a gap may run into it): an unACKed frame would cost
- * the next one up to CWmax. Whether a UE needs suspend gaps at all
+ * neighbour beacon, and restarts it after. A suspend gap STARTS in a suspend
+ * superframe S, at ((offset - retune - guard) mod P), so being shorter than
+ * P it ends before S + 2. The DU knows the same pattern and airs no DL frame
+ * to that UE in S or S + 1: an unACKed frame would cost the next one up to
+ * CWmax. Whether a UE needs suspend gaps at all
  * (needs_suspend) is decided at the FLOOR retune bound on both sides, so the
  * DU and the UE agree. The cost: those two superframes' DL and uplink, in
  * `every`, for a UE some neighbour leaves no idle window.

@@ -3120,6 +3120,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   size_t gap_rr = 0;        /* round-robin over the other-channel neighbours */
   size_t susp_rr = 0;       /* ... over those only a suspend gap reaches */
   int64_t last_susp_sf = -1;
+  bool susp_infeasible = false;
   uint64_t susp_gaps = 0, susp_heard = 0, susp_fail = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -3769,7 +3770,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
       }
       return true;
     };
-    if (gap_every_sf > 0 && !ho_pending && !ho_back) {
+    if ((gap_every_sf > 0 || gap_suspend_every > 0) && !ho_pending && !ho_back) {
       std::vector<devourer::cell::Neighbour> other, susp;
       const int64_t sfn = du_now / P;
       const auto &sl = grid->slots();
@@ -3796,17 +3797,36 @@ int run_ue(IRadio *dev, const Cfg &c) {
             other.push_back(n);
         }
       }
-      /* A suspend gap: in this UE's next suspend superframe S = sfn + 1,
-       * around the neighbour's beacon in S (the window may start in S - 1's
-       * idle tail and run into S + 1: the DU skips this UE's DL in S and
-       * S + 1). */
-      if (!susp.empty() && devourer::cell::suspend_sf(sfn + 1, static_cast<uint16_t>(me), gap_suspend_every) &&
-          last_susp_sf != sfn + 1) {
-        last_susp_sf = sfn + 1;
-        const auto n = susp[susp_rr++ % susp.size()];
+      /* A suspend gap STARTS in one of this UE's suspend superframes S, at
+       * ((offset - retune - guard) mod P) into it, and so ends before S + 2
+       * (its length is under P): exactly the superframes the DU skips this
+       * UE's DL in. Taken for S = sfn + 1, or for S = sfn itself if this
+       * pass came late and its start is still ahead. */
+      if (!susp.empty()) {
         const int64_t len = 2 * (gap_retune_us + gap_guard_us) + 500;
-        if (len < P)
-          run_gap(n, (sfn + 1) * P + n.offset_us - gap_retune_us - gap_guard_us, len, true);
+        if (len >= P) {
+          if (!susp_infeasible) { /* the measured retunes outgrew the superframe */
+            susp_infeasible = true;
+            char l[160];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.ue.suspend_infeasible\",\"ue\":%d,\"retune_us\":%lld}", me,
+                     (long long)gap_retune_us);
+            emit(l);
+          }
+        } else {
+          for (const int64_t S : {sfn, sfn + 1}) {
+            if (S <= last_susp_sf || !devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every))
+              continue;
+            const auto n = susp[susp_rr % susp.size()];
+            const int64_t w = ((n.offset_us - gap_retune_us - gap_guard_us) % P + P) % P;
+            const auto now_du = serving_now();
+            if (!now_du || S * P + w - *now_du <= gap_guard_us)
+              continue; /* this one is out of reach (S = sfn); S + 1 comes next pass */
+            last_susp_sf = S;
+            ++susp_rr;
+            run_gap(n, S * P + w, len, true);
+            break;
+          }
+        }
       }
       /* Each measurable neighbour every gap_every_sf: one gap per
        * gap_every_sf / n superframes (at least 2 apart). */
@@ -3814,7 +3834,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
           std::max<int64_t>(2, gap_every_sf / static_cast<int64_t>(std::max<size_t>(1, other.size())));
       if (next_gap_sf < 0)
         next_gap_sf = sfn + every;
-      if (!other.empty() && sfn >= next_gap_sf) {
+      if (gap_every_sf > 0 && !other.empty() && sfn >= next_gap_sf) {
         next_gap_sf = sfn + every;
         const auto n = other[gap_rr++ % other.size()];
         const bool cross_band = devourer::cell::gap_cross_band(cur_ch, n.channel);

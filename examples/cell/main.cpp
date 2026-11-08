@@ -1,5 +1,6 @@
 // examples/cell — the M1 (#255) reference cell: one gNB-DU and N UEs on a
-// fixed slot grid, plus an on-air witness. One binary, CELL_ROLE=du|ue|witness.
+// fixed slot grid, plus an on-air witness. One binary, CELL_ROLE=du|ue|witness
+// (|replayer: a test-only replay attacker, below).
 // Frame shapes, clocks and the control loops are in cell.h; the grid is
 // src/cell/SlotGrid.h and the grant map src/cell/GrantMap.h.
 //
@@ -72,6 +73,18 @@
 //   CELL_CA_PUB               UE: the area CA's public key (64 hex): a beacon
 //                             counts as a cell's (measured, its NL taken) only
 //                             through CA -> cell key -> NL.
+//   CELL_UE_NBR_FRESH [1]     UE, with CELL_CA_PUB: the replay checks. A
+//                             serving beacon's signed window must not go back;
+//                             a neighbour's must be within one of the serving
+//                             one's, and its beacon must land within
+//                             CELL_UE_NBR_PHASE_US [300] of the TBTT offset the
+//                             serving list names. Else it is not measured
+//                             (cell.ue.nbr_refused, the first 20 per reason;
+//                             counts in cell.ue.done).
+//   CELL_ROLE=replayer        test only: records cell CELL_REPLAY_CELL [2]'s
+//                             DU beacons for CELL_REPLAY_FREEZE_S [30] s, then
+//                             re-airs the last one every CELL_REPLAY_EVERY_MS
+//                             [100] ms (cell.replay.frozen, cell.replay.done).
 //   CELL_UE_KEY               UE, per-cell keys: its own key K_(c,u) (home
 //                             cell and id), which unwraps the target cell's
 //                             key a handover carries. Without it, or for a
@@ -552,7 +565,7 @@ bool du_budget_ok(const Cfg &c, const std::vector<uint16_t> &ues) {
         c.cell, 0, std::vector<devourer::cell::Neighbour>(devourer::cell::kMaxNeighbours), {});
     if (const char *sk = std::getenv("CELL_NL_SIGN_KEY"); sk && *sk) {
       const auto sig = devourer::cell::encode_nl_sig_ie(
-          c.cell, 0, extra, [](const uint8_t *, size_t, uint8_t s[64]) { std::memset(s, 0, 64); return true; });
+          c.cell, 0, 0, extra, [](const uint8_t *, size_t, uint8_t s[64]) { std::memset(s, 0, 64); return true; });
       const auto cert = devourer::cell::encode_nl_cert_ie(c.cell, {}, {});
       extra.insert(extra.end(), sig.begin(), sig.end());
       extra.insert(extra.end(), cert.begin(), cert.end());
@@ -638,13 +651,17 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
   }
   std::vector<uint8_t> nl_signed_for, nl_sig_ie; /* the last NL signed, and its NS IE */
-  bool nl_sign_failed = false;
+  bool nl_sign_failed = false, nl_unsigned_no_net = false;
+  uint32_t nl_signed_win = 0;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
   /* M4 DU service mode (see the header): the PHC, the discipline loop, the
    * health that gates the coordinated schedule. */
   const char *ref_ptp = std::getenv("CELL_REF_PTP");
   const bool svc = ref_ptp && *ref_ptp;
+  if (nl_sign && !svc)
+    fprintf(stderr, "CELL_NL_SIGN_KEY without CELL_REF_PTP: no network superframe to sign a window "
+                    "with, so the list airs unsigned (cell.nl.unsigned_no_net)\n");
   const devourer::SyncTier tier = devourer::sync_tier(dev->GetAdapterCaps());
   struct Fd {
     int fd = -1;
@@ -2284,18 +2301,39 @@ int run_du(IRadio *dev, const Cfg &c) {
     if (synced && f1_on) {
       const auto nl = devourer::cell::encode_nl_ie(c.cell, nl_gen_snap, nb_snap, area);
       ho_ies.insert(ho_ies.end(), nl.begin(), nl.end());
-      if (nl_sign && !nl.empty()) { /* signed once per list, aired with it */
-        if (nl != nl_signed_for) {
-          nl_sig_ie = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, nl, nl_sign);
-          if (!nl_sig_ie.empty()) {
+      /* Signed once per list and network window (its freshness: the
+       * network superframe / kNlWindowSf, on the shared timebase). */
+      const int64_t net_sf_now = net_ok.load() ? sf + net_off.load() : -1;
+      const uint32_t win = net_sf_now >= 0
+                               ? static_cast<uint32_t>(net_sf_now / devourer::cell::kNlWindowSf)
+                               : 0;
+      if (nl_sign && !nl.empty() && net_sf_now < 0 && !nl_unsigned_no_net) {
+        /* No network superframe (no PTP service mode, or sync lost): no
+         * window to sign, so the list airs unsigned and signed UEs refuse it. */
+        nl_unsigned_no_net = true;
+        emit("{\"ev\":\"cell.nl.unsigned_no_net\"}");
+      }
+      if (nl_sign && !nl.empty() && net_sf_now >= 0) { /* aired with the list */
+        if (nl_unsigned_no_net) {
+          nl_unsigned_no_net = false;
+          emit("{\"ev\":\"cell.nl.signed_again\"}");
+        }
+        if (nl != nl_signed_for || win != nl_signed_win) {
+          auto sig = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, win, nl, nl_sign);
+          if (!sig.empty()) {
+            nl_sig_ie = std::move(sig);
             nl_signed_for = nl;
+            nl_signed_win = win;
           } else if (!nl_sign_failed) { /* retried next beacon; logged once */
             nl_sign_failed = true;
             emit("{\"ev\":\"cell.nl.sign_fail\"}");
           }
         }
-        ho_ies.insert(ho_ies.end(), nl_sig_ie.begin(), nl_sig_ie.end());
-        ho_ies.insert(ho_ies.end(), nl_cert_ie.begin(), nl_cert_ie.end());
+        /* Only a signature over THIS list and window: never an older one. */
+        if (nl == nl_signed_for && win == nl_signed_win) {
+          ho_ies.insert(ho_ies.end(), nl_sig_ie.begin(), nl_sig_ie.end());
+          ho_ies.insert(ho_ies.end(), nl_cert_ie.begin(), nl_cert_ie.end());
+        }
       }
     }
     if (changed || rar_now != rar_on_air || ho_ies != ho_on_air) {
@@ -2517,6 +2555,20 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * NL counts — and with it the beacon as that cell's — only through the
    * chain CA -> cell key -> NL (MeasGap.h NlVerifier), never by the area tag. */
   std::optional<devourer::cell::NlVerifier> nlv;
+  /* Replay checks on signed lists (mu): the serving cell's window and where
+   * its beacons land; refusals by reason. CELL_UE_NBR_FRESH=0 turns the
+   * checks off (a test's counterfactual). */
+  const bool nbr_fresh = envl("CELL_UE_NBR_FRESH", 1, 0, 1) != 0;
+  const int64_t nbr_phase_tol_us = envl("CELL_UE_NBR_PHASE_US", 300, 10, 50000);
+  bool have_serv_win = false, have_serv_phase = false;
+  /* A cell switch: the new serving cell's first window may be one behind
+   * (both sit on the one network superframe, but not at the same instant). */
+  bool serv_switched = false;
+  uint64_t serv_win_ms = 0; /* when the serving window last advanced */
+  int serv_off_run = 0;     /* serving copies off the reference phase in a row */
+  uint32_t serv_win = 0;
+  int64_t serv_phase = 0;
+  std::map<std::string, uint64_t> nbr_refused;
   if (const char *ca = std::getenv("CELL_CA_PUB"); ca && *ca) {
     const auto pub = hex_bytes<32>(ca);
     if (!pub) {
@@ -2686,8 +2738,93 @@ int run_ue(IRadio *dev, const Cfg &c) {
          * measured: a frame merely carrying a cell-shaped address is not. */
         if (p.Data[10] == 0x02 && p.Data[11] == 0xce && p.Data[12] == 0x11 && p.Data[15] == 0) {
           const uint16_t bc = static_cast<uint16_t>(p.Data[13] << 8 | p.Data[14]);
-          if (auto nl = nlv ? nlv->check(p.Data.data(), p.Data.size(), bc)
-                            : devourer::cell::find_nl_ie(p.Data.data(), p.Data.size(), bc, area)) {
+          std::optional<devourer::cell::NlIe> nl;
+          if (!nlv) {
+            nl = devourer::cell::find_nl_ie(p.Data.data(), p.Data.size(), bc, area);
+          } else if (auto sn = nlv->check(p.Data.data(), p.Data.size(), bc)) {
+            /* Replay (MeasGap.h): a genuine signed beacon re-aired. Fresh:
+             * the serving window never goes back; a neighbour's is within
+             * one of the serving cell's (heard live), and its beacon lands
+             * on the TBTT offset the serving list names (shared timebase). */
+            nl = sn->nl;
+            const char *why = nullptr;
+            const bool serving = bc == cell_a.load();
+            int64_t phase = -1, want = -1;
+            if (sync.Ready() && wrap.ready()) {
+              const int64_t at = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(p.RxAtrib.tsfl)));
+              phase = ((at % P) + P) % P;
+            }
+            /* The serving reference phase moves only slowly: a copy off it
+             * by more than the tolerance is refused, never taken as the new
+             * reference (a replayed serving beacon cannot drag it). */
+            auto phase_off = [&](int64_t a, int64_t b) {
+              int64_t d = std::llabs(a - b) % P;
+              return std::min(d, P - d);
+            };
+            if (serving) {
+              const uint32_t back = serv_switched ? 1u : 0u;
+              if (nbr_fresh && have_serv_win && sn->win + back < serv_win) {
+                why = "stale";
+              } else if (nbr_fresh && have_serv_phase && phase >= 0 &&
+                         phase_off(phase, serv_phase) > nbr_phase_tol_us && ++serv_off_run < 20) {
+                why = "phase"; /* 20 in a row, none on the reference: the cell moved */
+              } else {
+                if (phase >= 0 && have_serv_phase && serv_off_run >= 20)
+                  have_serv_phase = false; /* re-taken below */
+                serv_off_run = 0;
+                if (!have_serv_win || sn->win > serv_win || serv_switched)
+                  serv_win_ms = ue_ms();
+                serv_win = sn->win;
+                have_serv_win = true;
+                serv_switched = false;
+                if (phase >= 0) { /* where serving beacons land: the reference */
+                  if (!have_serv_phase) {
+                    serv_phase = phase;
+                  } else { /* 1/8 of the wrapped error per beacon */
+                    int64_t e = (phase - serv_phase) % P;
+                    if (e > P / 2) e -= P;
+                    if (e < -P / 2) e += P;
+                    serv_phase = ((serv_phase + e / 8) % P + P) % P;
+                  }
+                  have_serv_phase = true;
+                }
+              }
+            } else if (nbr_fresh) {
+              const int64_t dw = static_cast<int64_t>(sn->win) - static_cast<int64_t>(serv_win);
+              const auto it = std::find_if(nbrs.begin(), nbrs.end(),
+                                           [&](const devourer::cell::Neighbour &x) { return x.cell == bc; });
+              /* The serving window itself must be current: one that has not
+               * advanced for two windows' time is no "now" to compare with. */
+              const bool serv_current =
+                  have_serv_win && ue_ms() - serv_win_ms <=
+                                       static_cast<uint64_t>(2 * devourer::cell::kNlWindowSf * P / 1000);
+              if (!serv_current || dw < -1 || dw > 1) {
+                why = "stale";
+              } else if (it == nbrs.end()) {
+                why = "unlisted";
+              } else if (phase < 0 || !have_serv_phase) {
+                why = "phase";
+              } else {
+                want = (serv_phase + it->offset_us) % P;
+                if (phase_off(phase, want) > nbr_phase_tol_us)
+                  why = "phase";
+              }
+            }
+            if (why) {
+              nl.reset();
+              auto &n = nbr_refused[why];
+              if (n++ < 20) {
+                char l[240];
+                snprintf(l, sizeof l,
+                         "{\"ev\":\"cell.ue.nbr_refused\",\"cell\":%u,\"why\":\"%s\",\"win\":%u,\"serving_win\":%u,"
+                         "\"phase\":%lld,\"want\":%lld,\"serv_phase\":%lld}",
+                         bc, why, sn->win, serv_win, (long long)phase, (long long)want,
+                         have_serv_phase ? (long long)serv_phase : -1LL);
+                emit(l);
+              }
+            }
+          }
+          if (nl) {
             ue_meas.update(bc, 0, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
                            static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, ue_ms());
             /* The serving cell's list: only a generation not older than the
@@ -2858,6 +2995,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
         hrx = HarqReceiver{}; /* its DL sequence space starts again */
         mr_gen = 0;           /* its MR window is its new superframe count */
         nbrs.clear();
+        have_serv_phase = false; /* another serving grid */
+        serv_switched = true;
+        serv_off_run = 0;
         have_nbrs_gen = false;
         gap_parked.clear();
         next_gap_sf = -1;      /* deadlines on the old count: re-set on the new one */
@@ -2934,6 +3074,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
         rxr = *rxr_target;
         rxr_target.reset();
         nbrs.clear(); /* the new serving cell airs its own list */
+        have_serv_phase = false; /* another serving grid */
+        serv_switched = true;
+        serv_off_run = 0;
         have_nbrs_gen = false;
         gap_parked.clear();
         ho_pending.reset();
@@ -2976,6 +3119,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
             rxr = *rxr_source;
           rxr_source.reset();
           nbrs.clear();
+          have_serv_phase = false; /* another serving grid */
+          serv_switched = true;
+          serv_off_run = 0;
           have_nbrs_gen = false;
           gap_parked.clear();
           ho_back.reset();
@@ -3373,8 +3519,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
       const int64_t sfn = du_now / P;
       {
         std::lock_guard<std::mutex> lk(mu);
-        if (ue_ms() - nbrs_ms > 3000) /* no list heard lately: none */
+        if (ue_ms() - nbrs_ms > 3000) { /* no list heard lately: none */
           nbrs.clear();
+          have_serv_phase = false; /* no serving grid heard either */
+        }
         for (const auto &n : nbrs) {
           auto pk = gap_parked.find(n.cell);
           if (n.channel != 0 && n.channel != cur_ch && (pk == gap_parked.end() || sfn >= pk->second))
@@ -3498,14 +3646,17 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->StopRxLoop();
   rx.join();
   dev->ClearAckResponder();
-  char l[300];
+  char l[400];
   snprintf(l, sizeof l,
            "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
            "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu,"
-           "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu}",
+           "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu,\"nbr_refused\":{\"stale\":%llu,"
+           "\"unlisted\":%llu,\"phase\":%llu}}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
            (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
-           (unsigned long long)gm_ok, (unsigned long long)gm_refused);
+           (unsigned long long)gm_ok, (unsigned long long)gm_refused,
+           (unsigned long long)nbr_refused["stale"], (unsigned long long)nbr_refused["unlisted"],
+           (unsigned long long)nbr_refused["phase"]);
   emit(l);
   return 0;
 }
@@ -3592,12 +3743,69 @@ int run_witness(IRadio *dev, const Cfg &c) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+/* CELL_ROLE=replayer (test only): the replay attacker of MeasGap.h. It records
+ * cell CELL_REPLAY_CELL's genuine DU beacons until CELL_REPLAY_FREEZE_S, then
+ * keeps re-airing the last one every CELL_REPLAY_EVERY_MS [100] until the end
+ * — signature, certificate and all, never on the cell's TBTT phase. */
+int run_replayer(IRadio *dev, const Cfg &c) {
+  const auto cell = static_cast<uint16_t>(envl("CELL_REPLAY_CELL", 2, 1, 65535));
+  const int freeze_s = static_cast<int>(envl("CELL_REPLAY_FREEZE_S", 30, 1, 86400));
+  const int every_ms = static_cast<int>(envl("CELL_REPLAY_EVERY_MS", 100, 10, 60000));
+  uint8_t du[6];
+  cell_mac(du, cell, 0);
+  std::mutex m;
+  std::vector<uint8_t> last;
+  uint64_t captured = 0;
+  std::atomic<bool> frozen{false};
+  dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
+  std::thread rx([&] {
+    dev->StartRxLoop([&](const Packet &p) {
+      if (frozen || p.RxAtrib.crc_err || p.Data.size() < 36 || p.Data[0] != 0x80 ||
+          std::memcmp(p.Data.data() + 10, du, 6) != 0)
+        return;
+      std::lock_guard<std::mutex> lk(m);
+      last.assign(p.Data.begin(), p.Data.end());
+      ++captured;
+    });
+  });
+  const auto t0 = std::chrono::steady_clock::now();
+  std::this_thread::sleep_until(t0 + std::chrono::seconds(freeze_s));
+  frozen = true;
+  std::vector<uint8_t> frame;
+  {
+    std::lock_guard<std::mutex> lk(m);
+    frame = last;
+    char l[120];
+    snprintf(l, sizeof l, "{\"ev\":\"cell.replay.frozen\",\"cell\":%u,\"captured\":%llu,\"len\":%zu}",
+             cell, (unsigned long long)captured, frame.size());
+    emit(l);
+  }
+  uint64_t sent = 0;
+  const auto end = t0 + std::chrono::seconds(c.secs);
+  while (!frame.empty() && std::chrono::steady_clock::now() < end) {
+    auto pkt = build_dl_radiotap(6);
+    pkt.insert(pkt.end(), frame.begin(), frame.end());
+    if (dev->send_packet(pkt.data(), pkt.size()))
+      ++sent;
+    std::this_thread::sleep_for(std::chrono::milliseconds(every_ms));
+  }
+  char l[120];
+  snprintf(l, sizeof l, "{\"ev\":\"cell.replay.done\",\"cell\":%u,\"sent\":%llu}", cell,
+           (unsigned long long)sent);
+  emit(l);
+  dev->StopRxLoop();
+  rx.join();
+  return 0;
+}
+
 }  // namespace
 
 int main() {
   const char *role = std::getenv("CELL_ROLE");
-  if (!role || (std::strcmp(role, "du") && std::strcmp(role, "ue") && std::strcmp(role, "witness"))) {
-    fprintf(stderr, "set CELL_ROLE=du|ue|witness\n");
+  if (!role || (std::strcmp(role, "du") && std::strcmp(role, "ue") && std::strcmp(role, "witness") &&
+                std::strcmp(role, "replayer"))) {
+    fprintf(stderr, "set CELL_ROLE=du|ue|witness|replayer\n");
     return 2;
   }
   const Cfg c = cfg_from_env();
@@ -3613,6 +3821,8 @@ int main() {
   IRadio *dev = radio.dev.get();
   if (std::strcmp(role, "witness") == 0)
     return run_witness(dev, c);
+  if (std::strcmp(role, "replayer") == 0)
+    return run_replayer(dev, c);
   if (!caps_ok(dev))
     return 1;
   return std::strcmp(role, "du") == 0 ? run_du(dev, c) : run_ue(dev, c);

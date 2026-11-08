@@ -23,8 +23,8 @@
  * — so a replayed older list or report is refused by its receiver; an MR
  * entry's age is its sample's, so the CU never takes an expired sample for
  * a fresh one. Provenance: a UE counts a beacon as a measurement of a cell
- * only if it carries that cell's valid NL IE. The residual: a genuine beacon
- * replayed by someone else (only the real cell's, at the replayer's power).
+ * only if it carries that cell's valid NL IE (signed, below; a re-aired
+ * genuine beacon: Replay, below).
  *
  * gap_window(): where in its superframe a UE may go deaf for one neighbour
  * beacon — [offset - retune - guard, offset + beacon + retune + guard) — or
@@ -36,12 +36,21 @@
  * it could forge, so with the area key every UE could fake any cell's NL. A
  * DU therefore also SIGNS its NL (Ed25519, its own key) and airs a
  * certificate for that key signed by the area CA:
- *   NS IE: 'N' 'S' ver(1)=1 cell(2) gen(4) sig(64)   sig over 'S' || the NL IE
- *   NC IE: 'N' 'C' ver(1)=1 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
+ *   NS IE: 'N' 'S' ver(1)=2 cell(2) gen(4) win(4) sig(64)
+ *          sig over 'S' || the NL IE || win(4): win = the network superframe
+ *          / kNlWindowSf, the signature's freshness (re-signed per window)
+ *   NC IE: 'N' 'C' ver(1)=2 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
  * A UE holding only the CA's PUBLIC key (CELL_CA_PUB) checks the chain
  * (NlVerifier) — and can forge nothing. It caches the NL bytes it verified
- * per cell, so a signature is checked once per list, not per beacon. The
- * residual is the one any provenance has: a genuine beacon replayed.
+ * per cell, so a signature is checked once per list and window, not per
+ * beacon.
+ * Replay: a genuine signed beacon re-aired. The UE takes a neighbour's list
+ * only if its window is within one of its SERVING cell's current window
+ * (fresh: the UE hears it live), and the serving window never goes back;
+ * and the beacon must arrive at the TBTT offset the serving list names for
+ * that neighbour (main.cpp: on the shared timebase a re-aired copy lands
+ * off-phase). What remains is a real-time repeater placed on the right
+ * phase — only distance bounding would stop that.
  * The crypto is injected (examples fill it from OpenSSL), as the HMAC is.
  *
  * Pure header; the cell_m6 ctest covers it. */
@@ -263,7 +272,8 @@ inline std::optional<MrIe> find_mr_ie(const uint8_t *mpdu, size_t len, uint16_t 
 }
 
 /* --- Signed neighbour lists (see the header). --- */
-constexpr uint8_t kNlSigVersion = 1;
+constexpr uint8_t kNlSigVersion = 2;
+constexpr uint32_t kNlWindowSf = 64; /* ~6.5 s at 100 TU: a signature's freshness window */
 using Ed25519Pub = std::array<uint8_t, 32>;
 using Ed25519Sig = std::array<uint8_t, 64>;
 /* msg -> its signature under the signer's key. False on failure. */
@@ -315,21 +325,37 @@ inline std::optional<std::vector<uint8_t>> raw_nl_ie(const uint8_t *mpdu, size_t
 }
 } /* namespace mg_detail */
 
-/* The NS IE for an NL IE (its full bytes, as aired). Empty if signing fails. */
-inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, const std::vector<uint8_t> &nl_ie,
-                                             const NlSigner &sign) {
+namespace mg_detail {
+inline std::vector<uint8_t> nl_sig_message(const std::vector<uint8_t> &nl_ie, uint32_t win) {
+  std::vector<uint8_t> m = {'S'};
+  m.insert(m.end(), nl_ie.begin(), nl_ie.end());
+  put(m, win, 4);
+  return m;
+}
+} /* namespace mg_detail */
+
+/* The NS IE for an NL IE (its full bytes, as aired) in network window `win`.
+ * Empty if signing fails. */
+inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32_t win,
+                                             const std::vector<uint8_t> &nl_ie, const NlSigner &sign) {
   using namespace mg_detail;
-  std::vector<uint8_t> msg = {'S'};
-  msg.insert(msg.end(), nl_ie.begin(), nl_ie.end());
+  const auto msg = nl_sig_message(nl_ie, win);
   uint8_t sig[64];
   if (!sign || !sign(msg.data(), msg.size(), sig))
     return {};
   std::vector<uint8_t> b = {'N', 'S', kNlSigVersion};
   put(b, cell, 2);
   put(b, gen, 4);
+  put(b, win, 4);
   b.insert(b.end(), sig, sig + 64);
   return plain_ie(b);
 }
+
+/* A verified list and the network window its signature names. */
+struct SignedNl {
+  NlIe nl;
+  uint32_t win = 0;
+};
 /* The NC IE: this cell's signing key and the CA's signature over it. */
 inline std::vector<uint8_t> encode_nl_cert_ie(uint16_t cell, const Ed25519Pub &pub, const Ed25519Sig &ca_sig) {
   using namespace mg_detail;
@@ -346,9 +372,11 @@ class NlVerifier {
 public:
   NlVerifier(Ed25519Pub ca_pub, NlSigVerifier verify) : ca_(ca_pub), verify_(std::move(verify)) {}
 
-  /* Cell `cell`'s neighbour list in this beacon, if it is signed by that
-   * cell's certified key (or is exactly the list last verified for it). */
-  std::optional<NlIe> check(const uint8_t *mpdu, size_t len, uint16_t cell) {
+  /* Cell `cell`'s neighbour list in this beacon and its signature's window,
+   * if it is signed by that cell's certified key (a list and window verified
+   * before, byte for byte, are taken from the cache). Freshness is the
+   * caller's: the window. */
+  std::optional<SignedNl> check(const uint8_t *mpdu, size_t len, uint16_t cell) {
     using namespace mg_detail;
     auto raw = raw_nl_ie(mpdu, len, cell); /* the one list: what is verified IS what is parsed */
     if (!raw)
@@ -360,8 +388,21 @@ public:
     auto nl = find_nl_ie(only.data(), only.size(), cell, Mac{});
     if (!nl)
       return std::nullopt;
-    if (auto it = ok_.find(cell); it != ok_.end() && it->second == *raw)
-      return nl; /* verified before, byte for byte */
+    /* The signature IE for this list's gen: its window (and signature). */
+    std::optional<uint32_t> win;
+    std::array<uint8_t, 64> sig{};
+    for_each_ie(mpdu, len, 'N', 'S', [&](const uint8_t *b, size_t n) {
+      if (win || n != 13 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
+          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen)
+        return;
+      win = static_cast<uint32_t>(get(b + 9, 4));
+      std::copy(b + 13, b + 77, sig.begin());
+    });
+    if (!win)
+      return std::nullopt;
+    const auto msg = nl_sig_message(*raw, *win);
+    if (auto it = ok_.find(cell); it != ok_.end() && it->second == msg)
+      return SignedNl{*nl, *win}; /* verified before, byte for byte */
     /* The cell's certificate (verified once per key). */
     for_each_ie(mpdu, len, 'N', 'C', [&](const uint8_t *b, size_t n) {
       if (n != 5 + 32 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell)
@@ -377,26 +418,17 @@ public:
     auto key = keys_.find(cell);
     if (key == keys_.end())
       return std::nullopt;
-    bool good = false;
-    for_each_ie(mpdu, len, 'N', 'S', [&](const uint8_t *b, size_t n) {
-      if (good || n != 9 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
-          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen)
-        return;
-      std::vector<uint8_t> m = {'S'};
-      m.insert(m.end(), raw->begin(), raw->end());
-      good = verify_ && verify_(key->second.data(), m.data(), m.size(), b + 9);
-    });
-    if (!good)
+    if (!verify_ || !verify_(key->second.data(), msg.data(), msg.size(), sig.data()))
       return std::nullopt;
-    ok_[cell] = *raw;
-    return nl;
+    ok_[cell] = msg;
+    return SignedNl{*nl, *win};
   }
 
 private:
   Ed25519Pub ca_;
   NlSigVerifier verify_;
   std::map<uint16_t, Ed25519Pub> keys_;              /* certified cell keys */
-  std::map<uint16_t, std::vector<uint8_t>> ok_;      /* last verified NL IE, per cell */
+  std::map<uint16_t, std::vector<uint8_t>> ok_;      /* last verified message (NL + window), per cell */
 };
 
 /* An interval on the serving grid, [start, start + len) mod P. */

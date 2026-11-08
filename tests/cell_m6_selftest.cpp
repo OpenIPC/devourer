@@ -792,7 +792,7 @@ int main() {
       const auto nl = encode_nl_ie(cell, gen, list, Mac{});
       b.insert(b.end(), nl.begin(), nl.end());
       if (with_sig) {
-        const auto sg = encode_nl_sig_ie(cell, gen, nl, signer(sign_key));
+        const auto sg = encode_nl_sig_ie(cell, gen, 500, nl, signer(sign_key));
         b.insert(b.end(), sg.begin(), sg.end());
       }
       const auto ce = encode_nl_cert_ie(cell, cert_pub, cert_sig);
@@ -803,9 +803,9 @@ int main() {
     NlVerifier v(fake_pub(ca), verify);
     auto good = beacon(2, 7, l1, k2, true, fake_pub(k2), cert2);
     auto r = v.check(good.data(), good.size(), 2);
-    CHECK(r && r->gen == 7 && r->cells == l1);                       /* the chain holds */
-    auto nosig = beacon(2, 7, l1, k2, false, fake_pub(k2), cert2);
-    CHECK(v.check(nosig.data(), nosig.size(), 2));                   /* the same list, verified before */
+    CHECK(r && r->nl.gen == 7 && r->nl.cells == l1 && r->win == 500); /* the chain holds, with its window */
+    auto again = beacon(2, 7, l1, k2, true, fake_pub(k2), cert2);
+    CHECK(v.check(again.data(), again.size(), 2));                   /* the same list + window: from the cache */
     const std::vector<Neighbour> l2 = {{1, 149, 12345}};
     auto changed = beacon(2, 7, l2, k2, false, fake_pub(k2), cert2);
     CHECK(!v.check(changed.data(), changed.size(), 2));              /* a new list needs its signature */
@@ -828,7 +828,7 @@ int main() {
       swapped[0] = 0x80;
       const auto nl_a = encode_nl_ie(2, 9, l1, Mac{});
       const auto nl_b = encode_nl_ie(2, 9, l2, Mac{});
-      const auto sg = encode_nl_sig_ie(2, 9, nl_b, signer(k2));
+      const auto sg = encode_nl_sig_ie(2, 9, 500, nl_b, signer(k2));
       const auto ce = encode_nl_cert_ie(2, fake_pub(k2), cert2);
       for (const auto *ie : {&nl_a, &sg, &ce})
         swapped.insert(swapped.end(), ie->begin(), ie->end());
@@ -837,6 +837,24 @@ int main() {
     auto okb = beacon(2, 9, l2, k2, true, fake_pub(k2), cert2);
     CHECK(fresh.check(okb.data(), okb.size(), 2));
     CHECK(!fresh.check(okb.data(), okb.size(), 5));                  /* not cell 5's list */
+    {
+      /* The window is signed: a genuine signature relabelled with another
+       * window (a replayer making an old beacon look fresh) is refused. */
+      NlVerifier v3(fake_pub(ca), verify);
+      auto w = beacon(2, 12, l1, k2, true, fake_pub(k2), cert2); /* signed for window 500 */
+      for (size_t i = 36; i + 1 < w.size(); ++i)
+        if (w[i] == 221 && w[i + 5] == 'N' && w[i + 6] == 'S') {
+          w[i + 2 + 3 + 9] ^= 1; /* the window's low byte: 500 -> 501 */
+          break;
+        }
+      CHECK(!v3.check(w.data(), w.size(), 2));
+      auto w2 = beacon(2, 12, l1, k2, true, fake_pub(k2), cert2);
+      auto ok2 = v3.check(w2.data(), w2.size(), 2);
+      CHECK(ok2 && ok2->win == 500);
+      /* A list with no signature IE at all: refused even when cached. */
+      auto bare = beacon(2, 12, l1, k2, false, fake_pub(k2), cert2);
+      CHECK(!v3.check(bare.data(), bare.size(), 2));
+    }
     {
       /* A genuine signed list FOLLOWED by a forged CRC-valid one (same cell,
        * same gen): refused — never the forged entries. Before any cache. */

@@ -99,6 +99,14 @@
 //                             into the same position instead of a new one)
 //   CELL_RELEASE_SF [50]      DU: release a JOINED UE whose uplink has been
 //                             absent this many superframes (static UEs stay)
+//   CELL_GAP_SUSPEND_SF [0]   DU and UEs alike: suspend gaps (MeasGap.h). A
+//                             UE measures a neighbour no idle window reaches
+//                             in its suspend superframes (one in this many,
+//                             staggered by id; its uplink beacon stopped
+//                             around the gap); the DU airs it no DL then or
+//                             the superframe after. Decided at the UEs'
+//                             floor gap bound CELL_UE_GAP_RETUNE_US [26000] /
+//                             CELL_UE_GAP_GUARD_US [2000], read by the DU too.
 //   CELL_SECS [60]            run time
 // DU service mode (M4, #258) — set CELL_REF_PTP to hold this DU's beacon grid
 // to a PTP hardware clock (src/cell/TsfDiscipline.h; needs a Tight sync tier,
@@ -658,6 +666,12 @@ int run_du(IRadio *dev, const Cfg &c) {
   bool nl_sign_failed = false, nl_unsigned_no_net = false;
   uint32_t nl_signed_win = 0;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
+  /* Suspend gaps (MeasGap.h): a UE some neighbour leaves no idle window
+   * goes deaf in its suspend superframes; no DL to it then or the next one.
+   * Decided with the UEs' FLOOR gap bound: the same env as theirs. */
+  const int64_t gap_suspend_every = envl("CELL_GAP_SUSPEND_SF", 0, 0, 100000);
+  const int64_t gap_floor_us = envl("CELL_UE_GAP_RETUNE_US", 26000, 1000, 500000);
+  const int64_t gap_guard_du_us = envl("CELL_UE_GAP_GUARD_US", 2000, 0, 50000);
 
   /* M4 DU service mode (see the header): the PHC, the discipline loop, the
    * health that gates the coordinated schedule. */
@@ -1882,8 +1896,26 @@ int run_du(IRadio *dev, const Cfg &c) {
      * the TSF, or the network superframe it reports runs away. */
     if (served.empty())
       sleep_until_tsf(dev, grid->slot_start_tsf(sf, grid->slots().size() > 1 ? 1 : 0));
+    std::vector<devourer::cell::Neighbour> nl_dl; /* this DU's own NL, for suspend gaps */
+    if (gap_suspend_every > 0 && f1_on) {
+      std::lock_guard<std::mutex> lk(f1_mu);
+      nl_dl = nb_list;
+    }
     for (uint16_t ue : served) {
       const size_t idx = serving.find(ue)->dl_slot;
+      if (gap_suspend_every > 0 && devourer::cell::suspend_dl_skip(sf, ue, gap_suspend_every)) {
+        const Grant *sg = serving.find(ue);
+        const auto &sl = grid->slots();
+        const std::vector<devourer::cell::GridSpan> busy = {
+            {0, c.bcn_us}, {sl[sg->dl_slot].start_us, sl[sg->dl_slot].len_us},
+            {sl[sg->ul_slot].start_us, sl[sg->ul_slot].len_us}};
+        if (devourer::cell::needs_suspend(nl_dl, c.ch, gap_floor_us, gap_guard_du_us, P, busy)) {
+          char l[120];
+          snprintf(l, sizeof l, "{\"ev\":\"cell.dl.suspend\",\"ue\":%u,\"sf\":%lld}", ue, (long long)sf);
+          emit(l);
+          continue; /* the UE is (or may be) on the neighbour's channel */
+        }
+      }
       const int64_t start = grid->slot_start_tsf(sf, idx);
       /* What to send: a due HARQ retransmission, else new data (or, with
        * HARQ off, a new frame every superframe). */
@@ -2770,6 +2802,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
       static_cast<int>(envl("CELL_MEAS_L3_K", 4, 0, 19)), envl("CELL_MEAS_STALE_MS", 3000, 100, 60000)});
   const int64_t gap_every_sf = envl("CELL_UE_GAP_SF", 10, 0, 100000); /* 0 = no gaps */
   const int64_t gap_guard_us = envl("CELL_UE_GAP_GUARD_US", 2000, 0, 50000);
+  /* Suspend gaps (MeasGap.h): one in this many superframes (0 = off); the DU
+   * must run the same value (it skips this UE's DL then). */
+  const int64_t gap_suspend_every = envl("CELL_GAP_SUSPEND_SF", 0, 0, 100000);
   const int64_t mr_every_ms = envl("CELL_UE_MR_MS", 1000, 100, 60000);
   auto ue_ms = [] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3083,6 +3118,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int64_t next_mr_ms = 0;
   int64_t next_gap_sf = -1; /* the superframe of the next measurement gap */
   size_t gap_rr = 0;        /* round-robin over the other-channel neighbours */
+  size_t susp_rr = 0;       /* ... over those only a suspend gap reaches */
+  int64_t last_susp_sf = -1;
+  bool susp_infeasible = false;
+  uint64_t susp_gaps = 0, susp_heard = 0, susp_fail = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     uint64_t t = 0, f = 0;
@@ -3633,9 +3672,112 @@ int run_ue(IRadio *dev, const Cfg &c) {
      * back. Never during a handover; never across bands (the full channel
      * path); skipped if it wakes late; listening cut short if the outbound
      * retune overran into the return budget. */
-    if (gap_every_sf > 0 && !ho_pending && !ho_back) {
-      std::vector<devourer::cell::Neighbour> other;
+    /* One gap (idle or suspend): deaf from `start` (DU clock) for `len`.
+     * A suspend gap stops the uplink beacon first (it must never fire on
+     * the neighbour's channel) and leaves it stopped: the loop restarts it. */
+    auto serving_now = [&]() -> std::optional<int64_t> {
+      uint64_t t3 = 0, f3 = 0;
+      if (!dev->ReadTsfAndFreeRun(t3, f3))
+        return std::nullopt;
+      std::lock_guard<std::mutex> lk(mu);
+      return sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f3))));
+    };
+    auto run_gap = [&](const devourer::cell::Neighbour &n, int64_t start, int64_t len, bool suspend) {
+      char l[360];
+      const auto now_du = serving_now();
+      const int64_t wait = now_du ? start - *now_du : -1;
+      if (wait <= 0 || wait >= 2 * P)
+        return false;
+      std::this_thread::sleep_for(std::chrono::microseconds(wait));
+      /* Woke late? The window was checked for its planned start only. */
+      const auto woke = serving_now();
+      const int64_t late = woke ? *woke - start : gap_guard_us;
+      if (late > gap_guard_us / 2) {
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.gap_late\",\"ue\":%d,\"cell\":%u,\"late_us\":%lld,\"suspend\":%d}", me,
+                 n.cell, (long long)late, suspend ? 1 : 0);
+        emit(l);
+        return false;
+      }
+      if (suspend && beaconing) {
+        if (!dev->StopBeacon()) {
+          snprintf(l, sizeof l, "{\"ev\":\"cell.ue.gap_stop_fail\",\"ue\":%d,\"cell\":%u}", me, n.cell);
+          emit(l);
+          return false; /* never retune with the beacon armed */
+        }
+        beaconing = false;
+      }
+      const auto g0 = std::chrono::steady_clock::now();
+      /* The window's end on this clock: the radio must be back by it. */
+      const auto win_end = g0 + std::chrono::microseconds(len - std::max<int64_t>(0, late));
+      bool out_ok = true;
+      try {
+        dev->FastRetune(n.channel);
+      } catch (const std::exception &) {
+        out_ok = false;
+      }
+      const auto g1 = std::chrono::steady_clock::now();
+      /* Listen until the beacon has passed, but never into the return
+       * budget (an outbound overrun shortens the listening). */
+      const auto listen_until = win_end - std::chrono::microseconds(gap_retune_us);
+      if (out_ok && g1 < listen_until)
+        std::this_thread::sleep_until(listen_until);
+      const auto g1b = std::chrono::steady_clock::now();
+      /* Back: retried; a radio that will not return is handed to the
+       * normal retune path (beacon stopped, never on the wrong channel). */
+      bool back_ok = false;
+      for (int k = 0; k < 3 && !back_ok; ++k) {
+        try {
+          dev->FastRetune(cur_ch);
+          back_ok = true;
+        } catch (const std::exception &) {
+        }
+      }
+      const auto g2 = std::chrono::steady_clock::now();
+      if (!back_ok) {
+        if (beaconing && dev->StopBeacon())
+          beaconing = false;
+        retune_to = cur_ch;
+        snprintf(l, sizeof l, "{\"ev\":\"cell.ue.gap_return_fail\",\"ue\":%d,\"ch\":%u}", me, cur_ch);
+        emit(l);
+      }
+      const int64_t out_us = std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count();
+      const int64_t back_us = std::chrono::duration_cast<std::chrono::microseconds>(g2 - g1b).count();
+      no_step_until_sf = du_now / P + 4; /* see the TSF step below */
+      /* The bound only grows with what was measured (never below the floor). */
+      gap_retune_us = std::max({gap_retune_floor_us, gap_retune_us, out_us, back_us});
+      std::optional<devourer::cell::MeasEntry> got;
+      {
+        std::lock_guard<std::mutex> lk(mu);
+        for (const auto &e : ue_meas.snapshot(ue_ms()))
+          if (e.cell == n.cell && e.age_ms <= (g2 - g0) / std::chrono::milliseconds(1) + 1)
+            got = e;
+      }
+      snprintf(l, sizeof l,
+               "{\"ev\":\"cell.ue.gap\",\"ue\":%d,\"cell\":%u,\"channel\":%u,"
+               "\"heard\":%d,\"rssi\":%.1f,\"deaf_us\":%lld,\"out_us\":%lld,"
+               "\"back_us\":%lld,\"over_us\":%lld,\"ok\":%d,\"suspend\":%d,\"sf\":%lld,\"start_us\":%lld}",
+               me, n.cell, n.channel, got ? 1 : 0, got ? got->rssi_dbm : 0.0,
+               (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - g0).count(),
+               (long long)out_us, (long long)back_us,
+               (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - win_end).count(),
+               out_ok && back_ok ? 1 : 0, suspend ? 1 : 0, (long long)(start / P), (long long)(start % P));
+      emit(l);
+      if (suspend) {
+        ++susp_gaps;
+        susp_heard += got ? 1 : 0;
+        susp_fail += out_ok && back_ok ? 0 : 1;
+      }
+      return true;
+    };
+    if ((gap_every_sf > 0 || gap_suspend_every > 0) && !ho_pending && !ho_back) {
+      std::vector<devourer::cell::Neighbour> other, susp;
       const int64_t sfn = du_now / P;
+      const auto &sl = grid->slots();
+      const std::vector<devourer::cell::GridSpan> busy = {
+          {0, c.bcn_us},
+          {sl[g->dl_slot].start_us, sl[g->dl_slot].len_us},
+          {sl[g->ul_slot].start_us, sl[g->ul_slot].len_us}};
       {
         std::lock_guard<std::mutex> lk(mu);
         if (ue_ms() - nbrs_ms > 3000) { /* no list heard lately: none */
@@ -3643,9 +3785,47 @@ int run_ue(IRadio *dev, const Cfg &c) {
           have_serv_phase = false; /* no serving grid heard either */
         }
         for (const auto &n : nbrs) {
+          /* Only a suspend gap reaches it (decided at the FLOOR bound, as the
+           * DU decides): measured in this UE's suspend superframes instead. */
+          if (gap_suspend_every > 0 &&
+              devourer::cell::suspend_only(n, cur_ch, gap_retune_floor_us, gap_guard_us, P, busy)) {
+            susp.push_back(n);
+            continue;
+          }
           auto pk = gap_parked.find(n.cell);
           if (n.channel != 0 && n.channel != cur_ch && (pk == gap_parked.end() || sfn >= pk->second))
             other.push_back(n);
+        }
+      }
+      /* A suspend gap STARTS in one of this UE's suspend superframes S, at
+       * ((offset - retune - guard) mod P) into it, and so ends before S + 2
+       * (its length is under P): exactly the superframes the DU skips this
+       * UE's DL in. Taken for S = sfn + 1, or for S = sfn itself if this
+       * pass came late and its start is still ahead. */
+      if (!susp.empty()) {
+        const int64_t len = 2 * (gap_retune_us + gap_guard_us) + 500;
+        if (len >= P) {
+          if (!susp_infeasible) { /* the measured retunes outgrew the superframe */
+            susp_infeasible = true;
+            char l[160];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.ue.suspend_infeasible\",\"ue\":%d,\"retune_us\":%lld}", me,
+                     (long long)gap_retune_us);
+            emit(l);
+          }
+        } else {
+          for (const int64_t S : {sfn, sfn + 1}) {
+            if (S <= last_susp_sf || !devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every))
+              continue;
+            const auto n = susp[susp_rr % susp.size()];
+            const int64_t w = ((n.offset_us - gap_retune_us - gap_guard_us) % P + P) % P;
+            const auto now_du = serving_now();
+            if (!now_du || S * P + w - *now_du <= gap_guard_us)
+              continue; /* this one is out of reach (S = sfn); S + 1 comes next pass */
+            last_susp_sf = S;
+            ++susp_rr;
+            run_gap(n, S * P + w, len, true);
+            break;
+          }
         }
       }
       /* Each measurable neighbour every gap_every_sf: one gap per
@@ -3654,21 +3834,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
           std::max<int64_t>(2, gap_every_sf / static_cast<int64_t>(std::max<size_t>(1, other.size())));
       if (next_gap_sf < 0)
         next_gap_sf = sfn + every;
-      if (!other.empty() && sfn >= next_gap_sf) {
+      if (gap_every_sf > 0 && !other.empty() && sfn >= next_gap_sf) {
         next_gap_sf = sfn + every;
         const auto n = other[gap_rr++ % other.size()];
-        const auto &sl = grid->slots();
-        const std::vector<devourer::cell::GridSpan> busy = {
-            {0, c.bcn_us},
-            {sl[g->dl_slot].start_us, sl[g->dl_slot].len_us},
-            {sl[g->ul_slot].start_us, sl[g->ul_slot].len_us}};
         const bool cross_band = devourer::cell::gap_cross_band(cur_ch, n.channel);
         const auto w = cross_band ? std::nullopt
                                   : devourer::cell::gap_window(n.offset_us, 500, gap_retune_us,
                                                                gap_guard_us, P, busy);
-        char l[300];
         if (!w) {
           gap_parked[n.cell] = sfn + 50 * every; /* rarely re-checked */
+          char l[300];
           snprintf(l, sizeof l,
                    "{\"ev\":\"cell.ue.gap_skip\",\"ue\":%d,\"cell\":%u,\"offset_us\":%d,"
                    "\"why\":\"%s\"}",
@@ -3676,86 +3851,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
           emit(l);
         } else {
           gap_parked.erase(n.cell);
-          const int64_t start = (sfn + 1) * P + w->start;
-          auto serving_now = [&]() -> std::optional<int64_t> {
-            uint64_t t3 = 0, f3 = 0;
-            if (!dev->ReadTsfAndFreeRun(t3, f3))
-              return std::nullopt;
-            std::lock_guard<std::mutex> lk(mu);
-            return sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f3))));
-          };
-          const auto now_du = serving_now();
-          const int64_t wait = now_du ? start - *now_du : -1;
-          if (wait > 0 && wait < 2 * P) {
-            std::this_thread::sleep_for(std::chrono::microseconds(wait));
-            /* Woke late? The window was checked for its planned start only. */
-            const auto woke = serving_now();
-            const int64_t late = woke ? *woke - start : gap_guard_us;
-            if (late > gap_guard_us / 2) {
-              snprintf(l, sizeof l,
-                       "{\"ev\":\"cell.ue.gap_late\",\"ue\":%d,\"cell\":%u,\"late_us\":%lld}",
-                       me, n.cell, (long long)late);
-              emit(l);
-            } else {
-              const auto g0 = std::chrono::steady_clock::now();
-              /* The window's end on this clock: the radio must be back by it. */
-              const auto win_end = g0 + std::chrono::microseconds(w->len - std::max<int64_t>(0, late));
-              bool out_ok = true;
-              try {
-                dev->FastRetune(n.channel);
-              } catch (const std::exception &) {
-                out_ok = false;
-              }
-              const auto g1 = std::chrono::steady_clock::now();
-              /* Listen until the beacon has passed, but never into the return
-               * budget (an outbound overrun shortens the listening). */
-              const auto listen_until = win_end - std::chrono::microseconds(gap_retune_us);
-              if (out_ok && g1 < listen_until)
-                std::this_thread::sleep_until(listen_until);
-              const auto g1b = std::chrono::steady_clock::now();
-              /* Back: retried; a radio that will not return is handed to the
-               * normal retune path (beacon stopped, never on the wrong channel). */
-              bool back_ok = false;
-              for (int k = 0; k < 3 && !back_ok; ++k) {
-                try {
-                  dev->FastRetune(cur_ch);
-                  back_ok = true;
-                } catch (const std::exception &) {
-                }
-              }
-              const auto g2 = std::chrono::steady_clock::now();
-              if (!back_ok) {
-                if (beaconing && dev->StopBeacon())
-                  beaconing = false;
-                retune_to = cur_ch;
-                snprintf(l, sizeof l, "{\"ev\":\"cell.ue.gap_return_fail\",\"ue\":%d,\"ch\":%u}",
-                         me, cur_ch);
-                emit(l);
-              }
-              const int64_t out_us = std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count();
-              const int64_t back_us = std::chrono::duration_cast<std::chrono::microseconds>(g2 - g1b).count();
-              no_step_until_sf = du_now / P + 4; /* see the TSF step below */
-              /* The bound only grows with what was measured (never below the floor). */
-              gap_retune_us = std::max({gap_retune_floor_us, gap_retune_us, out_us, back_us});
-              std::optional<devourer::cell::MeasEntry> got;
-              {
-                std::lock_guard<std::mutex> lk(mu);
-                for (const auto &e : ue_meas.snapshot(ue_ms()))
-                  if (e.cell == n.cell && e.age_ms <= (g2 - g0) / std::chrono::milliseconds(1) + 1)
-                    got = e;
-              }
-              snprintf(l, sizeof l,
-                       "{\"ev\":\"cell.ue.gap\",\"ue\":%d,\"cell\":%u,\"channel\":%u,"
-                       "\"heard\":%d,\"rssi\":%.1f,\"deaf_us\":%lld,\"out_us\":%lld,"
-                       "\"back_us\":%lld,\"over_us\":%lld,\"ok\":%d}",
-                       me, n.cell, n.channel, got ? 1 : 0, got ? got->rssi_dbm : 0.0,
-                       (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - g0).count(),
-                       (long long)out_us, (long long)back_us,
-                       (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - win_end).count(),
-                       out_ok && back_ok ? 1 : 0);
-              emit(l);
-            }
-          }
+          run_gap(n, (sfn + 1) * P + w->start, w->len, false);
         }
       }
     }
@@ -3765,13 +3861,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->StopRxLoop();
   rx.join();
   dev->ClearAckResponder();
-  char l[560];
+  char l[640];
   snprintf(l, sizeof l,
            "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
            "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu,"
            "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu,\"nbr_refused\":{\"stale\":%llu,"
            "\"unlisted\":%llu,\"phase\":%llu},\"dl_pdus\":{\"delivered\":%llu,\"duplicates\":%llu,"
-           "\"missing\":%llu,\"stale\":%llu,\"top\":%lld}}",
+           "\"missing\":%llu,\"stale\":%llu,\"top\":%lld},\"suspend_gaps\":{\"n\":%llu,\"heard\":%llu,"
+           "\"fail\":%llu}}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
            (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
            (unsigned long long)gm_ok, (unsigned long long)gm_refused,
@@ -3779,7 +3876,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
            (unsigned long long)nbr_refused["phase"], (unsigned long long)dl_stream.delivered(),
            (unsigned long long)dl_stream.duplicates(), (unsigned long long)dl_stream.missing_total(),
            (unsigned long long)dl_stream.stale(),
-           dl_stream.top() ? (long long)*dl_stream.top() : -1LL);
+           dl_stream.top() ? (long long)*dl_stream.top() : -1LL, (unsigned long long)susp_gaps,
+           (unsigned long long)susp_heard, (unsigned long long)susp_fail);
   emit(l);
   return 0;
 }

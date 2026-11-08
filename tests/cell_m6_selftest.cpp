@@ -555,6 +555,26 @@ int main() {
     CHECK(!gap_window(100000, beacon, retune, guard, P, busy)); /* wraps onto the serving beacon */
     CHECK(!gap_window(80000, beacon, retune, guard, P, busy));  /* [54000, 106500) wraps onto the beacon */
     CHECK(gap_window(70000, beacon, retune, guard, P, busy));   /* [44000, 96500): clear */
+    /* Suspend gaps: the pattern, the DU's DL skip, and which neighbours. */
+    {
+      int n = 0;
+      for (int64_t sf = 0; sf < 200; ++sf)
+        n += suspend_sf(sf, 2, 20) ? 1 : 0;
+      CHECK(n == 10);                                       /* one in `every` */
+      CHECK(suspend_sf(14, 2, 20) && !suspend_sf(14, 1, 20)); /* staggered by UE id */
+      CHECK(suspend_dl_skip(14, 2, 20) && suspend_dl_skip(15, 2, 20) && !suspend_dl_skip(16, 2, 20));
+      CHECK(!suspend_sf(14, 2, 0) && !suspend_dl_skip(15, 2, 0)); /* off */
+      CHECK(suspend_sf(-6, 2, 20));                         /* negative superframes stay in step */
+      const Neighbour idle_ok{2, 157, 60000}, slots{3, 157, 13450}, same{4, 149, 13450}, band{5, 6, 13450};
+      CHECK(!suspend_only(idle_ok, 149, retune, guard, P, busy)); /* an idle window exists */
+      CHECK(suspend_only(slots, 149, retune, guard, P, busy));    /* only over its own slots */
+      CHECK(!suspend_only(same, 149, retune, guard, P, busy));    /* same channel: no gap at all */
+      CHECK(!suspend_only(band, 149, retune, guard, P, busy));    /* across bands: never */
+      CHECK(!needs_suspend({idle_ok, same, band}, 149, retune, guard, P, busy));
+      CHECK(needs_suspend({idle_ok, slots}, 149, retune, guard, P, busy));
+      /* A retune too long for any window in P: no suspend gap either. */
+      CHECK(!suspend_only(slots, 149, 60000, guard, P, busy));
+    }
     /* F1 v7: Neighbours, and the UEs' own measurements in a Report. */
     f1::Neighbours nb{1, 777, {{2, 157, 60000}, {3, 36, 13450}}};
     const auto wn = f1::encode_neighbours(nb, k);
@@ -619,6 +639,32 @@ int main() {
     PhaseCell j = phase_cell(3, 36, 0, 102400, d.fixed, d.positions);
     p = plan_phase(j, {a, c2}, pp);
     CHECK(p.max_score == 4 && p.score >= 1 && p.score < 4);
+    /* With suspend gaps every direction of every pair is covered (score > 0
+     * per direction), and the plan still prefers the idle windows: the
+     * idle-only optimum is kept where it exists. */
+    PhaseParams sp = pp;
+    sp.suspend_weight = 0.25;
+    CHECK(plan_phase(phase_cell(2, 157, 0, 102400, d.fixed, d.positions), {a}, sp).phase_us == 51200);
+    auto p3 = plan_phase(j, {a, c2}, sp);
+    for (const auto &pr : p3.pairs) {
+      const PhaseCell &e = pr.first == 1 ? a : c2;
+      CHECK(mg_detail::measurable(e, neighbour_offset_us(p3.phase_us, e.phase_us, 102400), sp) > 0);
+      CHECK(mg_detail::measurable(j, neighbour_offset_us(e.phase_us, p3.phase_us, 102400), sp) > 0);
+    }
+    /* ... and the pair the third cell cannot reach idle is suspend-only. */
+    {
+      const std::vector<GridSpan> busy3 = {{0, 1500}, {1500, 4000}, {14500, 2000}};
+      bool some_suspend = false;
+      for (const PhaseCell *e : std::vector<const PhaseCell *>{&a, &c2}) {
+        Neighbour n{e->du, e->channel, neighbour_offset_us(e->phase_us, p3.phase_us, 102400)};
+        some_suspend = some_suspend || suspend_only(n, 36, 26000, 2000, 102400, busy3);
+      }
+      Neighbour back_a{3, 36, neighbour_offset_us(p3.phase_us, 0, 102400)};
+      Neighbour back_c{3, 36, neighbour_offset_us(p3.phase_us, 51200, 102400)};
+      some_suspend = some_suspend || suspend_only(back_a, 149, 26000, 2000, 102400, busy3) ||
+                     suspend_only(back_c, 157, 26000, 2000, 102400, busy3);
+      CHECK(some_suspend);
+    }
     /* Across bands: no gap credit (the UEs never gap there). */
     PhaseCell lo = phase_cell(4, 6, 0, 102400, d.fixed, d.positions);
     CHECK(mg_detail::pair_score(lo, 51200, a, pp) == 0);

@@ -318,6 +318,7 @@ phase 0 on another channel:
 
 A third cell on a third channel cannot be measured both ways by both others
 at this bound; its plan is partial (score below the maximum), not refused.
+Suspend gaps (below) cover that case.
 
 **Rig result** (testrig `scripts/m6_phaseplan.sh`, 5 runs, all pass).
 - **Layout:** cell 1 is on ch149 at phase 0. Cell 2 is on ch157 with no phase
@@ -351,6 +352,73 @@ after the DUs, with the DU asking for its phase after its beacon had started.
   have the UEs' skew at −3 to −8 ppm.
 - **Not established:** the source of the jump. The UE now survives one
   (next section).
+
+### Beyond two cells: suspend gaps
+
+**Why idle gaps cannot do it.**
+- A gap is 26 + 2 ms on each side of a 0.5 ms beacon: 56.5 ms of a 102.4 ms
+  superframe.
+- It must clear the 20.5 ms active span. So one direction works only for a
+  neighbour offset in [48.5, 73.9] ms, and both directions only for a phase
+  difference in [48.5, 53.9] ms: half a superframe.
+- Three cells cannot be pairwise half a superframe apart. Whatever the
+  layout, and whether or not live cells could be re-phased, some pair of
+  three cells on three channels can never measure each other in idle gaps.
+
+**A suspend gap** (`src/cell/MeasGap.h`, `CELL_GAP_SUSPEND_SF`, the same
+value on the DU and its UEs) may cover the UE's own slots, the 3GPP way.
+- **When:** only in the UE's suspend superframes, one in N (20 on the rig),
+  staggered by UE id so a cell's UEs are not all deaf at once.
+- **The uplink beacon:** the UE stops it before it retunes (it must never
+  fire on the neighbour's channel) and restarts it after.
+- **The DL:** the DU airs that UE no DL frame in its suspend superframe or
+  the one after, since the gap may run into it. An unACKed frame would cost
+  the next one up to CWmax on Kestrel.
+- **Agreement:** whether a UE needs suspend gaps at all is decided at the
+  floor gap bound on both sides (`needs_suspend`), so the DU and the UE
+  agree. A neighbour an idle window reaches is still measured that way.
+- **The cost:** at most two superframes' DL and uplink in N (the rig
+  measured 1–2 uplinks in 20), and only for a UE some neighbour leaves no
+  idle window.
+
+**The planner** (`RAN_GAP_SUSPEND=1`): a direction only a suspend gap
+reaches counts 0.25 per position instead of 0.
+- It still prefers idle windows: two cells still get 51200.
+- A third cell on a third channel is covered both ways with every other cell
+  (cell_m6 ctest).
+
+**Rig result** (testrig `scripts/m6_suspend.sh`, 2 runs per case, all
+pass). Cell 1 is on ch149 and cell 2 on ch157 at phase 20000: the beacons are
+20 ms apart, so neither cell's UE has an idle window for the other's. Suspend
+gaps run one in 20 superframes.
+
+| case | each UE's reports carrying the other cell | suspend gaps per UE (heard) | uplink heard by its DU |
+|---|---|---|---|
+| suspend gaps, idle gaps off (2) | 100 % | 43 (100 %) | UE1 90 %, UE2 95 % |
+| none, the counterfactual (2) | 0 % | 0 | 100 % |
+| suspend gaps + the A3 executing (2) | 100 % | 42–44 (100 %) | 91–95 % before the switch |
+
+- **No DL frame in a deaf window:** in all suspend runs, no DU aired its UE
+  a DL frame while the UE was in a suspend gap. Every skipped DL frame fell
+  in the UE's suspend superframe or the one after.
+- **No stray beacon:** the witness on ch149 never saw a cell-2 uplink, so a
+  stopped beacon never fired on the other channel.
+- **The cost** is the uplink's 1 or 2 superframes in 20.
+  - UE1's gap (its neighbour 20 ms into its grid) runs from 94.4 ms into
+    its suspend superframe S to 46 ms into S + 1, so it covers S + 1's
+    uplink slot.
+  - UE2's gap (offset 82.4 ms) runs from 54.4 ms into S to 6 ms into S + 1,
+    clear of both uplink slots.
+  - Both UEs also lose the first uplink slot after the gap (UE1 S + 2, UE2
+    S + 1), though that slot comes 10–70 ms after the gap ends: the
+    restarted beacon first airs a superframe later. Why is not established.
+- **The gaps:** deaf time 54.0–54.6 ms, the other cell at −58 to −45.5 dBm.
+- **In slot:** each DU heard its UE in slot 100 % from the first suspend gap
+  on. One run had a single out-of-slot uplink 15 superframes before its
+  first gap (cause not established; not the gaps).
+- **Handover on suspend gaps alone:** in both handover runs UE1 handed over
+  to cell 2 on measurements only suspend gaps gave it (A3 at defaults,
+  metric `ue_rssi`). The target heard it in slot 99.7–100 %.
 
 ## The UE's clock fit across a jump of its DU's TSF
 
@@ -1051,10 +1119,11 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   variant, with its retune and deaf-time budget. The downlink is duplicated
   through the target's buffer, but not received from both DUs at once (see
   the downlink duplication section).
-- **Phase planning beyond two cells:** a joining cell is placed against the
-  running ones, which never move. With three or more cells on different
-  channels, the 26 ms retune leaves no layout where every pair can measure
-  both ways. Re-phasing live cells, or longer superframes, is open.
+- **Three cells on the rig:** suspend gaps make every pair of three cells
+  on three channels measurable, but the rig has two DUs with good TX. The
+  three-cell plan is covered by the ctest; on air, two cells at a layout with
+  no idle window (the pair a third cell forces) show the mechanism.
+  Re-phasing live cells is still open; it is not needed for measurability.
 - **A real moving UE:** the crossing below is emulated by the DUs' TX
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,

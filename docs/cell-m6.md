@@ -594,7 +594,8 @@ also signs its list with its own Ed25519 key (`src/cell/MeasGap.h`).
   master (`Keys.h`, two HMAC-SHA1 outputs to 32 bytes). The rig's Python
   provisioning (testrig `scripts/cell_keys.py`) matches the C++ derivation
   and OpenSSL's Ed25519 byte for byte.
-- **The residual** is the one any provenance has: a genuine beacon replayed.
+- **Replay** of a genuine signed beacon is the residual of any provenance;
+  it has its own section below.
 
 The rig result (testrig `scripts/m6_nlsign.sh`, per-cell keys and
 signing):
@@ -831,12 +832,83 @@ egress-timestamp sequence, gave 0/0/1 and 13/14/14.
   went on entirely via the target: of 1156 delivered, 31 came first through
   the source and 1125 through the target.
 
+## Replay of a signed neighbour list
+
+A signature proves who wrote a beacon, not when it was aired, so the
+residual of the signed lists is a genuine beacon recorded and re-aired: a
+ghost of a cell that is no longer there (or never was here), which a UE would
+measure and the CU could hand over to. Two checks make a re-aired copy
+useless unless it is relayed live and on time (`src/cell/MeasGap.h`,
+`examples/cell/main.cpp`).
+
+- **A signed window.** The NS IE (version 2) carries `win`, the network
+  superframe / `kNlWindowSf` (64, ~6.5 s at 100 TU), inside the signature
+  (`'S' || NL IE || win`). The DU re-signs at every window change, and signs
+  only once it knows the network superframe. The UE takes its serving
+  cell's window as "now" and refuses a serving window that goes back. It
+  takes a neighbour's beacon only if the neighbour's window is within one of
+  the serving window, i.e. only if it was signed in the last ~13 s.
+- **The phase.** All DUs share the PTP timebase, and the serving list names
+  each neighbour's TBTT offset on the serving grid. The UE keeps the phase
+  where its serving beacons land (on its fitted DU clock) and refuses a
+  neighbour beacon that lands more than `CELL_UE_NBR_PHASE_US` (300 µs) from
+  serving phase + offset. A copy re-aired off the cell's own TBTT fails this
+  even inside the window.
+- **Unlisted.** A neighbour the serving list does not name is not measured
+  either.
+
+Refusals are logged per reason (`cell.ue.nbr_refused`, counted in
+`cell.ue.done`). `CELL_UE_NBR_FRESH=0` turns the checks off, which the rig
+uses for the counterfactual.
+
+**What remains** is a real-time repeater placed on the right phase: it
+relays the live beacon within the tolerance, so it is the real cell, only
+louder. Only distance bounding would stop that.
+
+**Costs.** A neighbour is measured only once the serving phase is known. On
+the rig that is about the first 16 neighbour beacons after the UE starts or
+switches. A UE whose serving DU is gone measures no neighbour until it
+re-attaches. With no serving cell, its measurement reports have nowhere to
+go anyway.
+
+**Rig result** (testrig `scripts/m6_replay.sh`). Per-cell keys and signed
+lists, both cells on one channel. The witness radio runs the test-only
+replayer role (`CELL_ROLE=replayer`): it records cell 2's genuine DU
+beacons for 45 s, then re-airs the last one every 100 ms. DU2 is killed at
+50 s, so from then on only the replayed beacon of cell 2 is on air.
+
+| case | runs | UE1's reports with cell 2: early (genuine) | last 200 (after DU2 is gone) | refused (stale / unlisted / phase) |
+|---|---|---|---|---|
+| checks on | 2 | 100 % | **0 %** | 559–568 / 0–8 / 127–130 |
+| checks off (`CELL_UE_NBR_FRESH=0`) | 2 | 100 % | 100 %: the ghost is measured | — |
+
+The replayer sent 1049 copies in every run. With the checks on, the ghost
+is refused first on phase (its window is still current), then as stale.
+
+Regression with the checks on, 1 run of each, all pass:
+- per-cell keys with signing (`M5_MASTER`): measurement-gap handover, the
+  emulated crossing, phase planning, handover with and without a fault, and
+  DAPS;
+- the per-cell key set, joiner keys and per-UE area credentials (their own
+  scripts);
+- a shared-key handover.
+
+Apart from the replay runs, refusals were only the ~16 at the start of each
+UE (before its serving phase was known) plus the dead-serving case above.
+
 ## Bugs the rig found
 
 **A DU with no UE did not pace its main loop.** Its superframe count ran away
 from the TSF (186 → 3.5 M), and so did the network superframe it reported.
 Every M1–M5 run had a static UE, which hid it. The loop now waits for its
 superframe when there is nothing to serve.
+
+**The neighbour phase reference was cleared every superframe.** A brace
+missing around the "no list heard lately" reset in the UE's gap block wiped
+the serving phase each loop. Most genuine neighbour beacons were then
+refused on phase (781 of ~865 for one UE). The first regression of the
+replay checks caught it in the signed-list run: UE2 reported cell 1 in only
+74.8 % of its reports. With the fix, 99.9 %.
 
 **First attempts at execution, in order:**
 1. The source's stale reports re-triggered the A3 for the UE that had just
@@ -876,7 +948,8 @@ superframe when there is nothing to serve.
 - **Unsigned neighbour lists:** without the signing material
   (`CELL_NL_SIGN_KEY`, `CELL_NL_CERT`, `CELL_CA_PUB`), an area-key holder
   can still forge a neighbour list, which is measurement provenance only.
-  With it, the residual is a genuine beacon replayed.
+  With it, and the replay checks, the residual is a real-time repeater on
+  the right phase (see the replay section).
 - **Keyed rig runs only from the grant-map authentication on:** the
   handover, DAPS, inter-frequency, measurement-gap, phase-planning and
   clock-fit rig results above were run without `CELL_PSK`, an

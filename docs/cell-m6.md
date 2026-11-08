@@ -832,6 +832,58 @@ egress-timestamp sequence, gave 0/0/1 and 13/14/14.
   went on entirely via the target: of 1156 delivered, 31 came first through
   the source and 1125 through the target.
 
+## DAPS: downlink duplication
+
+Until now the DL data was each DU's own (HARQ frames with nothing above
+them), so nothing ran on across a handover to lose. The downlink now has a
+**stream at the CU**, like the uplink's:
+
+- **The CU originates it** (`RAN_DL_MS`): one PDU per UE every 100 ms on the
+  rig, numbered in the UE's stream (`sn` from 1), sent to its serving DU over
+  F1 `Downlink` (v12).
+- **The DU queues it** per UE (64 deep, oldest dropped) and airs up to 8
+  sns per DL frame, inside the tagged body. A forged sn therefore cannot make
+  the UE drop a real PDU as a duplicate. A HARQ retransmission re-airs the
+  same sns. The DL frame is a fixed size (protocol v4, 33 bytes more than
+  before).
+- **The UE delivers** each sn once (`DlStreamRx`, `src/cell/Handover.h`),
+  whichever DU it came through. Its sn space lives as long as the UE does and
+  is never reset on a switch. A run of missing sns is a gap once it is 32
+  behind the newest; a late copy within that recovers it. Gaps are logged as
+  `cell.ue.dl_gap`, and the totals appear in `cell.ue.done` (`dl_pdus`).
+- **The stream follows the UE:** at `ran.ho_done` the CU moves it to the
+  target identity (`ran.dl_moved`).
+
+**Duplication** (`RAN_DL_DAPS=1`, the default):
+- From the handover command until `ran.ho_done`, the CU sends every PDU to
+  the target too, for the UE's target identity.
+- The target queues them for the UE it has only staged, and airs them from
+  its first DL frame after the switch, oldest first.
+- The UE drops what it already had from the source as duplicates.
+- Without duplication, PDUs go to the source until `ho_done`: what the
+  source holds or is sent after the UE left is lost.
+
+A replayed F1 `Downlink` carries no freshness of its own; at worst it
+re-queues a PDU the UE then drops as a duplicate.
+
+**Rig result** (testrig `scripts/m6_daps_dl.sh`, 2 runs per case, all
+pass). A forced same-channel handover of UE1 from cell 1 to cell 2. In the
+fault cases the source DU is killed the moment UE1 accepts, ~2 s before the
+switch.
+
+| UE1's DL PDUs missing | DAPS | no DAPS |
+|---|---|---|
+| source killed mid-crossing | 0, 0 | 36, 23 (one gap each, from the kill to `ho_done`) |
+| plain handover | 0, 0 | 8, 11 (the switch to `ho_done`; one run also lost 3 early in the run) |
+
+- **What it costs:** the static UE2 lost none in any run. With DAPS the
+  target held ~24 PDUs at the switch and drained them in 4–5 DL frames
+  (~0.5 s), 8 per frame. Most are duplicates in a plain handover: UE1 saw
+  44–70 duplicates per run against 44–50 without DAPS.
+- **Not duplicated:** the source does not keep airing to the UE after the
+  switch, and the UE takes DL frames only from its serving cell. The target
+  delivers what the source could not, late by up to the buffer's age.
+
 ## Replay of a signed neighbour list
 
 A signature proves who wrote a beacon, not when it was aired, so the
@@ -949,10 +1001,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
 
 ## Not covered yet
 
-- **DAPS beyond same-channel uplink:**
-  - downlink duplication;
-  - the different-channel (sequential) variant, with its retune and deaf-time
-    budget.
+- **DAPS beyond same channel:** the different-channel (sequential)
+  variant, with its retune and deaf-time budget. The downlink is duplicated
+  through the target's buffer, but not received from both DUs at once (see
+  the downlink duplication section).
 - **Phase planning beyond two cells:** a joining cell is placed against the
   running ones, which never move. With three or more cells on different
   channels, the 26 ms retune leaves no layout where every pair can measure

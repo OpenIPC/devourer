@@ -92,6 +92,21 @@ int main() {
     g[10 + 5] = 3; /* TA is not the DU */
     CHECK(!parse_dl_frame(g.data(), g.size(), 5));
     CHECK(!parse_dl_frame(f.data(), 26 + kDlBodyLen - 1, 5));
+    CHECK(d && d->pdus.empty());
+    /* The CU's DL PDUs: carried in order, at most kDlMaxPdus, same length. */
+    std::vector<uint32_t> sns;
+    for (uint32_t i = 0; i < kDlMaxPdus + 2; ++i)
+      sns.push_back(1000 + i);
+    auto fp = build_dl_frame(5, 2, 1, 78, 10, DlHarq{70, 6, 1}, {}, sns);
+    CHECK(fp.size() == f.size());
+    auto dp = parse_dl_frame(fp.data(), fp.size(), 5);
+    CHECK(dp && dp->pdus.size() == kDlMaxPdus && dp->pdus.front() == 1000 &&
+          dp->pdus.back() == 1000 + kDlMaxPdus - 1);
+    auto f3 = build_dl_frame(5, 2, 1, 79, 10, DlHarq{70, 7, 1}, {}, {7, 8, 9});
+    auto d3 = parse_dl_frame(f3.data(), f3.size(), 5);
+    CHECK(d3 && d3->pdus == std::vector<uint32_t>({7, 8, 9}));
+    f3[26 + 23] = kDlMaxPdus + 1; /* npdu beyond the slots */
+    CHECK(!parse_dl_frame(f3.data(), f3.size(), 5));
   }
 
   /* DL radiotap: RATE (500 kb/s units) + signed DBM_TX_POWER, no TX_FLAGS. */
@@ -146,6 +161,9 @@ int main() {
     auto dlt = dl;
     dlt[26 + 13] ^= 1; /* seq */
     CHECK(!parse_dl_frame(dlt.data(), dlt.size(), 5, k1));
+    auto dls = build_dl_frame(5, 2, 10, 21, 0, DlHarq{18, 5, 1}, k1, {500, 501});
+    dls[26 + 24] ^= 1; /* a PDU sn: under the tag */
+    CHECK(!parse_dl_frame(dls.data(), dls.size(), 5, k1));
     auto dlv = dl;
     dlv[28] = 1; /* version */
     CHECK(!parse_dl_frame(dlv.data(), dlv.size(), 5));

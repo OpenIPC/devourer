@@ -77,7 +77,8 @@ namespace devourer::cell::f1 {
  * 6: Handover carries the target's channel (inter-frequency). */
 /* 8: Phase (CU -> DU: a joining DU's TBTT phase, src/cell/PhasePlan.h); a
  * Report with phase_us < 0 asks for one. */
-constexpr uint8_t kVersion = 11; /* v11: AreaKeys (per-UE area credentials) */
+/* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). */
+constexpr uint8_t kVersion = 12; /* v12: Downlink */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -90,7 +91,7 @@ constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 25
 constexpr size_t kMaxDatagram = 8192;
 
 enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6,
-                            Phase = 7, AreaKeys = 8 };
+                            Phase = 7, AreaKeys = 8, Downlink = 9 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
 
 inline const char *ack_status_name(AckStatus s) {
@@ -345,7 +346,7 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {
   if (p == nullptr || n < 4 + kTagLen || p[0] != 'F' || p[1] != '1' || p[2] != kVersion)
     return std::nullopt;
-  if (p[3] < 1 || p[3] > 8)
+  if (p[3] < 1 || p[3] > 9)
     return std::nullopt;
   return static_cast<Type>(p[3]);
 }
@@ -647,6 +648,42 @@ inline std::optional<UplinkFwd> decode_uplink(const uint8_t *p, size_t n, const 
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return u;
+}
+
+/* CU -> DU: one DL PDU for a UE this DU serves (or has staged for a
+ * handover): `sn` is its number in the UE's CU-side DL stream, which runs on
+ * across handovers. The DU queues it and airs it in that UE's DL frames;
+ * the UE delivers each sn once, whichever DU it came through. DAPS
+ * duplicates a PDU to the source and the target. */
+struct DownlinkPdu {
+  uint16_t du = 0;
+  uint16_t ue = 0;
+  uint32_t sn = 0;
+  bool operator==(const DownlinkPdu &) const = default;
+};
+
+inline std::vector<uint8_t> encode_downlink(const DownlinkPdu &d, const Mac &mac) {
+  using namespace detail;
+  auto m = head(Type::Downlink);
+  put(m, d.du, 2);
+  put(m, d.ue, 2);
+  put(m, d.sn, 4);
+  return seal(std::move(m), mac);
+}
+
+inline std::optional<DownlinkPdu> decode_downlink(const uint8_t *p, size_t n, const Mac &mac) {
+  using namespace detail;
+  auto o = open(p, n, Type::Downlink, mac);
+  if (!o)
+    return std::nullopt;
+  Rd &r = *o;
+  DownlinkPdu d;
+  d.du = static_cast<uint16_t>(r.get(2));
+  d.ue = static_cast<uint16_t>(r.get(2));
+  d.sn = static_cast<uint32_t>(r.get(4));
+  if (!r.ok || r.i != r.n)
+    return std::nullopt;
+  return d;
 }
 
 /* CU -> DU: the cells a DU's UEs should measure (their channel and TBTT

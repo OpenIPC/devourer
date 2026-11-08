@@ -41,6 +41,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -246,6 +247,77 @@ private:
   bool init_ = false;
   uint32_t top_ = 0;
   std::array<uint64_t, kWindow / 64> bits_{};
+};
+
+/* The UE's side of its DL stream (the CU's DL PDUs, F1 Downlink): each sn
+ * is delivered once, whichever DU it came through (DAPS duplicates them to
+ * the source and the target) and however often HARQ re-aired it. A jump
+ * past top marks the sns in between missing; a late copy recovers one. A
+ * run of missing sns counts as a GAP once its last sn is kReorder behind
+ * the newest (a late copy within that recovers it silently): the
+ * interruption a handover cost the downlink. */
+class DlStreamRx {
+public:
+  static constexpr uint32_t kReorder = 32;
+  static constexpr uint32_t kMaxJump = 512; /* a jump beyond: a new stream, not a gap */
+  struct Gap {
+    uint32_t after_sn = 0;
+    uint32_t missing = 0;
+  };
+
+  bool accept(uint32_t sn) {
+    if (!dedup_.accept(sn)) {
+      ++dups_;
+      return false;
+    }
+    ++delivered_;
+    if (!have_top_) {
+      have_top_ = true;
+      top_ = sn;
+    } else if (missing_.erase(sn)) {
+      /* a late copy: recovered */
+    } else {
+      const int32_t d = static_cast<int32_t>(sn - top_);
+      if (d > 0) {
+        if (static_cast<uint32_t>(d) <= kMaxJump)
+          for (uint32_t k = 1; k < static_cast<uint32_t>(d); ++k)
+            missing_.insert(top_ + k);
+        top_ = sn;
+      }
+    }
+    confirm();
+    return true;
+  }
+  /* Gap runs confirmed since the last call. */
+  std::vector<Gap> take_gaps() { return std::exchange(gaps_, {}); }
+  uint64_t delivered() const { return delivered_; }
+  uint64_t duplicates() const { return dups_; }
+  uint64_t missing_confirmed() const { return lost_; }
+  /* Confirmed plus still within the reorder window (at the end of a run). */
+  uint64_t missing_total() const { return lost_ + missing_.size(); }
+  std::optional<uint32_t> top() const { return have_top_ ? std::optional<uint32_t>(top_) : std::nullopt; }
+
+private:
+  void confirm() {
+    while (!missing_.empty()) {
+      const uint32_t first = *missing_.begin();
+      uint32_t n = 0;
+      for (auto it = missing_.begin(); it != missing_.end() && *it == first + n; ++it)
+        ++n;
+      if (static_cast<int32_t>(top_ - (first + n - 1)) <= static_cast<int32_t>(kReorder))
+        break;
+      for (uint32_t k = 0; k < n; ++k)
+        missing_.erase(first + k);
+      lost_ += n;
+      gaps_.push_back({first - 1, n});
+    }
+  }
+  SeqDedup dedup_;
+  bool have_top_ = false;
+  uint32_t top_ = 0;
+  std::set<uint32_t> missing_;
+  std::vector<Gap> gaps_;
+  uint64_t delivered_ = 0, dups_ = 0, lost_ = 0;
 };
 
 /* The CU's uplink delivery for DAPS: every DU that hears a UE's uplink

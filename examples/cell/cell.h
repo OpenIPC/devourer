@@ -13,7 +13,8 @@
 //                 the queue's contention window to CWmax — the next frame then
 //                 waits a uniform 0..1023 slots (0-9.2 ms; measured on the
 //                 8852CE). Body: the HARQ seq, window low edge, process id and
-//                 attempt, versioned and tagged (layout at build_dl_frame).
+//                 attempt, and the CU DL PDU sns it carries, versioned and
+//                 tagged (layout at build_dl_frame).
 //   UE uplink   — the UE's own hardware beacon, SA = ue_mac(ue), placed in its
 //                 UL slot by stepping the UE's TSF; its 'C' 'U' IE carries the
 //                 grant epoch it runs, its HARQ feedback (src/cell/Harq.h; the
@@ -186,7 +187,7 @@ inline std::optional<RachFrame> parse_rach_frame(const uint8_t *p, size_t len, u
  * the DU accepts a UE's feedback only with a gen_sf no older than the last it
  * accepted (main.cpp); a replayed DL frame is a HARQ duplicate. */
 using CellMac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
-constexpr uint8_t kCellProtoVersion = 3; /* v3: the UE IE's area tag (src/cell/Keys.h) */
+constexpr uint8_t kCellProtoVersion = 4; /* v4: the DL body carries the CU's DL PDUs (sns) */
 constexpr size_t kCellTagLen = 8;
 
 namespace detail {
@@ -313,13 +314,20 @@ struct DlHarq {
   uint8_t attempt = 1; /* 1 = first transmission */
 };
 
-/* DL body: 'C' 'D' ver ue(2) sf(8) seq(4) low(4) pid(1) attempt(1) | tag(8). */
-constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1;
+/* DL body: 'C' 'D' ver ue(2) sf(8) seq(4) low(4) pid(1) attempt(1) npdu(1)
+ * sn(4) x kDlMaxPdus | tag(8). The sns are the CU's DL PDUs this frame
+ * carries (F1 Downlink; npdu of the slots used, the rest zero: a fixed
+ * length, so the DL slot budget is one size). A HARQ retransmission carries
+ * the same ones. Under the tag: a forged sn cannot make the UE drop a real
+ * PDU as a duplicate. */
+constexpr size_t kDlMaxPdus = 8;
+constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1 + 1 + 4 * kDlMaxPdus;
 constexpr size_t kDlBodyLen = kDlTaggedLen + kCellTagLen;
 
 // The DL frame MPDU (no FCS): QoS-Data, RA = UE, TA = BSSID = DU.
 inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf, uint32_t seq,
-                                           size_t pad, DlHarq h = {}, const CellMac &mac = {}) {
+                                           size_t pad, DlHarq h = {}, const CellMac &mac = {},
+                                           const std::vector<uint32_t> &pdus = {}) {
   uint8_t ra[6], ta[6];
   cell_mac(ra, cell, ue);
   cell_mac(ta, cell, 0);
@@ -335,6 +343,10 @@ inline std::vector<uint8_t> build_dl_frame(uint16_t cell, uint8_t ue, uint64_t s
   detail::put(b, h.low, 4);
   b.push_back(h.pid);
   b.push_back(h.attempt);
+  const size_t np = std::min(pdus.size(), kDlMaxPdus);
+  b.push_back(static_cast<uint8_t>(np));
+  for (size_t i = 0; i < kDlMaxPdus; ++i)
+    detail::put(b, i < np ? pdus[i] : 0u, 4);
   uint8_t t[kCellTagLen];
   detail::cell_tag(mac, 'D', cell, b.data(), b.size(), t);
   f.insert(f.end(), b.begin(), b.end());
@@ -348,6 +360,7 @@ struct DlFrame {
   uint64_t sf = 0;
   uint32_t seq = 0;
   DlHarq harq;
+  std::vector<uint32_t> pdus; /* the CU DL PDU sns it carries */
 };
 inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint16_t cell,
                                              const CellMac &mac = {}) {
@@ -369,6 +382,11 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
   d.harq.low = static_cast<uint32_t>(detail::get(b + 17, 4));
   d.harq.pid = b[21];
   d.harq.attempt = b[22];
+  const size_t np = b[23];
+  if (np > kDlMaxPdus)
+    return std::nullopt;
+  for (size_t i = 0; i < np; ++i)
+    d.pdus.push_back(static_cast<uint32_t>(detail::get(b + 24 + 4 * i, 4)));
   return d;
 }
 

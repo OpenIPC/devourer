@@ -440,6 +440,46 @@ int main() {
       CHECK(!f1::decode_uplink(w.data(), cut, k));
   }
 
+  /* --- DL duplication: F1 v12 Downlink, and the UE's DL stream. --- */
+  {
+    const Mac k = fake_mac(3);
+    f1::DownlinkPdu pdu{2, 7, 4000000000u};
+    const auto w = f1::encode_downlink(pdu, k);
+    CHECK(f1::peek_type(w.data(), w.size()) == f1::Type::Downlink);
+    auto dd = f1::decode_downlink(w.data(), w.size(), k);
+    CHECK(dd && *dd == pdu);
+    CHECK(!f1::decode_downlink(w.data(), w.size(), fake_mac(4)));
+    for (size_t cut = 0; cut < w.size(); ++cut)
+      CHECK(!f1::decode_downlink(w.data(), cut, k));
+
+    DlStreamRx rx;
+    CHECK(rx.accept(10) && rx.accept(11));
+    CHECK(!rx.accept(11)); /* the target's copy of what the source delivered */
+    CHECK(rx.accept(14));  /* 12, 13 missing ... */
+    CHECK(rx.missing_total() == 2 && rx.take_gaps().empty());
+    CHECK(rx.accept(12));  /* ... 12 late: recovered */
+    CHECK(rx.missing_total() == 1);
+    for (uint32_t s = 15; s <= 13 + DlStreamRx::kReorder; ++s)
+      CHECK(rx.accept(s));
+    CHECK(rx.take_gaps().empty()); /* 13 is exactly kReorder behind: not yet */
+    CHECK(rx.accept(14 + DlStreamRx::kReorder));
+    auto g = rx.take_gaps();
+    CHECK(g.size() == 1 && g[0].after_sn == 12 && g[0].missing == 1);
+    CHECK(rx.missing_confirmed() == 1 && rx.missing_total() == 1);
+    CHECK(rx.accept(13));  /* a very late copy is still delivered once (counted lost) */
+    CHECK(!rx.accept(13));
+    CHECK(rx.duplicates() == 2);
+    CHECK(rx.delivered() == 4 + (DlStreamRx::kReorder - 1) + 1 + 1);
+    /* a jump beyond kMaxJump starts over: no gap of thousands */
+    DlStreamRx r2;
+    CHECK(r2.accept(1) && r2.accept(1 + DlStreamRx::kMaxJump + 1));
+    CHECK(r2.missing_total() == 0);
+    /* wrap */
+    DlStreamRx r3;
+    CHECK(r3.accept(0xfffffffeu) && r3.accept(1));
+    CHECK(r3.missing_total() == 2); /* 0xffffffff, 0 */
+  }
+
   /* --- Measurement gaps (MeasGap.h): the neighbour offset, the NL and MR
    * IEs, and where a gap fits. --- */
   {

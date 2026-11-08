@@ -7,7 +7,10 @@
 //   DU      beacons the grant map at its TBTT (CW=0 beacon, fixed departure),
 //           sends one unicast DL frame per UE in that UE's DL slot (submitted
 //           when its TSF reaches the slot start; hardware-ACKed, retries per
-//           DEVOURER_TX_RETRY_LIMIT, which the DL slot budget must cover),
+//           DEVOURER_TX_RETRY_LIMIT, which the DL slot budget must cover;
+//           it carries up to 8 of the CU's DL PDUs queued for the UE —
+//           F1 Downlink, also for a UE only staged for a handover — and the
+//           UE delivers each PDU sn once: cell.ue.dl_gap, done dl_pdus),
 //           measures each UE's uplink
 //           beacon arrival on its own TSF and closes a per-UE timing-advance
 //           loop by republishing the map (new epoch, effective 3 superframes
@@ -241,6 +244,7 @@ using namespace cellnode;
 using devourer::cell::build_fixed_grid;
 using devourer::cell::Grant;
 using devourer::cell::GrantMapReceiver;
+using devourer::cell::DlStreamRx;
 using devourer::cell::HarqConfig;
 using devourer::cell::HarqReceiver;
 using devourer::cell::HarqSender;
@@ -1173,8 +1177,22 @@ int run_du(IRadio *dev, const Cfg &c) {
     bool have_gen = false;
     uint8_t last_snr_gen = 0;  /* the SNR measurement last folded */
     bool have_snr_gen = false;
+    /* The CU DL PDUs each HARQ seq in flight carries (a retransmission
+     * re-airs the same ones). */
+    std::map<uint32_t, std::vector<uint32_t>> pdus;
   };
   std::map<uint16_t, DlUe> dlue;
+  /* The CU's DL PDUs (F1 Downlink) waiting per UE (guarded by mu). Kept
+   * for a UE this DU has only STAGED too (a handover target under DAPS
+   * buffers what the source is still airing): sent from its first DL frame,
+   * oldest first, kDlMaxPdus per frame. Bounded: the oldest go first. */
+  struct DlQueue {
+    std::deque<uint32_t> sns;
+    std::chrono::steady_clock::time_point last_push;
+    uint64_t dropped = 0;
+  };
+  constexpr size_t kDlQueueMax = 64;
+  std::map<uint16_t, DlQueue> dlq;
   for (uint16_t ue : ues)
     dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
   std::vector<uint8_t> rar_on_air;                 /* the RACH answers in the live beacon */
@@ -1579,6 +1597,22 @@ int run_du(IRadio *dev, const Cfg &c) {
           continue;
         if (!f1_from_cu(from))
           continue;
+        if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::Downlink) {
+          auto dp = f1::decode_downlink(buf, static_cast<size_t>(n), f1_mac);
+          if (!dp || dp->du != c.cell || dp->ue == 0 || dp->ue > 254)
+            continue;
+          std::lock_guard<std::mutex> lk(mu);
+          if (dlq.size() >= f1::kMaxUes && !dlq.count(dp->ue))
+            continue; /* no room for another UE's queue */
+          DlQueue &q = dlq[dp->ue];
+          q.sns.push_back(dp->sn);
+          q.last_push = std::chrono::steady_clock::now();
+          if (q.sns.size() > kDlQueueMax) {
+            q.sns.pop_front();
+            ++q.dropped;
+          }
+          continue;
+        }
         if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::AreaKeys) {
           auto ak = f1::decode_area_keys(buf, static_cast<size_t>(n), f1_mac);
           if (!ak || ak->du != c.cell || !auth)
@@ -1842,6 +1876,8 @@ int run_du(IRadio *dev, const Cfg &c) {
       /* What to send: a due HARQ retransmission, else new data (or, with
        * HARQ off, a new frame every superframe). */
       std::optional<devourer::cell::HarqTx> tx;
+      std::vector<uint32_t> pdus; /* the CU DL PDUs this frame carries */
+      size_t q_left = 0;
       {
         std::lock_guard<std::mutex> lk(mu);
         DlUe &d = dlue.at(ue);
@@ -1850,6 +1886,24 @@ int run_du(IRadio *dev, const Cfg &c) {
         } else {
           const uint32_t s = d.plain_seq++;
           tx = devourer::cell::HarqTx{s, s % devourer::cell::kHarqProcesses, s, 1, false};
+        }
+        if (tx) {
+          if (tx->retx) {
+            if (auto pi = d.pdus.find(tx->seq); pi != d.pdus.end())
+              pdus = pi->second;
+          } else if (auto qi = dlq.find(ue); qi != dlq.end()) {
+            while (!qi->second.sns.empty() && pdus.size() < kDlMaxPdus) {
+              pdus.push_back(qi->second.sns.front());
+              qi->second.sns.pop_front();
+            }
+            if (harq_on && !pdus.empty())
+              d.pdus[tx->seq] = pdus;
+          }
+          /* Resolved seqs (below the window's low edge) carry nothing more. */
+          for (auto pi = d.pdus.begin(); pi != d.pdus.end();)
+            pi = devourer::cell::seq_lt(pi->first, tx->low) ? d.pdus.erase(pi) : std::next(pi);
+          if (auto qi = dlq.find(ue); qi != dlq.end())
+            q_left = qi->second.sns.size();
         }
       }
       if (!tx) {
@@ -1871,22 +1925,49 @@ int run_du(IRadio *dev, const Cfg &c) {
                               pad,
                               DlHarq{tx->low, static_cast<uint8_t>(tx->pid),
                                      static_cast<uint8_t>(tx->attempt)},
-                              auth);
+                              auth, pdus);
       std::vector<uint8_t> pkt = build_dl_radiotap(
           rate, ue == atten_ue && atten_db != 0 ? std::optional<int8_t>(atten_db) : std::nullopt);
       pkt.insert(pkt.end(), f.begin(), f.end());
       const int64_t sub = sleep_until_tsf(dev, start);
       const bool ok = dev->send_packet(pkt.data(), pkt.size());
-      if (!ok && harq_on) {
+      if (!ok) {
         std::lock_guard<std::mutex> lk(mu);
-        dlue.at(ue).harq.unsend(*tx); /* never reached the radio: no attempt spent */
+        if (harq_on)
+          dlue.at(ue).harq.unsend(*tx); /* never reached the radio: no attempt spent */
+        if (!tx->retx && !pdus.empty()) { /* its PDUs go back, first in line */
+          if (harq_on)
+            dlue.at(ue).pdus.erase(tx->seq);
+          DlQueue &q = dlq[ue];
+          q.sns.insert(q.sns.begin(), pdus.begin(), pdus.end());
+        }
       }
-      char l[220];
+      char l[260];
       snprintf(l, sizeof l,
                "{\"ev\":\"cell.dl\",\"ue\":%u,\"sf\":%lld,\"seq\":%u,\"attempt\":%d,"
-               "\"rate\":%d,\"late_us\":%lld,\"ok\":%d}",
-               ue, (long long)sf, tx->seq, tx->attempt, rate, (long long)(sub - start), ok ? 1 : 0);
+               "\"rate\":%d,\"late_us\":%lld,\"ok\":%d,\"pdus\":%zu,\"q\":%zu}",
+               ue, (long long)sf, tx->seq, tx->attempt, rate, (long long)(sub - start), ok ? 1 : 0,
+               pdus.size(), q_left);
       emit(l);
+    }
+    /* DL queues of UEs this DU does not serve and the CU stopped feeding
+     * (handed over, or a cancelled handover's staged UE) go after 10 s. */
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      const auto now_q = std::chrono::steady_clock::now();
+      for (auto qi = dlq.begin(); qi != dlq.end();) {
+        if (!dlue.count(qi->first) && now_q - qi->second.last_push > std::chrono::seconds(10)) {
+          if (qi->second.dropped || !qi->second.sns.empty()) {
+            char l[140];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.dl.q_gone\",\"ue\":%u,\"left\":%zu,\"dropped\":%llu}",
+                     qi->first, qi->second.sns.size(), (unsigned long long)qi->second.dropped);
+            emit(l);
+          }
+          qi = dlq.erase(qi);
+        } else {
+          ++qi;
+        }
+      }
     }
     /* CELL_DU_TX_RAMP (test): the DU's TX power offset over time, beacons
      * and DL alike — what a UE crossing from this cell to another sees. */
@@ -2617,6 +2698,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
   double dl_snr_sum = 0;
   uint64_t dl_snr_n = 0;
   uint64_t dl_new = 0, dl_dup = 0;
+  /* The CU's DL stream (F1 Downlink PDUs in the DL frames): one sn space for
+   * the UE's whole life, across handovers — never reset on a switch. */
+  DlStreamRx dl_stream;
   /* Serving beacons whose grant map is intact but not authentic (another
    * key, or none): refused (mu). */
   uint64_t gm_ok = 0, gm_refused = 0;
@@ -2914,6 +2998,15 @@ int run_ue(IRadio *dev, const Cfg &c) {
           ++dl_new;
         else
           ++dl_dup;
+        for (uint32_t sn : d->pdus)
+          dl_stream.accept(sn);
+        for (const auto &g : dl_stream.take_gaps()) {
+          char l[160];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.dl_gap\",\"ue\":%d,\"cell\":%u,\"after_sn\":%u,\"missing\":%u}",
+                   me, cell_a.load(), g.after_sn, g.missing);
+          emit(l);
+        }
         if (p.RxAtrib.snr[0] > 0) { /* raw = 0.5 dB units; 0 = no measurement */
           dl_snr_sum += p.RxAtrib.snr[0] / 2.0;
           ++dl_snr_n;
@@ -3646,17 +3739,20 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->StopRxLoop();
   rx.join();
   dev->ClearAckResponder();
-  char l[400];
+  char l[560];
   snprintf(l, sizeof l,
            "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
            "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu,"
            "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu,\"nbr_refused\":{\"stale\":%llu,"
-           "\"unlisted\":%llu,\"phase\":%llu}}",
+           "\"unlisted\":%llu,\"phase\":%llu},\"dl_pdus\":{\"delivered\":%llu,\"duplicates\":%llu,"
+           "\"missing\":%llu,\"top\":%lld}}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
            (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
            (unsigned long long)gm_ok, (unsigned long long)gm_refused,
            (unsigned long long)nbr_refused["stale"], (unsigned long long)nbr_refused["unlisted"],
-           (unsigned long long)nbr_refused["phase"]);
+           (unsigned long long)nbr_refused["phase"], (unsigned long long)dl_stream.delivered(),
+           (unsigned long long)dl_stream.duplicates(), (unsigned long long)dl_stream.missing_total(),
+           dl_stream.top() ? (long long)*dl_stream.top() : -1LL);
   emit(l);
   return 0;
 }

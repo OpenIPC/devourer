@@ -57,6 +57,19 @@
 // handover aliases the target identity onto the source's stream) and logs
 // every gap in a stream's delivered sequence (ran.ul_gap: the interruption
 // a crossing or a lost path costs) and a summary every 10 s (ran.ul).
+// DL streams (M6): the CU originates each UE's downlink (F1 Downlink, one
+// PDU numbered in the UE's stream), sent to its serving DU, which airs it in
+// the UE's DL frames (examples/cell: up to 8 per frame, HARQ re-airs them);
+// the UE delivers each sn once and logs gaps (cell.ue.dl_gap). The stream
+// moves to the target identity at ran.ho_done (ran.dl_moved).
+//   RAN_DL_MS [0]             a PDU per stream every this many ms (0 = off)
+//   RAN_DL_DAPS [1]           duplicate each PDU to the handover target too,
+//                             from the command until ran.ho_done: the target
+//                             buffers them and airs them after the switch
+//   RAN_DL_DAPS_BACKLOG [16]  ... and at the command the stream's last this
+//                             many PDUs (a link fading before the command may
+//                             have lost them at the source; the UE drops the
+//                             ones it had as duplicates)
 //   RAN_MEAS_STALE_MS [2000]  a reported value counts until its sample age
 //                             (carried in F1) plus the report's age passes
 //                             this (= the DUs' CELL_MEAS_STALE_MS)
@@ -95,6 +108,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -246,6 +260,9 @@ int main() {
   }
   a3c.min_dwell_ms = ho_dwell_ms; /* counted from a moved UE's switch */
   const int64_t meas_stale_ms = envl("RAN_MEAS_STALE_MS", 2000, 100, 60000);
+  const int dl_ms = static_cast<int>(envl("RAN_DL_MS", 0, 0, 10000));
+  const bool dl_daps = envl("RAN_DL_DAPS", 1, 0, 1) != 0;
+  const size_t dl_backlog = static_cast<size_t>(envl("RAN_DL_DAPS_BACKLOG", 16, 0, 64));
   std::vector<uint8_t> spare;
   for (long ch : env_list("RAN_SPARE_CHANNELS", 1, 196))
     spare.push_back(static_cast<uint8_t>(ch));
@@ -280,6 +297,7 @@ int main() {
   const auto deadline = t0 + std::chrono::seconds(secs);
   auto next_plan = t0 + std::chrono::milliseconds(plan_ms);
   auto next_meas = t0 + std::chrono::seconds(10);
+  auto next_dl = t0;
   /* Per UE (its serving cell, its id): the A3 state, and whether a
    * candidate is currently logged as firing. */
   struct HoState {
@@ -341,6 +359,23 @@ int main() {
     ul_name.erase(s);
     ul_seen.erase(s);
     ul_missing.erase(s);
+  };
+  /* The CU's DL streams (F1 Downlink): one per UE, keyed by its CURRENT
+   * identity (cell, ue), numbered from 1 and running on across handovers.
+   * A PDU every RAN_DL_MS to the serving DU; with RAN_DL_DAPS, from the
+   * handover command until ran.ho_done also to the target, for the target
+   * identity (`dup`). At ho_done the stream moves to the target identity. */
+  struct DlStream {
+    uint64_t epoch = 0; /* the CU's realtime (us) at creation: a re-created stream is newer */
+    uint32_t next_sn = 1;
+    std::optional<std::pair<uint16_t, uint16_t>> dup;
+    std::chrono::steady_clock::time_point reported;
+    std::deque<uint32_t> recent; /* the last RAN_DL_DAPS_BACKLOG sns sent */
+  };
+  std::map<std::pair<uint16_t, uint16_t>, DlStream> dls;
+  auto dl_undup = [&](const devourer::cell::HoCommand &cmd) {
+    if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end())
+      d->second.dup.reset();
   };
   auto ms_now = [&] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
@@ -608,6 +643,7 @@ int main() {
                  * earlier Staged ack may have been lost): cancel, retried. */
                 cancels[fl.cmd.id] = Cancel{fl.cmd};
                 ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
+                dl_undup(fl.cmd);
                 flights.erase(it); /* the A3 fires again later: a fresh command */
               } else if (!was) {
                 emit("{\"ev\":\"ran.ho_ack\",\"id\":" + std::to_string(fl.cmd.id) +
@@ -643,6 +679,57 @@ int main() {
       }
     }
     const auto now = std::chrono::steady_clock::now();
+    /* The DL streams: a PDU per stream every RAN_DL_MS. */
+    if (dl_ms > 0 && now >= next_dl) {
+      next_dl = std::max(next_dl + std::chrono::milliseconds(dl_ms), now - std::chrono::milliseconds(dl_ms));
+      /* A stream per UE a configured DU reports (not a handed-over source
+       * identity, nor a handover target identity in flight: those are the
+       * stream that moves). */
+      for (const auto &kv : dus) {
+        if (std::find(expected.begin(), expected.end(), static_cast<long>(kv.first)) == expected.end())
+          continue;
+        if (now - kv.second.at > std::chrono::seconds(3))
+          continue; /* a DU gone quiet (dead, or F1 lost): its last report is no evidence */
+        for (const auto &a : kv.second.rep.ues) {
+          const std::pair<uint16_t, uint16_t> id{kv.first, a.ue};
+          if (auto d = dls.find(id); d != dls.end()) {
+            d->second.reported = now;
+            continue;
+          }
+          if (retired.count(id))
+            continue;
+          bool target = false;
+          for (const auto &fl : flights)
+            target = target || (fl.second.cmd.target == id.first && fl.second.cmd.target_ue == id.second);
+          if (!target) {
+            dls[id].reported = now;
+            dls[id].epoch = next_seq();
+            emit("{\"ev\":\"ran.dl_stream\",\"cell\":" + std::to_string(id.first) + ",\"ue\":" +
+                 std::to_string(id.second) + "}");
+          }
+        }
+      }
+      for (auto d = dls.begin(); d != dls.end();) {
+        bool flying = false;
+        for (const auto &fl : flights)
+          flying = flying || (fl.second.cmd.source == d->first.first && fl.second.cmd.ue == d->first.second);
+        if (!flying && now - d->second.reported > std::chrono::seconds(10)) {
+          d = dls.erase(d); /* no DU serves it any more */
+          continue;
+        }
+        const uint32_t sn = d->second.next_sn++;
+        d->second.recent.push_back(sn);
+        while (d->second.recent.size() > dl_backlog)
+          d->second.recent.pop_front();
+        if (auto du = dus.find(d->first.first); du != dus.end())
+          send(du->second, f1::encode_downlink({d->first.first, d->first.second, d->second.epoch, sn}, mac));
+        if (d->second.dup)
+          if (auto du = dus.find(d->second.dup->first); du != dus.end())
+            send(du->second,
+                 f1::encode_downlink({d->second.dup->first, d->second.dup->second, d->second.epoch, sn}, mac));
+        ++d;
+      }
+    }
     /* The DUs' filtered uplink measurements (M6), every 10 s, and the DAPS
      * uplink streams. */
     if (now >= next_meas) {
@@ -891,6 +978,25 @@ int main() {
                        std::to_string(cell) + ",\"to\":" + std::to_string(force->tgt) + "}");
                 }
                 ul.alias({cmd.target, cmd.target_ue}, {cmd.source, cmd.ue}); /* DAPS: one stream */
+                if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end()) {
+                  char db[200];
+                  snprintf(db, sizeof db,
+                           "{\"ev\":\"ran.dl_cmd\",\"id\":%u,\"stream\":\"%u:%u\",\"next_sn\":%u,"
+                           "\"dup\":%d,\"backlog\":%zu}",
+                           cmd.id, cmd.source, cmd.ue, d->second.next_sn, dl_daps ? 1 : 0,
+                           dl_daps ? d->second.recent.size() : 0);
+                  emit(db);
+                }
+                if (dl_daps)
+                  if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end()) {
+                    d->second.dup = std::make_pair(cmd.target, cmd.target_ue); /* DL duplicated */
+                    /* The recent PDUs too, oldest first: a link fading before
+                     * the command may have lost them at the source. */
+                    if (auto tdu = dus.find(cmd.target); tdu != dus.end())
+                      for (uint32_t sn : d->second.recent)
+                        send(tdu->second,
+                             f1::encode_downlink({cmd.target, cmd.target_ue, d->second.epoch, sn}, mac));
+                  }
                 char b[300];
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
@@ -912,6 +1018,7 @@ int main() {
         auto sit = dus.find(fl.cmd.source), tit = dus.find(fl.cmd.target);
         if (sit == dus.end() || tit == dus.end()) {
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
+          dl_undup(fl.cmd);
           it = flights.erase(it);
           continue;
         }
@@ -931,6 +1038,19 @@ int main() {
           emit(b);
           moved_at[{fl.cmd.target, fl.cmd.target_ue}] = tms;
           retired[{fl.cmd.source, fl.cmd.ue}] = tms;
+          /* The DL stream follows the UE: its sns run on at the target. */
+          if (auto node = dls.extract({fl.cmd.source, fl.cmd.ue})) {
+            node.key() = {fl.cmd.target, fl.cmd.target_ue};
+            node.mapped().dup.reset();
+            node.mapped().reported = std::chrono::steady_clock::now();
+            dls.erase(node.key());
+            const uint32_t sn = node.mapped().next_sn;
+            dls.insert(std::move(node));
+            char db[160];
+            snprintf(db, sizeof db, "{\"ev\":\"ran.dl_moved\",\"from\":\"%u:%u\",\"to\":\"%u:%u\",\"next_sn\":%u}",
+                     fl.cmd.source, fl.cmd.ue, fl.cmd.target, fl.cmd.target_ue, sn);
+            emit(db);
+          }
           if (auto h = ho.find({fl.cmd.source, fl.cmd.ue}); h != ho.end()) {
             if (h->second.firing)
               log_clear(fl.cmd.ue, fl.cmd.source, *h->second.firing, "handed_over");
@@ -943,6 +1063,7 @@ int main() {
           emit("{\"ev\":\"ran.ho_timeout\",\"id\":" + std::to_string(fl.cmd.id) + "}");
           cancels[fl.cmd.id] = Cancel{fl.cmd}; /* never committed: free the target */
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* and its provisional alias */
+          dl_undup(fl.cmd);
           it = flights.erase(it);
           continue;
         }

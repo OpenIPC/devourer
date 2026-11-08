@@ -41,6 +41,8 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <algorithm>
+#include <deque>
 #include <utility>
 #include <vector>
 
@@ -246,6 +248,99 @@ private:
   bool init_ = false;
   uint32_t top_ = 0;
   std::array<uint64_t, kWindow / 64> bits_{};
+};
+
+/* The UE's side of its DL stream (the CU's DL PDUs, F1 Downlink): each sn
+ * is delivered once, whichever DU it came through (DAPS duplicates them to
+ * the source and the target) and however often HARQ re-aired it. A jump
+ * past top marks the sns in between missing; a late copy recovers one. A
+ * run of missing sns counts as a GAP once its last sn is kReorder behind
+ * the newest (a late copy within that recovers it silently): the
+ * interruption a handover cost the downlink.
+ * Streams: `epoch` names one (F1.h DownlinkPdu). A newer epoch starts over
+ * (a re-created stream, a re-joined UE, a restarted CU); what was still
+ * pending of the old one is counted lost first, attributed to it. An older
+ * epoch is ignored (stale). Within a stream, a jump beyond kMaxJump (inside
+ * the dedup window) restarts the count the same way: no gap of thousands. */
+class DlStreamRx {
+public:
+  static constexpr uint32_t kReorder = 32;
+  static constexpr uint32_t kMaxJump = SeqDedup::kWindow - 1;
+  struct Gap {
+    uint32_t after_sn = 0;
+    uint32_t missing = 0;
+  };
+
+  bool accept(uint64_t epoch, uint32_t sn) {
+    if (have_epoch_ && epoch < epoch_) {
+      ++stale_;
+      return false;
+    }
+    if (!have_epoch_ || epoch > epoch_) {
+      flush();
+      dedup_ = SeqDedup{};
+      have_top_ = false;
+      have_epoch_ = true;
+      epoch_ = epoch;
+    }
+    if (!dedup_.accept(sn)) {
+      ++dups_;
+      return false;
+    }
+    ++delivered_;
+    if (!have_top_) {
+      have_top_ = true;
+      top_ = sn;
+    } else if (auto m = std::find(missing_.begin(), missing_.end(), sn); m != missing_.end()) {
+      missing_.erase(m); /* a late copy: recovered */
+    } else {
+      const int32_t d = static_cast<int32_t>(sn - top_);
+      if (d > 0) {
+        if (static_cast<uint32_t>(d) > kMaxJump)
+          flush(); /* too far to track: what was pending is lost, no new holes */
+        else
+          for (uint32_t k = 1; k < static_cast<uint32_t>(d); ++k)
+            missing_.push_back(top_ + k);
+        top_ = sn;
+      }
+    }
+    confirm(false);
+    return true;
+  }
+  /* Gap runs confirmed since the last call. */
+  std::vector<Gap> take_gaps() { return std::exchange(gaps_, {}); }
+  uint64_t delivered() const { return delivered_; }
+  uint64_t duplicates() const { return dups_; }
+  uint64_t stale() const { return stale_; }
+  uint64_t missing_confirmed() const { return lost_; }
+  /* Confirmed plus still within the reorder window (at the end of a run). */
+  uint64_t missing_total() const { return lost_ + missing_.size(); }
+  std::optional<uint32_t> top() const { return have_top_ ? std::optional<uint32_t>(top_) : std::nullopt; }
+
+private:
+  /* Runs in serial order (missing_ is: holes are appended as top moves on),
+   * so a run across the 32-bit wrap is one run. */
+  void confirm(bool all) {
+    while (!missing_.empty()) {
+      const uint32_t first = missing_.front();
+      uint32_t n = 1;
+      while (n < missing_.size() && missing_[n] == first + n)
+        ++n;
+      if (!all && static_cast<int32_t>(top_ - (first + n - 1)) <= static_cast<int32_t>(kReorder))
+        break;
+      missing_.erase(missing_.begin(), missing_.begin() + n);
+      lost_ += n;
+      gaps_.push_back({first - 1, n});
+    }
+  }
+  void flush() { confirm(true); }
+  SeqDedup dedup_;
+  bool have_epoch_ = false, have_top_ = false;
+  uint64_t epoch_ = 0;
+  uint32_t top_ = 0;
+  std::deque<uint32_t> missing_; /* serial order */
+  std::vector<Gap> gaps_;
+  uint64_t delivered_ = 0, dups_ = 0, stale_ = 0, lost_ = 0;
 };
 
 /* The CU's uplink delivery for DAPS: every DU that hears a UE's uplink

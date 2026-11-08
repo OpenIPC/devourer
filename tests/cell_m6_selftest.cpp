@@ -440,6 +440,69 @@ int main() {
       CHECK(!f1::decode_uplink(w.data(), cut, k));
   }
 
+  /* --- DL duplication: F1 v12 Downlink, and the UE's DL stream. --- */
+  {
+    const Mac k = fake_mac(3);
+    f1::DownlinkPdu pdu{2, 7, 0x0102030405060708ull, 4000000000u};
+    const auto w = f1::encode_downlink(pdu, k);
+    CHECK(f1::peek_type(w.data(), w.size()) == f1::Type::Downlink);
+    auto dd = f1::decode_downlink(w.data(), w.size(), k);
+    CHECK(dd && *dd == pdu);
+    CHECK(!f1::decode_downlink(w.data(), w.size(), fake_mac(4)));
+    for (size_t cut = 0; cut < w.size(); ++cut)
+      CHECK(!f1::decode_downlink(w.data(), cut, k));
+
+    const uint64_t E = 1000;
+    DlStreamRx rx;
+    CHECK(rx.accept(E, 10) && rx.accept(E, 11));
+    CHECK(!rx.accept(E, 11)); /* the target's copy of what the source delivered */
+    CHECK(rx.accept(E, 14));  /* 12, 13 missing ... */
+    CHECK(rx.missing_total() == 2 && rx.take_gaps().empty());
+    CHECK(rx.accept(E, 12));  /* ... 12 late: recovered */
+    CHECK(rx.missing_total() == 1);
+    for (uint32_t s = 15; s <= 13 + DlStreamRx::kReorder; ++s)
+      CHECK(rx.accept(E, s));
+    CHECK(rx.take_gaps().empty()); /* 13 is exactly kReorder behind: not yet */
+    CHECK(rx.accept(E, 14 + DlStreamRx::kReorder));
+    auto g = rx.take_gaps();
+    CHECK(g.size() == 1 && g[0].after_sn == 12 && g[0].missing == 1);
+    CHECK(rx.missing_confirmed() == 1 && rx.missing_total() == 1);
+    CHECK(rx.accept(E, 13));  /* a very late copy is still delivered once (counted lost) */
+    CHECK(!rx.accept(E, 13));
+    CHECK(rx.duplicates() == 2);
+    CHECK(rx.delivered() == 4 + (DlStreamRx::kReorder - 1) + 1 + 1);
+    /* An older epoch: a stale stream, ignored. */
+    CHECK(!rx.accept(E - 1, 100) && rx.stale() == 1);
+    /* A newer epoch starts over at sn 1 (a re-created stream, a restarted
+     * CU): nothing of it is a duplicate of the old one. */
+    CHECK(rx.accept(E + 1, 1) && rx.accept(E + 1, 2));
+    CHECK(rx.missing_total() == 1); /* only the old stream's 13 */
+
+    /* A jump beyond kMaxJump starts the count over: no gap of hundreds; a
+     * hole still pending before it is lost, attributed to where it was. */
+    DlStreamRx r2;
+    CHECK(r2.accept(E, 100) && r2.accept(E, 102));
+    CHECK(r2.accept(E, 102 + DlStreamRx::kMaxJump + 1));
+    g = r2.take_gaps();
+    CHECK(g.size() == 1 && g[0].after_sn == 100 && g[0].missing == 1);
+    CHECK(r2.missing_total() == 1);
+    /* A jump of exactly kMaxJump is tracked, and every hole of it is still
+     * inside the dedup window: a late copy at the oldest recovers it. */
+    DlStreamRx r4;
+    CHECK(r4.accept(E, 0) && r4.accept(E, DlStreamRx::kMaxJump));
+    CHECK(r4.take_gaps().empty() && r4.missing_total() == DlStreamRx::kMaxJump - 1); /* one run, pending */
+    CHECK(r4.accept(E, 1)); /* the oldest hole: delivered (late), not a duplicate */
+    CHECK(r4.duplicates() == 0 && r4.missing_total() == DlStreamRx::kMaxJump - 2);
+
+    /* Wrap: one run across 0xffffffff -> 0, one gap event. */
+    DlStreamRx r3;
+    CHECK(r3.accept(E, 0xfffffffeu) && r3.accept(E, 1));
+    CHECK(r3.missing_total() == 2); /* 0xffffffff, 0 */
+    CHECK(r3.accept(E, 2 + DlStreamRx::kReorder));
+    g = r3.take_gaps();
+    CHECK(g.size() == 1 && g[0].after_sn == 0xfffffffeu && g[0].missing == 2);
+  }
+
   /* --- Measurement gaps (MeasGap.h): the neighbour offset, the NL and MR
    * IEs, and where a gap fits. --- */
   {

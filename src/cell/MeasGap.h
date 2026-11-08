@@ -29,8 +29,22 @@
  * gap_window(): where in its superframe a UE may go deaf for one neighbour
  * beacon — [offset - retune - guard, offset + beacon + retune + guard) — or
  * nullopt when that overlaps anything the UE must be on its channel for
- * (the serving beacon, its own DL and UL slots). A UE that cannot fit a gap
- * simply does not measure that neighbour (no uplink is ever sacrificed).
+ * (the serving beacon, its own DL and UL slots). Without suspend gaps, a UE
+ * that cannot fit a gap simply does not measure that neighbour.
+ *
+ * Suspend gaps: with a 26 ms retune each way, an idle window exists both
+ * ways between two cells only for a phase difference near P/2, so three
+ * cells on three channels can never all measure each other in idle gaps. A
+ * SUSPEND gap may cover the UE's own slots: only in its suspend superframes
+ * (suspend_sf: one in `every`, staggered by UE id), the UE stops its uplink
+ * beacon (it must never fire on the neighbour's channel), goes deaf for the
+ * neighbour beacon in that superframe, and restarts it after. The DU knows
+ * the same pattern and airs no DL frame to that UE in a suspend superframe
+ * or the one after (a gap may run into it): an unACKed frame would cost
+ * the next one up to CWmax. Whether a UE needs suspend gaps at all
+ * (needs_suspend) is decided at the FLOOR retune bound on both sides, so the
+ * DU and the UE agree. The cost: those two superframes' DL and uplink, in
+ * `every`, for a UE some neighbour leaves no idle window.
  *
  * Signed neighbour lists (per-cell keys): an HMAC tag a UE can check is one
  * it could forge, so with the area key every UE could fake any cell's NL. A
@@ -454,6 +468,36 @@ inline std::optional<GridSpan> gap_window(int32_t neighbour_offset_us, int64_t b
       return std::nullopt;
   }
   return GridSpan{mod(start), len};
+}
+
+/* A UE's suspend superframes (see the header): one in `every`, staggered
+ * by UE id so a cell's UEs do not all go deaf at once. */
+inline bool suspend_sf(int64_t sf, uint16_t ue, int64_t every) {
+  if (every <= 0)
+    return false;
+  return ((sf + 3 * static_cast<int64_t>(ue)) % every + every) % every == 0;
+}
+/* Whether the DU skips this UE's DL in superframe `sf`: its suspend
+ * superframe or the one after. */
+inline bool suspend_dl_skip(int64_t sf, uint16_t ue, int64_t every) {
+  return suspend_sf(sf, ue, every) || suspend_sf(sf - 1, ue, every);
+}
+/* A neighbour this UE (its `busy` spans on the serving grid) can measure
+ * only in a suspend gap: another channel of the same band, and no idle
+ * window at this retune bound. */
+inline bool suspend_only(const Neighbour &n, uint8_t own_channel, int64_t retune_us, int64_t guard_us,
+                         int64_t period_us, const std::vector<GridSpan> &busy, int64_t beacon_air_us = 500) {
+  if (n.channel == 0 || n.channel == own_channel || gap_cross_band(own_channel, n.channel))
+    return false;
+  return !gap_window(n.offset_us, beacon_air_us, retune_us, guard_us, period_us, busy) &&
+         gap_window(n.offset_us, beacon_air_us, retune_us, guard_us, period_us, {});
+}
+inline bool needs_suspend(const std::vector<Neighbour> &nl, uint8_t own_channel, int64_t retune_us,
+                          int64_t guard_us, int64_t period_us, const std::vector<GridSpan> &busy) {
+  for (const Neighbour &n : nl)
+    if (suspend_only(n, own_channel, retune_us, guard_us, period_us, busy))
+      return true;
+  return false;
 }
 
 } /* namespace devourer::cell */

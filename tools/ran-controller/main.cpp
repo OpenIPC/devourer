@@ -92,6 +92,11 @@
 //   RAN_PHASE_WAIT_S [20]     (below the DUs' CELL_PHASE_WAIT_S)
 //   RAN_GAP_RETUNE_US [26000] RAN_GAP_GUARD_US [2000]  the UEs' gap bound
 //                             (= CELL_UE_GAP_RETUNE_US / _GUARD_US)
+//   RAN_GAP_SUSPEND [0]       1 = the cells run suspend gaps
+//                             (CELL_GAP_SUSPEND_SF): a direction only a
+//                             suspend gap reaches counts 0.25 per position
+//                             instead of 0, so the plan still prefers idle
+//                             windows and covers every pair
 //   RAN_SECS [120]            run time
 // Output: JSONL on stdout ("ev":"ran.*").
 #include <arpa/inet.h>
@@ -402,6 +407,10 @@ int main() {
   devourer::cell::PhaseParams phase_pp;
   phase_pp.retune_us = envl("RAN_GAP_RETUNE_US", 26000, 1000, 500000);
   phase_pp.guard_us = envl("RAN_GAP_GUARD_US", 2000, 0, 50000);
+  /* The cells run suspend gaps (CELL_GAP_SUSPEND_SF): a direction only a
+   * suspend gap reaches still counts, at this weight (PhasePlan.h). */
+  if (envl("RAN_GAP_SUSPEND", 0, 0, 1) != 0)
+    phase_pp.suspend_weight = 0.25;
   struct Joining {
     DuState st;
     std::chrono::steady_clock::time_point first;

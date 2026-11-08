@@ -32,7 +32,11 @@ namespace devourer::cell {
  * beacons do not recur at one offset of the joining grid.
  * Each pair scores up to 2 (both directions / both spans); the plan takes
  * the best total over a `step_us` grid and, of the best, the middle of the
- * widest run of equally good phases (the most margin). */
+ * widest run of equally good phases (the most margin).
+ * With suspend gaps (MeasGap.h; `suspend_weight` > 0), a position that can
+ * measure the other's beacon only in a suspend gap counts that weight
+ * instead of 0: still measured, at a cost, so the plan prefers idle
+ * windows and three or more cells on other channels are all covered. */
 struct PhaseCell {
   uint16_t du = 0;
   uint8_t channel = 0;
@@ -46,6 +50,7 @@ struct PhaseParams {
   int64_t period_us = 102400;
   int64_t retune_us = 30000, guard_us = 3000, beacon_air_us = 500;
   int64_t step_us = 100;
+  double suspend_weight = 0; /* per position measurable only in a suspend gap (0: no suspend gaps) */
 };
 struct PhasePlan {
   int64_t phase_us = 0;
@@ -89,12 +94,16 @@ namespace mg_detail {
 inline double measurable(const PhaseCell &x, int32_t offset, const PhaseParams &pp) {
   if (x.positions.empty())
     return 0;
-  size_t ok = 0;
+  double ok = 0;
   for (const auto &pos : x.positions) {
     const std::vector<GridSpan> busy = {{0, x.beacon_us}, pos.first, pos.second};
-    ok += gap_window(offset, pp.beacon_air_us, pp.retune_us, pp.guard_us, pp.period_us, busy) ? 1 : 0;
+    if (gap_window(offset, pp.beacon_air_us, pp.retune_us, pp.guard_us, pp.period_us, busy))
+      ok += 1;
+    else if (pp.suspend_weight > 0 &&
+             gap_window(offset, pp.beacon_air_us, pp.retune_us, pp.guard_us, pp.period_us, {}))
+      ok += pp.suspend_weight;
   }
-  return static_cast<double>(ok) / static_cast<double>(x.positions.size());
+  return ok / static_cast<double>(x.positions.size());
 }
 inline bool arcs_overlap(int64_t a, int64_t la, int64_t b, int64_t lb, int64_t P) {
   auto mod = [P](int64_t v) { return ((v % P) + P) % P; };

@@ -856,6 +856,22 @@ useless unless it is relayed live and on time (`src/cell/MeasGap.h`,
   even inside the window.
 - **Unlisted.** A neighbour the serving list does not name is not measured
   either.
+- **The references cannot be dragged:**
+  - A serving copy off the reference phase by more than the tolerance is
+    refused, not taken as the new reference. The reference follows genuine
+    beacons only slowly (1/8 of the error per beacon).
+  - Only 20 off-phase serving beacons in a row, with none on the reference,
+    re-take the reference; that covers a cell that really moved.
+  - A serving window that has not advanced for two windows' time is no
+    "now": neighbours are then refused as stale.
+  - At a cell switch the new serving cell's first window may be one behind
+    the old cell's, and no more.
+- **The DU signs only what it airs:**
+  - A beacon carries a signature only for its current list and window; a
+    failed re-sign airs none rather than an old one.
+  - A signing DU without a network superframe (no `CELL_REF_PTP`, or sync
+    lost) airs its list unsigned. It warns at start and logs
+    `cell.nl.unsigned_no_net` / `cell.nl.signed_again`.
 
 Refusals are logged per reason (`cell.ue.nbr_refused`, counted in
 `cell.ue.done`). `CELL_UE_NBR_FRESH=0` turns the checks off, which the rig
@@ -879,7 +895,7 @@ beacons for 45 s, then re-airs the last one every 100 ms. DU2 is killed at
 
 | case | runs | UE1's reports with cell 2: early (genuine) | last 200 (after DU2 is gone) | refused (stale / unlisted / phase) |
 |---|---|---|---|---|
-| checks on | 2 | 100 % | **0 %** | 559–568 / 0–8 / 127–130 |
+| checks on | 2 | 100 % | **0 %** | 562–618 / 0 / 86–103 |
 | checks off (`CELL_UE_NBR_FRESH=0`) | 2 | 100 % | 100 %: the ghost is measured | — |
 
 The replayer sent 1049 copies in every run. With the checks on, the ghost

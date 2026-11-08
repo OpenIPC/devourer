@@ -39,7 +39,7 @@
  *   NS IE: 'N' 'S' ver(1)=2 cell(2) gen(4) win(4) sig(64)
  *          sig over 'S' || the NL IE || win(4): win = the network superframe
  *          / kNlWindowSf, the signature's freshness (re-signed per window)
- *   NC IE: 'N' 'C' ver(1)=1 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
+ *   NC IE: 'N' 'C' ver(1)=2 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
  * A UE holding only the CA's PUBLIC key (CELL_CA_PUB) checks the chain
  * (NlVerifier) — and can forge nothing. It caches the NL bytes it verified
  * per cell, so a signature is checked once per list and window, not per

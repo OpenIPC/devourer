@@ -651,7 +651,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
   }
   std::vector<uint8_t> nl_signed_for, nl_sig_ie; /* the last NL signed, and its NS IE */
-  bool nl_sign_failed = false;
+  bool nl_sign_failed = false, nl_unsigned_no_net = false;
   uint32_t nl_signed_win = 0;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
 
@@ -659,6 +659,9 @@ int run_du(IRadio *dev, const Cfg &c) {
    * health that gates the coordinated schedule. */
   const char *ref_ptp = std::getenv("CELL_REF_PTP");
   const bool svc = ref_ptp && *ref_ptp;
+  if (nl_sign && !svc)
+    fprintf(stderr, "CELL_NL_SIGN_KEY without CELL_REF_PTP: no network superframe to sign a window "
+                    "with, so the list airs unsigned (cell.nl.unsigned_no_net)\n");
   const devourer::SyncTier tier = devourer::sync_tier(dev->GetAdapterCaps());
   struct Fd {
     int fd = -1;
@@ -2304,10 +2307,21 @@ int run_du(IRadio *dev, const Cfg &c) {
       const uint32_t win = net_sf_now >= 0
                                ? static_cast<uint32_t>(net_sf_now / devourer::cell::kNlWindowSf)
                                : 0;
+      if (nl_sign && !nl.empty() && net_sf_now < 0 && !nl_unsigned_no_net) {
+        /* No network superframe (no PTP service mode, or sync lost): no
+         * window to sign, so the list airs unsigned and signed UEs refuse it. */
+        nl_unsigned_no_net = true;
+        emit("{\"ev\":\"cell.nl.unsigned_no_net\"}");
+      }
       if (nl_sign && !nl.empty() && net_sf_now >= 0) { /* aired with the list */
+        if (nl_unsigned_no_net) {
+          nl_unsigned_no_net = false;
+          emit("{\"ev\":\"cell.nl.signed_again\"}");
+        }
         if (nl != nl_signed_for || win != nl_signed_win) {
-          nl_sig_ie = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, win, nl, nl_sign);
-          if (!nl_sig_ie.empty()) {
+          auto sig = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, win, nl, nl_sign);
+          if (!sig.empty()) {
+            nl_sig_ie = std::move(sig);
             nl_signed_for = nl;
             nl_signed_win = win;
           } else if (!nl_sign_failed) { /* retried next beacon; logged once */
@@ -2315,8 +2329,11 @@ int run_du(IRadio *dev, const Cfg &c) {
             emit("{\"ev\":\"cell.nl.sign_fail\"}");
           }
         }
-        ho_ies.insert(ho_ies.end(), nl_sig_ie.begin(), nl_sig_ie.end());
-        ho_ies.insert(ho_ies.end(), nl_cert_ie.begin(), nl_cert_ie.end());
+        /* Only a signature over THIS list and window: never an older one. */
+        if (nl == nl_signed_for && win == nl_signed_win) {
+          ho_ies.insert(ho_ies.end(), nl_sig_ie.begin(), nl_sig_ie.end());
+          ho_ies.insert(ho_ies.end(), nl_cert_ie.begin(), nl_cert_ie.end());
+        }
       }
     }
     if (changed || rar_now != rar_on_air || ho_ies != ho_on_air) {
@@ -2544,6 +2561,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
   const bool nbr_fresh = envl("CELL_UE_NBR_FRESH", 1, 0, 1) != 0;
   const int64_t nbr_phase_tol_us = envl("CELL_UE_NBR_PHASE_US", 300, 10, 50000);
   bool have_serv_win = false, have_serv_phase = false;
+  /* A cell switch: the new serving cell's first window may be one behind
+   * (both sit on the one network superframe, but not at the same instant). */
+  bool serv_switched = false;
+  uint64_t serv_win_ms = 0; /* when the serving window last advanced */
+  int serv_off_run = 0;     /* serving copies off the reference phase in a row */
   uint32_t serv_win = 0;
   int64_t serv_phase = 0;
   std::map<std::string, uint64_t> nbr_refused;
@@ -2732,14 +2754,38 @@ int run_ue(IRadio *dev, const Cfg &c) {
               const int64_t at = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(p.RxAtrib.tsfl)));
               phase = ((at % P) + P) % P;
             }
+            /* The serving reference phase moves only slowly: a copy off it
+             * by more than the tolerance is refused, never taken as the new
+             * reference (a replayed serving beacon cannot drag it). */
+            auto phase_off = [&](int64_t a, int64_t b) {
+              int64_t d = std::llabs(a - b) % P;
+              return std::min(d, P - d);
+            };
             if (serving) {
-              if (nbr_fresh && have_serv_win && sn->win < serv_win)
+              const uint32_t back = serv_switched ? 1u : 0u;
+              if (nbr_fresh && have_serv_win && sn->win + back < serv_win) {
                 why = "stale";
-              else {
+              } else if (nbr_fresh && have_serv_phase && phase >= 0 &&
+                         phase_off(phase, serv_phase) > nbr_phase_tol_us && ++serv_off_run < 20) {
+                why = "phase"; /* 20 in a row, none on the reference: the cell moved */
+              } else {
+                if (phase >= 0 && have_serv_phase && serv_off_run >= 20)
+                  have_serv_phase = false; /* re-taken below */
+                serv_off_run = 0;
+                if (!have_serv_win || sn->win > serv_win || serv_switched)
+                  serv_win_ms = ue_ms();
                 serv_win = sn->win;
                 have_serv_win = true;
+                serv_switched = false;
                 if (phase >= 0) { /* where serving beacons land: the reference */
-                  serv_phase = phase;
+                  if (!have_serv_phase) {
+                    serv_phase = phase;
+                  } else { /* 1/8 of the wrapped error per beacon */
+                    int64_t e = (phase - serv_phase) % P;
+                    if (e > P / 2) e -= P;
+                    if (e < -P / 2) e += P;
+                    serv_phase = ((serv_phase + e / 8) % P + P) % P;
+                  }
                   have_serv_phase = true;
                 }
               }
@@ -2747,7 +2793,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
               const int64_t dw = static_cast<int64_t>(sn->win) - static_cast<int64_t>(serv_win);
               const auto it = std::find_if(nbrs.begin(), nbrs.end(),
                                            [&](const devourer::cell::Neighbour &x) { return x.cell == bc; });
-              if (!have_serv_win || dw < -1 || dw > 1) {
+              /* The serving window itself must be current: one that has not
+               * advanced for two windows' time is no "now" to compare with. */
+              const bool serv_current =
+                  have_serv_win && ue_ms() - serv_win_ms <=
+                                       static_cast<uint64_t>(2 * devourer::cell::kNlWindowSf * P / 1000);
+              if (!serv_current || dw < -1 || dw > 1) {
                 why = "stale";
               } else if (it == nbrs.end()) {
                 why = "unlisted";
@@ -2755,9 +2806,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
                 why = "phase";
               } else {
                 want = (serv_phase + it->offset_us) % P;
-                int64_t d = std::llabs(phase - want);
-                d = std::min(d, P - d);
-                if (d > nbr_phase_tol_us)
+                if (phase_off(phase, want) > nbr_phase_tol_us)
                   why = "phase";
               }
             }
@@ -2947,6 +2996,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
         mr_gen = 0;           /* its MR window is its new superframe count */
         nbrs.clear();
         have_serv_phase = false; /* another serving grid */
+        serv_switched = true;
+        serv_off_run = 0;
         have_nbrs_gen = false;
         gap_parked.clear();
         next_gap_sf = -1;      /* deadlines on the old count: re-set on the new one */
@@ -3024,6 +3075,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
         rxr_target.reset();
         nbrs.clear(); /* the new serving cell airs its own list */
         have_serv_phase = false; /* another serving grid */
+        serv_switched = true;
+        serv_off_run = 0;
         have_nbrs_gen = false;
         gap_parked.clear();
         ho_pending.reset();
@@ -3067,6 +3120,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
           rxr_source.reset();
           nbrs.clear();
           have_serv_phase = false; /* another serving grid */
+          serv_switched = true;
+          serv_off_run = 0;
           have_nbrs_gen = false;
           gap_parked.clear();
           ho_back.reset();

@@ -246,7 +246,8 @@ constexpr FifoParams fifo_params(ChipVariant v, bool is_usb = true) {
    * extra queue the PCIe queue map puts MGQ on gets 64 pages, vs 0 on the
    * 3-bulkout USB table. */
   return FifoParams{TX_FIFO_SIZE, RX_FIFO_SIZE, RSVD_PG_CSIBUF_NUM,
-                    PG_HQ, PG_NQ, PG_LQ, is_usb ? PG_EXQ : 64, PG_GAP};
+                    PG_HQ, PG_NQ, PG_LQ,
+                    static_cast<uint16_t>(is_usb ? PG_EXQ : 64), PG_GAP};
 }
 
 } /* namespace */
@@ -772,24 +773,28 @@ bool HalmacJaguar2MacInit::mdio_write(uint8_t addr, uint16_t data, bool g1) {
   return false;
 }
 
-void HalmacJaguar2MacInit::pcie_phy_cfg(uint8_t cut) {
+bool HalmacJaguar2MacInit::pcie_phy_cfg(uint8_t cut) {
   const uint8_t cut_bit = static_cast<uint8_t>(1u << (cut & 7));
+  int done = 0, failed = 0;
   auto walk = [&](const MdioPara *t, size_t n, bool g1) {
-    int done = 0;
-    for (size_t i = 0; i < n; i++)
-      if ((t[i].cut_mask & cut_bit) && mdio_write(t[i].addr, t[i].val, g1))
+    for (size_t i = 0; i < n; i++) {
+      if (!(t[i].cut_mask & cut_bit))
+        continue;
+      if (mdio_write(t[i].addr, t[i].val, g1))
         ++done;
-    return done;
+      else
+        ++failed;
+    }
   };
-  int n1 = 0, n2 = 0;
   if (_variant == ChipVariant::C8821C) {
-    n1 = walk(kMdioGen1_8821c, 1, true);
+    walk(kMdioGen1_8821c, 1, true);
   } else {
-    n1 = walk(kMdioGen1_8822b, sizeof(kMdioGen1_8822b) / sizeof(MdioPara), true);
-    n2 = walk(kMdioGen2_8822b, sizeof(kMdioGen2_8822b) / sizeof(MdioPara), false);
+    walk(kMdioGen1_8822b, sizeof(kMdioGen1_8822b) / sizeof(MdioPara), true);
+    walk(kMdioGen2_8822b, sizeof(kMdioGen2_8822b) / sizeof(MdioPara), false);
   }
-  _logger->info("Jaguar2: PCIe MDIO cfg applied (cut={}, gen1 {} + gen2 {} writes)",
-                static_cast<int>(cut), n1, n2);
+  _logger->info("Jaguar2: PCIe MDIO cfg (cut={}): {} rows written, {} timed out",
+                static_cast<int>(cut), done, failed);
+  return failed == 0;
 }
 
 } /* namespace jaguar2 */

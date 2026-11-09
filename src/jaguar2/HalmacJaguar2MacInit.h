@@ -59,10 +59,10 @@ public:
   void init_usb_cfg();
 
   /* PCIe interface-PHY config (rtw_pci_phy_cfg): the die's gen1/gen2 MDIO
-   * tables, each row gated on the chip cut (0=A). The 8821C row is
-   * cut-independent, so it may run before the first power-on with cut 0; the
-   * 8822B rows are cut-C only and need read_chip_version first. PCIe only. */
-  void pcie_phy_cfg(uint8_t cut);
+   * tables, each row gated on the chip cut (0=A; SYS_CFG1 is readable on the
+   * unpowered MAC, so this runs before the first power-on). Returns false
+   * when any applicable row timed out. PCIe only. */
+  bool pcie_phy_cfg(uint8_t cut);
 
   /* halmac send_general_info_88xx: hand the booted firmware its PHY/RF
    * identity — two 32-byte H2C packets on the H2C queue (qsel 0x13):

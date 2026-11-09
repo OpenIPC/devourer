@@ -317,7 +317,7 @@ bool PcieTransport::setup_config_space() {
    * owned — fetches its ring descriptors the instant mastering turns on,
    * and before the mapping exists that is an IOMMU fault at the stale IOVA
    * (seen on an RTL8822BE whose prior session had not quiesced). */
-  cmd |= 0x2 /* MEMORY */;
+  cmd = static_cast<uint16_t>((cmd | 0x2 /* MEMORY */) & ~0x4 /* MASTER off */);
   cfg_write(0x04, &cmd, 2);
 
   /* Find the PCI Express capability (id 0x10) for LNKCTL / DEVCTL2. */

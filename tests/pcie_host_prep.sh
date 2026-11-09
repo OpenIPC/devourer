@@ -57,11 +57,13 @@ case "$cur" in
   *) mods+=("$cur") ;;
 esac
 if [ "${#mods[@]}" -gt 0 ]; then
+  # Merge with what an earlier call this session wrote (a second card or a
+  # USB witness on another driver) instead of replacing it.
   {
     echo "# devourer PCIe test session — removed by tests/pcie_host_prep.sh --restore"
-    for m in "${mods[@]}"; do echo "blacklist $m"; done
-  } > "$DROPIN"
-  echo "temp-blacklisted: ${mods[*]} ($DROPIN)"
+    { [ -f "$DROPIN" ] && grep '^blacklist ' "$DROPIN"; for m in "${mods[@]}"; do echo "blacklist $m"; done; } | sort -u
+  } > "$DROPIN.tmp" && mv "$DROPIN.tmp" "$DROPIN"
+  echo "temp-blacklisted: $(grep '^blacklist ' "$DROPIN" | awk '{print $2}' | tr '\n' ' ')($DROPIN)"
 fi
 echo "AER correctable errors on $BDF before bind: $(aer_count)"
 bash "$HERE/pcie_vfio_bind.sh" "$BDF"

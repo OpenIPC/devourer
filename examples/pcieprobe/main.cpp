@@ -283,9 +283,9 @@ int main(int argc, char **argv) {
   const uint32_t sys_cfg1 = adapter.rtw_read32(0x00F0);
   const uint8_t cr = adapter.rtw_read8(0x0100);
   const bool is_8821c = chip_id == 0x09;
-  /* 8822B chip-ids: 0x0a (and the 0x0b/0x0f spellings the USB factory also
-   * accepts, see WiFiDriver is_8822b_chip_id). */
-  const bool is_8822b = chip_id == 0x0a || chip_id == 0x0b || chip_id == 0x0f;
+  /* 8822B chip-ids exactly as the factory accepts them (WiFiDriver
+   * is_8822b_chip_id: 0x0a steady-state, 0x50 cold). */
+  const bool is_8822b = chip_id == 0x0a || chip_id == 0x50;
   const bool is_8822c = chip_id == 0x13;
   const bool id_ok = is_8821c || is_8822b || is_8822c;
   logger->info("M0: chip-id=0x{:02x} (want 0x09 = 8821C, 0x0a = 8822B or "
@@ -327,17 +327,15 @@ int main(int argc, char **argv) {
   bool power_ok = false;
   std::vector<uint8_t> efuse(0x200, 0xFF);
   try {
-    /* rtw88 order: hci_setup (ring registers) precedes mac_power_on. The
-     * 8821C MDIO cfg is cut-independent and runs pre-power as in the device;
-     * the 8822B tables are cut-C-gated and run after read_chip_version. */
+    /* rtw88 order: hci_setup (ring registers), the interface-PHY MDIO cfg
+     * (cut-gated; the cut is readable pre-power), then mac_power_on. */
     transport->setup_trx_rings();
-    if (is_8821c)
-      macinit.pcie_phy_cfg(0);
+    hal.read_chip_version(); /* SYS_CFG1 reads on the unpowered MAC */
+    if (!macinit.pcie_phy_cfg(hal.chip_version().cut))
+      logger->warn("M1: PCIe MDIO table incomplete");
     macinit.pre_init_system_cfg();
     hal.power_on();
     hal.read_chip_version();
-    if (is_8822b)
-      macinit.pcie_phy_cfg(hal.chip_version().cut);
     hal.read_efuse_logical_map(efuse.data(), efuse.size(), /*dump=*/false);
     power_ok = true;
   } catch (const std::exception &e) {

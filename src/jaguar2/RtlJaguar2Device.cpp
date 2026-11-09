@@ -89,14 +89,19 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * pre-init -> power-on -> system-cfg -> DLFW, giving the chip a clean slate. */
   bool fw_ok = false;
   constexpr int kBringupTries = 4;
-  /* rtw88 applies the PCIe interface-PHY MDIO config once at probe, after
-   * rtw_chip_info_setup's power cycle has read the cut. The 8821C table is
-   * cut-independent and has run pre-power since the 8821CE port (kept); the
-   * 8822B tables are cut-C-gated, so they run once the first attempt has the
-   * chip version. */
-  if (!_device.is_usb() && _variant == jaguar2::ChipVariant::C8821C)
-    _macinit.pcie_phy_cfg(0);
-  bool phy_cfg_done = _device.is_usb() || _variant == jaguar2::ChipVariant::C8821C;
+  /* rtw88 applies the PCIe interface-PHY MDIO config once at probe, before
+   * the first power-on of the session. SYS_CFG1 (the cut) is readable on
+   * the unpowered MAC over MMIO, so the cut-gated 8822B tables and the
+   * cut-independent 8821C write both run here, ahead of power_on(). A timed-
+   * out MDIO row is retried once as a whole table; rtw88 only warns on it. */
+  _pcie_quiesced = false; /* a new session re-arms the chip; teardown must run again */
+  if (!_device.is_usb()) {
+    _hal.read_chip_version();
+    if (!_macinit.pcie_phy_cfg(_hal.chip_version().cut) &&
+        !_macinit.pcie_phy_cfg(_hal.chip_version().cut))
+      _logger->warn("RtlJaguar2Device: PCIe interface-PHY MDIO table incomplete "
+                    "after retry — continuing (rtw88 warns here too)");
+  }
   for (int attempt = 0; attempt < kBringupTries && !fw_ok; attempt++) {
     if (attempt > 0)
       _logger->error("RtlJaguar2Device: DLFW failed — full power-cycle retry "
@@ -110,10 +115,6 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _macinit.pre_init_system_cfg();
     _hal.power_on();
     _hal.read_chip_version();
-    if (!phy_cfg_done) {
-      _macinit.pcie_phy_cfg(_hal.chip_version().cut);
-      phy_cfg_done = true;
-    }
     _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
     fw_ok = _fw.download_default_firmware();
   }
@@ -793,11 +794,14 @@ void RtlJaguar2Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
   int rx_urb_bytes = _cfg.rx.urb_bytes.value_or(16 * 1024);
   if (rx_urb_bytes < 4096)
     rx_urb_bytes = 4096;
-  _rx_running = true;
+  struct RunningGuard {
+    std::atomic<bool> &f;
+    explicit RunningGuard(std::atomic<bool> &flag) : f(flag) { f = true; }
+    ~RunningGuard() { f = false; }
+  } running_guard{_rx_running};
   _device.bulk_read_async_loop(rx_urb_bytes, 8, on_data, [this]() -> bool {
     return _rx_stop || g_devourer_should_stop;
   });
-  _rx_running = false;
   stop_dig();
   _logger->info("RtlJaguar2Device: RX loop exited ({} frames, {} reads)", frames,
                 reads);
@@ -820,7 +824,6 @@ void RtlJaguar2Device::pcie_quiesce() {
   if (_rx_running.load())
     _logger->warn("Jaguar2 PCIe: RX loop still running after 2 s — stopping "
                   "DMA under it");
-  _pcie_quiesced = true;
   try {
     std::lock_guard<std::mutex> lk(_reg_mu);
     _device.rtw_write32(0x0608, 0);    /* RCR: accept nothing more */
@@ -828,8 +831,11 @@ void RtlJaguar2Device::pcie_quiesce() {
     _hal.power_off();                  /* card-disable: TRX DMA stops */
     _device.rtw_write32(0x00B0, 0);    /* HIMR0: no further RX interrupts */
   } catch (const std::exception &e) {
+    /* Left un-marked so the destructor's call retries the card-disable. */
     _logger->warn("Jaguar2 PCIe: quiesce incomplete: {}", e.what());
+    return;
   }
+  _pcie_quiesced = true;
   _logger->info("Jaguar2 PCIe: DMA quiesced (card-disable) before transport teardown");
 }
 

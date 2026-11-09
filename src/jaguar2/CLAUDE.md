@@ -30,20 +30,14 @@ Jaguar1 (shared `PhyTableLoader`).
   Per-die: `kPwrOn/Off8821cPcie` vs `kPwrOn/Off8822bPcie` (the 8822B keeps
   its cut-C `0x10A8..AA` and `0x29/0x24/0xAF` tail, drops the USB `0x20[0]`
   + 1 ms, `0x00[5]`, `0xFF0A/B`, `0xFF1A`, `0x10C3` rows), and the
-  interface-PHY MDIO table (`pcie_phy_cfg(cut)` through the `0x3F4/0x3F8`
-  window): the 8821C's is one cut-independent gen1 write `{0x09, 0x6380}`
-  run before the first power-on; the 8822B's ten gen1 + ten gen2 rows are
-  all **cut-C-gated**, so they run once the first attempt has read the chip
-  version and on a cut-D unit (the lab's HP module) write nothing. The
-  completion-timeout disable is 8821CE-only (rtw88), left on for the 8822BE.
-  **Teardown must quiesce the DMA on PCIe** (`pcie_quiesce`, from `Stop()`
-  and the destructor): this generation leaves the chip powered after
-  `Stop()`, and over PCIe the RX engine kept fetching buffer descriptors
-  from the slab the transport had unmapped — an IOMMU read fault at the RXBD
-  ring IOVA on every 8822BE session exit — so the PCIe path now stops MAC
-  RX/TX, runs the card-disable sequence (what stops the engine, rtw88's
-  `rtw_mac_power_off` after `rtw_pci_stop`) and masks HIMR0 once the reap
-  loop has returned. USB keeps its powered-after-Stop behaviour.
+  interface-PHY MDIO table (`pcie_phy_cfg(cut)`): the 8821C's one
+  cut-independent write, the 8822B's twenty cut-C rows (a cut-D unit, the
+  lab's HP module, writes none). The completion-timeout disable is
+  8821CE-only (rtw88), left on for the 8822BE.
+  Teardown on PCIe runs `pcie_quiesce` (`Stop()` and the destructor) —
+  the card-disable sequence is what stops the RX DMA engine; the why is at
+  the function. The 8822B's interface-PHY MDIO rows are cut-C-gated and run
+  before the first power-on (the cut reads on the unpowered MAC).
   Measured 8822BE (one HP `103c:831b` module, cut D, j6412-1) vs an
   RTL8852CE on the same host over PCIe as the witness, 6M, 10,000
   frames/cell (`tests/pcie_8822ce_onair.sh --witness-bdf`): ch36 witness→BE

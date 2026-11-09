@@ -420,6 +420,42 @@ gaps run one in 20 superframes.
   to cell 2 on measurements only suspend gaps gave it (A3 at defaults,
   metric `ue_rssi`). The target heard it in slot 99.7–100 %.
 
+### Three cells on the rig
+
+The testrig `m5_ran_coord.sh --du3` adds a third cell. Its DU runs on the
+usual witness radio (j6412-2 09:00; no witness in this test), and its UE on
+j6412-1 05:00, the module with the weak TX chain, which is fine for
+measuring.
+- **Channels:** cell 1 on ch149 at phase 0, cell 2 on ch157, cell 3 on ch36.
+- **Planning:** cells 2 and 3 ask the CU for their phases.
+- **Retunes:** to and from ch36 take the same ~23.7 ms as 149 ↔ 157.
+
+**The plan** (`RAN_GAP_SUSPEND=1`, every run):
+- cell 2 at 51200: both ways idle with cell 1, score 2/2;
+- cell 3 at 51200 too: both ways idle with cell 1 (2.0), and with cell 2
+  through suspend gaps only (0.5).
+
+The planner without suspend credit picks the same phases and leaves 2 ↔ 3 at
+0.
+
+**Rig result** (testrig `scripts/m6_three_cells.sh`, all pass). Each cell
+has one UE, and a direction c→o is UE c measuring cell o.
+
+| direction | suspend gaps (3 runs): share of reports | measured by | no suspend gaps (3 runs) |
+|---|---|---|---|
+| 1→2, 1→3 | 100 % | idle gaps (86 per run each) | 100 % |
+| 2→1, 3→1 | 100 % | idle gaps (86) | 100 % |
+| 2→3, 3→2 | 100 % | suspend gaps (43 per run each) | **0 %** |
+
+- **No DL in a deaf window:** in all suspend runs, no DU aired its UE a DL
+  frame inside a suspend gap's deaf interval.
+- **In slot:** every DU heard its UE in slot 100 % from the first gap on.
+- **No missed windows:** no suspend superframe went by without its gap.
+- **The cost** falls only on the cells that need suspend gaps: DU2 and DU3
+  heard their UEs' uplinks in 90 % of superframes, and DU1 in 100 %.
+- **The counterfactual:** without suspend gaps, the geometric limit is real
+  on air. Cells 2 and 3 never measure each other, in any of 3 runs.
+
 ## The UE's clock fit across a jump of its DU's TSF
 
 The UE fits the DU's TSF against its own free-running counter
@@ -1092,6 +1128,24 @@ refused on phase (781 of ~865 for one UE). The first regression of the
 replay checks caught it in the signed-list run: UE2 reported cell 1 in only
 74.8 % of its reports. With the fix, 99.9 %.
 
+**Suspend gaps lost to the UE loop's own timing.** The UE loop wakes every
+100 ms; a gap blocks a pass for its wait plus ~54 ms deaf.
+- **Silent misses:** in one of the first three-cell runs, UE2's idle gaps to
+  cell 1 always fell in the superframe before its suspend superframe. Each
+  ended so late that the next pass came after the suspend gap's start, and
+  that window was missed silently: 1 suspend gap in a run, and 2→3 never
+  measured.
+- **Half the idle gaps:** a pass that had slept through a suspend gap went
+  on to schedule an idle gap from its stale superframe count, already in
+  the past. That consumed it, halving the idle rate.
+- **What changed:**
+  - an idle gap that would run into the next suspend gap is deferred a
+    superframe;
+  - a pass that ran a suspend gap skips the idle block;
+  - an idle gap whose start went by is retried;
+  - a suspend superframe gone by without its gap is logged
+    (`cell.ue.suspend_missed`).
+
 **First attempts at execution, in order:**
 1. The source's stale reports re-triggered the A3 for the UE that had just
    left, which issued a duplicate command. The CU now retires the old key.
@@ -1119,11 +1173,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   variant, with its retune and deaf-time budget. The downlink is duplicated
   through the target's buffer, but not received from both DUs at once (see
   the downlink duplication section).
-- **Three cells on the rig:** suspend gaps make every pair of three cells
-  on three channels measurable, but the rig has two DUs with good TX. The
-  three-cell plan is covered by the ctest; on air, two cells at a layout with
-  no idle window (the pair a third cell forces) show the mechanism.
-  Re-phasing live cells is still open; it is not needed for measurability.
+- **More than three cells, and handover among three:** the rig runs three
+  cells, one UE each, measuring. Handovers ran with two cells (including
+  one on suspend-gap measurements alone). Re-phasing live cells is still
+  open; it is not needed for measurability.
 - **A real moving UE:** the crossing below is emulated by the DUs' TX
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,

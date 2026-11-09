@@ -1291,6 +1291,14 @@ int main() {
     for (const CoordDu &c : view) {
       DuState &d = dus.at(c.du);
       const auto &want = target[c.du];
+      /* Not while it is a handover's source or target: a schedule instant
+       * in the arrival's publish window would cost it the arrival (a DU
+       * publishes one instant at a time). Re-planned once it concludes. */
+      bool in_flight = false;
+      for (const auto &fl : flights)
+        in_flight = in_flight || fl.second.cmd.source == c.du || fl.second.cmd.target == c.du;
+      if (in_flight)
+        continue;
       if (!d.sched || d.sched->ues != want) {
         /* Above anything this CU issued AND anything the DU reports applied
          * or staged (a restarted CU, or a DU that outlived several CUs). */

@@ -116,6 +116,21 @@ int main() {
     w.evaluate(-70, {{2, -60}, {3, -55}}, 0);
     auto b = w.evaluate(-70, {{2, -60}, {3, -55}}, 700);
     CHECK(b && *b == 3);
+    /* A weaker neighbour whose timer started first does not win over a
+     * stronger one still in its time-to-trigger (the three-cell rig: cell 2
+     * fired 1 s before cell 3, 19 dB stronger, had held for ttt). */
+    A3Trigger x(1, c);
+    CHECK(!x.evaluate(-60, {{2, -51}}, 0));                       /* only 2 qualifies */
+    CHECK(!x.evaluate(-60, {{2, -51}, {3, -32}}, 500));           /* 3 enters, stronger */
+    CHECK(!x.evaluate(-60, {{2, -51}, {3, -32}}, 700));           /* 2 held ttt; 3 has not */
+    auto x3 = x.evaluate(-60, {{2, -51}, {3, -32}}, 1140);        /* 3 held ttt */
+    CHECK(x3 && *x3 == 3);
+    /* ... and once the stronger one leaves, the weaker can fire again. */
+    A3Trigger y(1, c);
+    y.evaluate(-60, {{2, -51}, {3, -32}}, 0);
+    CHECK(!y.evaluate(-60, {{2, -51}, {3, std::nullopt}}, 300)); /* 3 stale: dropped */
+    auto y2 = y.evaluate(-60, {{2, -51}, {3, std::nullopt}}, 700);
+    CHECK(y2 && *y2 == 2);
     /* ttt 0: the first qualifying evaluation fires. */
     A3Config z = c;
     z.ttt_ms = 0;

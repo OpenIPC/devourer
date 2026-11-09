@@ -486,6 +486,10 @@ measurements. Each UE is strongest to the DU on its own box:
   grant never got its window: it expired, and UE3 fell back to cell 3. The
   CU now sends no new schedule to a DU while it is a handover's source or
   target; it re-plans once the handover concludes.
+  - Meanwhile a schedule the DU refused is not dropped but goes on as the
+    keepalive, since any fresh-sequence schedule is CU contact. So a long
+    handover cannot cost the DU its CU contact; the fresh version follows
+    after.
 - **A refused command, recovered:** the first command for UE3's arrival
   named id 2, from DU1's report taken before it freed UE1's id 1. DU1's
   registry gives the lowest free id, so it refused the command (invalid);
@@ -498,6 +502,13 @@ measurements. Each UE is strongest to the DU on its own box:
 | A3 defaults (2) | UE1 1→3 (−32 vs −51), UE3 3→1 (−31 vs −51); UE2 stays | 99.9 % |
 | A3 −2 dB (2) | the same, plus UE2 2→3 (−37/−38 vs −57), measured in 9 and 13 suspend gaps, never in an idle one | 99.9–100 % |
 
+- **The misses behind 99.9 %:** every switch between cells of different
+  phase (1↔3: 51.2 ms apart) had exactly one target uplink out of slot, of
+  724–786. It came in the second superframe after the switch, 49–51 ms off,
+  about the phase difference, as if that one uplink still ran on the source
+  cell's timing. The switch 2→3, between cells of the same phase, had none
+  (0 of 530 and 596). Its cause is not established, and no fallback
+  followed.
 - **Every switch:** TSF continuity (18–134 ms after the network instant,
   under 2 P), `ran.ho_done` 5–17 superframes after it, and no fallback.
 - **No DL in a deaf window:** no DU aired a UE a DL frame inside a suspend

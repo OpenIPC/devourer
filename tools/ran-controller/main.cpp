@@ -203,6 +203,10 @@ struct DuState {
   sockaddr_in addr{};
   std::chrono::steady_clock::time_point at;
   std::optional<f1::Schedule> sched; /* the schedule this DU should be running */
+  /* The DU refused it (Stale/Late/Invalid): a fresh version is due, but it
+   * still goes out as the keepalive meanwhile (any fresh-sequence schedule
+   * is CU contact), e.g. while a handover holds re-plans back. */
+  bool sched_refused = false;
 };
 
 }  // namespace
@@ -674,7 +678,7 @@ int main() {
                              a->status == f1::AckStatus::Invalid;
             if (a->kind == f1::AckKind::Schedule && it != dus.end() && it->second.sched &&
                 it->second.sched->version == a->version && bad)
-              it->second.sched.reset(); /* re-issue a fresh version next round */
+              it->second.sched_refused = true; /* re-issue a fresh version (kept as the keepalive) */
             static std::map<uint16_t, std::pair<uint32_t, int>> last; /* log changes only */
             auto &l = last[a->du];
             if (l.first != a->version || l.second != static_cast<int>(a->status)) {
@@ -1299,13 +1303,14 @@ int main() {
         in_flight = in_flight || fl.second.cmd.source == c.du || fl.second.cmd.target == c.du;
       if (in_flight)
         continue;
-      if (!d.sched || d.sched->ues != want) {
+      if (!d.sched || d.sched_refused || d.sched->ues != want) {
         /* Above anything this CU issued AND anything the DU reports applied
          * or staged (a restarted CU, or a DU that outlived several CUs). */
         uint32_t &v = version[c.du];
         v = std::max({v ? v + 1 : version_base, d.rep.applied_version + 1,
                       d.rep.staged_version + 1});
         d.sched = f1::Schedule{c.du, v, eff, next_seq(), want};
+        d.sched_refused = false;
         emit("{\"ev\":\"ran.schedule\",\"du\":" + std::to_string(c.du) + ",\"version\":" +
              std::to_string(d.sched->version) + ",\"effective_net_sf\":" + std::to_string(eff) +
              ",\"net_sf\":" + std::to_string(net_now) + ",\"ues\":" + assign_json(want) + "}");

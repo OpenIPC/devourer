@@ -44,17 +44,21 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   (`rtw8822ce_efuse`) vs `0x157` on USB. The data send path is unchanged:
   QSEL 0x12 routes to the MGMT ring. Completion timeout stays enabled (rtw88
   disables it on the 8821C only). Measured on one z890p unit (cut D, RFE 1)
-  vs a USB RTL8812AU witness, 6M, 2000 frames/cell
-  (`tests/pcie_8822ce_onair.sh`): ch36 usb→pcie 98.6%, pcie→usb 99.5%; ch6
-  91.5% / 90.6%. FastRetune hop over 36/40/44 (and 1/6/11) with the witness
-  parked on each channel in turn delivers 34.8 / 32.3 / 32.2% (32.1 / 30.0 /
-  31.5%) — the one-third split a three-channel hop should give, so the hop
+  vs a USB RTL8812AU witness, 6M, 10,000 frames/cell
+  (`tests/pcie_8822ce_onair.sh`): ch36 usb→pcie 99.1%, pcie→usb 99.8%; ch6
+  89.0% / 85.6%. FastRetune hop over 36/40/44 (and 1/6/11) with the witness
+  parked on each channel in turn delivers 33.4 / 33.4 / 32.8% (31.9 / 29.0 /
+  30.9%) — the one-third split a three-channel hop should give, so the hop
   lands and returns on every channel; `tests/pcie_rx_smoke.py` 858/949
   ambient beacons on ch6/ch36, 0 CRC fails; `tests/pcie_teardown_asan.sh`
   RX and TX sessions exit clean, 0 DMAR faults. One pair, one rate, one
-  unit: no throughput bench, no USB-sibling regression on this host (it has
-  no 8822CU), and the 2.4 GHz ~91% is a busy ambient channel's figure for
-  this pair, not a transmitter number. The card logs AER correctable
+  unit: no throughput bench, and the ch6 figures sit under the 90% the
+  acceptance criterion names — both directions drop the same ~10 points
+  from ch36, the witness-TX one included, so that is the busy 2.4 GHz
+  channel, not the card. The USB Jaguar3 path after the `is_usb()` gates
+  was checked on the main bench's RTL8812EU as devourer RX DUT (8934 hits
+  vs an 8822BU TX, ch36); that module cannot serve as the USB TX side
+  (first frame airs, then the bus drops — identical on master). The card logs AER correctable
   replay-timer timeouts in bursts of 10 every 5 s whenever powered — the
   same under rtw88 with the interface down, zero on the idle vfio-held link —
   so it is a board/link property, not a bring-up regression; the harness

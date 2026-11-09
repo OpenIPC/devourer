@@ -3121,6 +3121,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   size_t susp_rr = 0;       /* ... over those only a suspend gap reaches */
   int64_t last_susp_sf = -1;
   bool susp_infeasible = false;
+  bool had_susp_prev = false; /* last pass had neighbours only a suspend gap reaches */
   uint64_t susp_gaps = 0, susp_heard = 0, susp_fail = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -3802,9 +3803,25 @@ int run_ue(IRadio *dev, const Cfg &c) {
        * (its length is under P): exactly the superframes the DU skips this
        * UE's DL in. Taken for S = sfn + 1, or for S = sfn itself if this
        * pass came late and its start is still ahead. */
+      /* The next suspend gap's start on the DU clock (for an idle gap not
+       * to run into it), from a fresh reading: the pass may have slept. */
+      const int64_t susp_len = 2 * (gap_retune_us + gap_guard_us) + 500;
+      auto next_susp = [&](int64_t now) -> std::optional<std::pair<int64_t, int64_t>> {
+        if (susp.empty() || susp_len >= P)
+          return std::nullopt;
+        const auto &n = susp[susp_rr % susp.size()];
+        const int64_t w = ((n.offset_us - gap_retune_us - gap_guard_us) % P + P) % P;
+        for (int64_t S = now / P; S <= now / P + gap_suspend_every + 1; ++S)
+          if (S > last_susp_sf && devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every) &&
+              S * P + w - now > gap_guard_us)
+            return std::make_pair(S, S * P + w);
+        return std::nullopt;
+      };
+      bool susp_ran = false; /* this pass slept through a suspend gap: its sfn is stale */
+      const bool had_susp = had_susp_prev;
+      had_susp_prev = !susp.empty();
       if (!susp.empty()) {
-        const int64_t len = 2 * (gap_retune_us + gap_guard_us) + 500;
-        if (len >= P) {
+        if (susp_len >= P) {
           if (!susp_infeasible) { /* the measured retunes outgrew the superframe */
             susp_infeasible = true;
             char l[160];
@@ -3812,19 +3829,53 @@ int run_ue(IRadio *dev, const Cfg &c) {
                      (long long)gap_retune_us);
             emit(l);
           }
-        } else {
-          for (const int64_t S : {sfn, sfn + 1}) {
-            if (S <= last_susp_sf || !devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every))
-              continue;
+        } else if (const auto now_du = serving_now()) {
+          /* Needed from now on (a list just heard): nothing before is missed. */
+          if (!had_susp)
+            last_susp_sf = std::max(last_susp_sf, *now_du / P - 1);
+          /* Suspend superframes gone by without their gap since the last one
+           * accounted for: said, never silent (each, or one aggregate after
+           * a long pause). */
+          {
+            const int64_t w0 =
+                ((susp[susp_rr % susp.size()].offset_us - gap_retune_us - gap_guard_us) % P + P) % P;
+            int64_t n_missed = 0, first_missed = -1, last_missed = -1;
+            for (int64_t S = last_susp_sf + 1; S <= *now_du / P; ++S)
+              if (devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every) &&
+                  S * P + w0 <= *now_du) {
+                if (n_missed++ == 0)
+                  first_missed = S;
+                last_missed = S;
+              }
+            if (n_missed > 0) {
+              last_susp_sf = last_missed;
+              char l[200];
+              if (n_missed <= 3)
+                for (int64_t S = first_missed; S <= last_missed; ++S) {
+                  if (!devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every))
+                    continue;
+                  snprintf(l, sizeof l, "{\"ev\":\"cell.ue.suspend_missed\",\"ue\":%d,\"sf\":%lld}", me,
+                           (long long)S);
+                  emit(l);
+                }
+              else {
+                snprintf(l, sizeof l,
+                         "{\"ev\":\"cell.ue.suspend_missed\",\"ue\":%d,\"sf\":%lld,\"to_sf\":%lld,\"n\":%lld}",
+                         me, (long long)first_missed, (long long)last_missed, (long long)n_missed);
+                emit(l);
+              }
+            }
+          }
+          /* Taken if it starts within this pass's reach (< 2 P ahead). */
+          if (const auto ns = next_susp(*now_du); ns && ns->second - *now_du < 2 * P) {
             const auto n = susp[susp_rr % susp.size()];
-            const int64_t w = ((n.offset_us - gap_retune_us - gap_guard_us) % P + P) % P;
-            const auto now_du = serving_now();
-            if (!now_du || S * P + w - *now_du <= gap_guard_us)
-              continue; /* this one is out of reach (S = sfn); S + 1 comes next pass */
-            last_susp_sf = S;
-            ++susp_rr;
-            run_gap(n, S * P + w, len, true);
-            break;
+            /* Only a gap that ran consumes its superframe; a failed one (late,
+             * the beacon would not stop) is left to the missed-scan above. */
+            if (run_gap(n, ns->second, susp_len, true)) {
+              last_susp_sf = ns->first;
+              ++susp_rr;
+              susp_ran = true;
+            }
           }
         }
       }
@@ -3834,7 +3885,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
           std::max<int64_t>(2, gap_every_sf / static_cast<int64_t>(std::max<size_t>(1, other.size())));
       if (next_gap_sf < 0)
         next_gap_sf = sfn + every;
-      if (gap_every_sf > 0 && !other.empty() && sfn >= next_gap_sf) {
+      if (gap_every_sf > 0 && !susp_ran && !other.empty() && sfn >= next_gap_sf) {
         next_gap_sf = sfn + every;
         const auto n = other[gap_rr++ % other.size()];
         const bool cross_band = devourer::cell::gap_cross_band(cur_ch, n.channel);
@@ -3851,7 +3902,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
           emit(l);
         } else {
           gap_parked.erase(n.cell);
-          run_gap(n, (sfn + 1) * P + w->start, w->len, false);
+          /* Never into the next suspend gap: an idle gap and the 100 ms pass
+           * after it would carry the loop past that gap's start (and the
+           * same alignment would repeat every time). Deferred a superframe. */
+          const int64_t start = (sfn + 1) * P + w->start;
+          const auto now_du = serving_now();
+          const auto ns = now_du ? next_susp(*now_du) : std::nullopt;
+          if (ns && start + w->len + 150000 > ns->second && start < ns->second + susp_len) {
+            next_gap_sf = sfn + 1;
+            --gap_rr; /* the same neighbour, next superframe */
+          } else if (!run_gap(n, start, w->len, false)) {
+            next_gap_sf = sfn + 1; /* its start went by (a slept pass): the next superframe */
+            --gap_rr;
+          }
         }
       }
     }

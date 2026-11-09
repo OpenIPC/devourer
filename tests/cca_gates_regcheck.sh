@@ -75,7 +75,7 @@ OUT="${CCA_GATES_OUT:-/tmp/devourer-cca-gates}"
 # vendored copy of the tree whose build lives outside it.
 BUILD="${BUILD:-$ROOT/build}"
 VID=${VID:-0x0bda}
-PIDS="${PIDS:-0x8812 0xc812 0xf72b}"   # Jaguar1, Jaguar3, and an unported family
+PIDS="${PIDS:-0x8812 0xc812 0xb733}"   # Jaguar1, Jaguar3, RTL8733B
 CH="${CH:-36}"; CH_SAME="${CH_SAME:-40}"; CH_BAND="${CH_BAND:-6}"
 MARK_L2H=0x11                          # nothing max(igi+8,48) can produce
 # The BB EDCCA threshold register is per-generation — Jaguar1 writes L2H/H2L

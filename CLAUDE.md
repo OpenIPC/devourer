@@ -396,7 +396,7 @@ Behavioural traps the per-field docs can't carry:
   with EDCCA off and primary CCA left on, the same Jaguar1 injector delivers
   95% on an idle channel and still 78% under a co-channel flooder; with both
   gates off it collapses to 0.3%, because it stops waiting for a gap and
-  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1, Jaguar3 and Kestrel —
+  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1, Jaguar3, Kestrel and the RTL8733B —
   there "primary" is CCA_EN + the sec20/40/80 bits and "edcca" EDCCA_EN;
   txdemo drives it as `DEVOURER_CCA_GATES=<primary>,<edcca>`, 1 = that gate
   off) is the one-bit-at-a-time form for exactly this; `SetCcaMode` remains the portable
@@ -409,13 +409,13 @@ Behavioural traps the per-field docs can't carry:
   `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. On Kestrel the
   8852C runs the same enabled default (measured: full-rate TX, 2.4x flood
   deferral); the 8852B TX bring-up still clears the gates and WARNS pending
-  its measurement arm (`tests/kestrel_cca_default_check.sh`). On the RTL8733B
-  the disable is **not ported** — the HALMAC 87xx carrier-sense gate has not
-  been located and measured there, so `SetCcaMode(true)` throws (loudly, but
-  without tearing the session down) while `SetCcaMode(false)`, the state its
-  MAC bring-up already leaves programmed, succeeds as a no-op; setting the
-  config knob warns once at bring-up (RX-only sessions included) and airs
-  with carrier-sense. Does NOT apply
+  its measurement arm (`tests/kestrel_cca_default_check.sh`). The RTL8733B
+  is the Jaguar3 shape again: same `0x520[14]`/`[15]` + `0x524[11]` map, and
+  on air the primary bit is the one that works — the 8733B injecting MCS3 at
+  max duty on this bench's ch36 submits ~3.0k fps with carrier-sense on
+  against ~6.9k with `[14]` cleared, 4.1k → 7.2k against a co-channel 8822BU
+  flooder, while clearing `[15]` alone moves nothing (3 reps each, spread
+  under 3%; `src/rtl8733b/CLAUDE.md`). Does NOT apply
   the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
   separate null (`tests/dis_cca_onair.sh`).
 

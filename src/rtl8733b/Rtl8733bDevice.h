@@ -66,6 +66,14 @@ public:
   }
   /* Shared by ClearAckResponder and SetAckResponder rollback. */
   bool disarm_ack_responder();
+  /* The MAC carrier-sense gates, 0x0520[14] primary CCA and [15] EDCCA (+
+   * 0x0524[11] EDCCA countdown mask) — the same register map and bit names
+   * as the 88xx siblings (halmac_bit_8733b.h BIT_DIS_CCA_8733B /
+   * BIT_DIS_EDCCA_8733B / BIT_EDCCA_MSK_CNTDOWN_EN_8733B). Post-bring-up
+   * only per the IRtlRadio contract; bring-up resets the pair to
+   * tuning.disable_cca, SetMonitorChannel and FastRetune re-assert it. */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
   void SetCcaMode(bool disabled) override;
   void Stop() override;
 
@@ -148,6 +156,7 @@ private:
 
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
   void bring_up_to_phy();
+  void apply_cca_gates_locked(bool primary_disabled, bool edcca_disabled);
   bool configure_tx_power(SelectedChannel channel);
   /* Fill one [txdesc][frame] block at `out`. `agg_num` is the USB TX
    * aggregation block count and belongs on the FIRST descriptor of a packed
@@ -172,6 +181,9 @@ private:
   bool _phy_ready = false;
   bool _tx_ready = false;
   bool _tssi_tracking = false;
+  /* Sticky carrier-sense gate state (true = that gate OFF), under _reg_mu. */
+  bool _cca_primary_disabled = false;
+  bool _cca_edcca_disabled = false;
   /* Session TX-power offset in qdB, over the int8 delta field's full
    * [-128, +127] (GetTxPowerCaps argues the range and records where the chip
    * stops responding at each end), plus the rails the last apply hit. Sticky

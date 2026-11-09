@@ -255,15 +255,11 @@ untouched) and fall back to the full path.
 
 `ReadTsf`/beacons, A-MPDU TX, `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
-relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
-and CCA disable. These inherit `IRadio`'s not-ported defaults (`false`,
-`0`, or a full-path fallback) rather than being faked. `SetCcaMode` is the one
-exception to the silent-default rule: it is pure virtual, so `true` throws
-loudly — without tearing the session down, since an unported optional knob is
-not a hardware-safety event — while `false` succeeds as a no-op because that is
-the state MAC bring-up already leaves programmed.
+relative `SetTxPowerOffsetQdb` is ported) and `rx.path` per-chain telemetry.
+These inherit `IRadio`'s not-ported defaults (`false`, `0`, or a full-path
+fallback) rather than being faked.
 
-The TX-power knobs are the other exceptions, in the same spirit:
+The TX-power knobs are the exceptions to the silent-default rule:
 
 - `SetTxPowerOffsetQdb` **refuses loudly and returns 0** on a unit whose EFUSE
   carries no TSSI calibration, rather than reporting a successful zero-offset
@@ -282,11 +278,42 @@ The TX-power knobs are the other exceptions, in the same spirit:
   `SetTxPowerRateDiffs` needs no such override: its `false` return already says
   it.
 
-`DeviceConfig::tuning::disable_cca` cannot be honoured either, and bring-up
-warns rather than dropping it — a config knob must not be the one door where a
-request the setter refuses loudly instead vanishes without a word. The warning
-sits in `bring_up_to_phy`, not `InitWrite`, so an RX-only session that set the
-knob is told too, and so it fires exactly once per bring-up.
+## Carrier-sense gates
+
+`SetCcaGates` / `GetCcaGates` / `SetCcaMode` are ported on the Jaguar3 recipe,
+and the register map is not a guess: `halmac_bit_8733b.h` names `0x0520[14]`
+`BIT_DIS_CCA_8733B`, `[15]` `BIT_DIS_EDCCA_8733B` and `0x0524[11]`
+`BIT_EDCCA_MSK_CNTDOWN_EN_8733B`, and the shipped MAC init table writes
+`0x520 = 0x6f` (both gates ON). MAC bits only — the vendor's BB CCA-off
+writes (`0x1d58[11:3]`, and this die's own `0x2a24[13]` CCK-CCA bit, which
+`Phy8733b` toggles only around a band switch) stop detection and deafen the
+RX. `tests/cca_gates_regcheck.sh` passes every cell on the b733 (api, regs,
+cntdown, legacy, retune + fast-retune within and across bands; the `track`
+cell skips — no EDCCA tracker runs here). Bring-up resets the pair to
+`tuning.disable_cca` (MAC init rewrites 0x520), retunes re-assert it.
+
+On air, this family agrees with Jaguar3 about which bit matters. The b733
+injecting MCS3 at maximum duty on ch36, host submit rate in fps over the
+~5 s TX window, three repeats each:
+
+| cell | gates on | primary `[14]` off | EDCCA `[15]` off | both off |
+|---|---|---|---|---|
+| alone (this bench's ch36 ambient) | 3008 / 2938 / 3015 | 6903 / 6914 / 7021 | — | — |
+| co-channel 8822BU 6M flooder | 4001 / 4159 / 4079 | 7148 / 7237 / 7127 | 4100 / 4140 / 4112 | 7206 / 7131 / 7162 |
+| far-channel (ch149) flooder | 2920 / 3011 / 2911 | 7147 / 7036 / 7080 | 3043 / 2942 / 2926 | — |
+
+Three things to read off it, with their counterparts. "Alone" is not an idle
+channel: this bench's ch36 carries a resident network, and carrier-sense
+costs the injector 57% of its rate against it, which is why the primary gate
+buys 2.3× with no flooder of ours running (one earlier alone cell read
+6934 fps — ambient varies, and a single alone reading is not a baseline).
+Against the co-channel flooder the injector keeps 57% with the gates on and
+recovers to the gates-off ceiling (~7.15k) with `[14]` cleared, 1.75×. The
+far-channel flooder costs nothing beyond ambient (2.95k vs 3.0k alone), so
+there is no USB-contention term to subtract on this pairing. EDCCA alone is
+null in every arm. One unit, one flooder, one channel; the RX-decode side with
+the gates off decodes the same flood as with them on (`DEVOURER_DIS_CCA=1`
+rxdemo cell, below), so the MAC-bits-only rule holds here as on Jaguar3.
 
 ## Hardware ARQ
 
@@ -498,10 +525,10 @@ bug this die is merely the first to expose; it is described, with what a fix
 needs, in `src/sensing/CLAUDE.md`. Until it lands, a caller on this die
 reaches `IRadio::ArmChannelBusy`/`GetChannelBusy` directly.
 
-**The CCA gate cannot bias the reading here.** CLM counts CCA-busy, so a
-session with CCA disabled would under-report — but `SetCcaMode` throws "CCA
-disable is not implemented by this backend" on this die, so that state is
-unreachable rather than merely unlikely.
+**The CCA gate can bias the reading.** CLM counts CCA-busy, so a session that
+has disabled the gates (`SetCcaGates`, `DEVOURER_DIS_CCA`) may under-report
+busy airtime; whether it does on this die is unmeasured. Read the gate state
+with `GetCcaGates` beside a CLM figure.
 
 **`Stop()` forgets the window, and that is not obvious.** A stop is not a
 retune, so nothing would spoil an armed window — but clearing `_phy_ready`

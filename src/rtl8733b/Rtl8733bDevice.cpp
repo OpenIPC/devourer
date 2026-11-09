@@ -76,6 +76,15 @@ void Rtl8733bDevice::bring_up_to_phy() {
       throw std::runtime_error("RTL8733B HALMAC/MAC initialization failed");
     _mac_ready = true;
     _firmware_ready = true;
+    /* MAC init just wrote 0x0520 = 0x6f (both carrier-sense gates ON), so a
+     * fresh MAC resets the gate pair to the configured default — bring-up IS
+     * a reset here, as on Jaguar1. Runtime SetCcaGates/SetCcaMode state set
+     * later in the session survives retunes (re-asserted there), not a
+     * Stop()/Init() cycle. */
+    _cca_primary_disabled = _cfg.tuning.disable_cca;
+    _cca_edcca_disabled = _cfg.tuning.disable_cca;
+    if (_cfg.tuning.disable_cca)
+      apply_cca_gates_locked(true, true);
   }
   if (!_phy.initialize(_chip.cut, _efuse))
     throw std::runtime_error("RTL8733B PHY/RF initialization failed");
@@ -135,26 +144,6 @@ void Rtl8733bDevice::bring_up_to_phy() {
     throw std::runtime_error(
         "RTL8733B: configured ACK responder could not be armed");
   }
-  /* Every other generation applies tuning.disable_cca during bring-up
-   * (jaguar1/2/3, kestrel all call SetCcaMode there), so a caller setting
-   * DEVOURER_DIS_CCA=1 reasonably expects it to take effect. This backend has
-   * not located and measured the HALMAC 87xx carrier-sense gate, so it cannot
-   * honour the request — say so once, loudly, rather than dropping it in
-   * silence, which is the one way a refused knob can look like a granted one:
-   * the operator would otherwise believe carrier-sense was off and read the
-   * resulting deferral as a transmitter problem.
-   *
-   * Deliberately a warning and not the throw SetCcaMode(true) raises: the knob
-   * is on by default for the streamtx FPV downlink, and failing bring-up
-   * outright is a harsh answer to a request the caller may be making only via
-   * an inherited environment. The session runs with standard carrier-sense.
-   *
-   * Sited in bring_up_to_phy rather than InitWrite so an RX-only session that
-   * set the knob is told too, and so it fires exactly once per bring-up. */
-  if (_cfg.tuning.disable_cca)
-    _logger->warn(
-        "RTL8733B: DEVOURER_DIS_CCA / tuning.disable_cca is not implemented by "
-        "this backend — carrier-sense stays ENABLED for this session");
   /* DEVOURER_TX_REPORT needs nothing at bring-up beyond a freshly loaded
    * firmware (download_firmware never reuses a running image — a reused one
    * emits no C2H) and the SPE_RPT/SW_DEFINE stamps build_tx_block adds. The
@@ -553,6 +542,9 @@ void Rtl8733bDevice::SetMonitorChannel(SelectedChannel channel) {
     throw std::runtime_error("RTL8733B channel configuration failed");
   _channel = channel;
   _rx_configured_bw = channel.ChannelWidth == CHANNEL_WIDTH_40 ? 1 : 0;
+  /* Gate state is sticky across a retune by re-assertion, not by luck. */
+  if (_cca_primary_disabled || _cca_edcca_disabled)
+    apply_cca_gates_locked(_cca_primary_disabled, _cca_edcca_disabled);
   if (was_tx_ready) {
     if (!configure_tx_power(channel)) {
       _tx_ready = false;
@@ -581,6 +573,8 @@ void Rtl8733bDevice::FastRetune(uint8_t channel, bool cache_rf) {
                        rtl8733b::kSafeTssiTargetQdbm8733b, cache_rf,
                        _tx_offset_qdb)) {
     _channel = target;
+    if (_cca_primary_disabled || _cca_edcca_disabled)
+      apply_cca_gates_locked(_cca_primary_disabled, _cca_edcca_disabled);
     return;
   }
   /* Fast path declined (band/width change, cold radio) — full channel set at
@@ -1062,27 +1056,53 @@ void Rtl8733bDevice::ClearAckResponder() {
   (void)disarm_ack_responder();
 }
 
+/* 0x0520[14] BIT_DIS_CCA (primary carrier-sense) / [15] BIT_DIS_EDCCA, plus
+ * 0x0524[11] BIT_EDCCA_MSK_CNTDOWN_EN following the EDCCA gate alone — the
+ * Jaguar3 recipe, on a register map halmac_bit_8733b.h names identically.
+ * MAC bits only: the vendor's BB CCA-off writes (0x1d58[11:3], and on this
+ * die 0x2a24[13] for CCK) stop detection and deafen the RX, so they stay out.
+ * Caller holds _reg_mu. */
+void Rtl8733bDevice::apply_cca_gates_locked(bool primary_disabled,
+                                            bool edcca_disabled) {
+  uint32_t v520 = _device.rtw_read32(0x0520);
+  uint32_t v524 = _device.rtw_read32(0x0524);
+  if (primary_disabled) v520 |= (1u << 14); else v520 &= ~(1u << 14);
+  if (edcca_disabled)   v520 |= (1u << 15); else v520 &= ~(1u << 15);
+  if (edcca_disabled)   v524 &= ~(1u << 11); else v524 |= (1u << 11);
+  _device.rtw_write32(0x0520, v520);
+  _device.rtw_write32(0x0524, v524);
+}
+
+bool Rtl8733bDevice::GetCcaGates(bool &primary_disabled, bool &edcca_disabled) {
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  if (!_mac_ready)
+    return false;
+  const uint32_t v = _device.rtw_read32(0x0520);
+  primary_disabled = (v & (1u << 14)) != 0;
+  edcca_disabled = (v & (1u << 15)) != 0;
+  return true;
+}
+
+bool Rtl8733bDevice::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  if (!_mac_ready)
+    return false;
+  _cca_primary_disabled = primary_disabled;
+  _cca_edcca_disabled = edcca_disabled;
+  apply_cca_gates_locked(primary_disabled, edcca_disabled);
+  _logger->info("RTL8733B: CCA gates primary={} edcca={}",
+                primary_disabled ? "OFF" : "on", edcca_disabled ? "OFF" : "on");
+  return true;
+}
+
 void Rtl8733bDevice::SetCcaMode(bool disabled) {
-  if (!disabled) {
-    /* `false` is the universal default — carrier-sense + EDCCA enabled — and
-     * that is exactly what this backend's HALMAC MAC bring-up leaves
-     * programmed. Succeed as a no-op: callers that assert the default
-     * unconditionally (examples/timesync) must not be punished for asking for
-     * the state the chip is already in. */
-    return;
-  }
-  /* `true` (DEVOURER_DIS_CCA) is not ported. The HALMAC 87xx carrier-sense
-   * gate has not been located and measured on this part, and this backend
-   * does not guess at PHY/MAC writes it cannot read back. Refuse loudly, per
-   * the pure-virtual contract in IRadio — but do NOT tear the session
-   * down: an unsupported optional knob is not a hardware-safety event, and
-   * card-disabling here would leave the caller with a dead chip for asking a
-   * question. The session stays up with standard carrier-sense. */
-  _logger->error(
-      "RTL8733B: CCA disable (DEVOURER_DIS_CCA) is not implemented by this "
-      "backend; carrier-sense stays enabled");
-  throw std::runtime_error(
-      "RTL8733B CCA disable is not implemented by this backend");
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  _cca_primary_disabled = disabled;
+  _cca_edcca_disabled = disabled;
+  if (_mac_ready)
+    apply_cca_gates_locked(disabled, disabled);
+  _logger->info("RTL8733B: MAC carrier-sense {}",
+                disabled ? "DISABLED (dis_cca: CCA+EDCCA)" : "enabled (default)");
 }
 
 void Rtl8733bDevice::Stop() {

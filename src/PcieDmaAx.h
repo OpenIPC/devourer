@@ -1,13 +1,22 @@
 #pragma once
 
-/* PcieDmaAx — the AX-generation (Wi-Fi 6, rtw89) PCIe DMA plane for the
- * RTL8852CE: the HAXI host interface. Register-level contract from the vendor
- * mac_ax `_pcie_8852c.c` (ring register map, BDRAM table) and the host-side
- * ring/descriptor contract from rtw89 pci.{c,h} (the vendor USB drop does not
- * ship its PCIe ring driver).
+/* PcieDmaAx — the AX-generation (Wi-Fi 6) PCIe DMA plane, one class for two
+ * ring engines selected by die at construction:
+ *   - RTL8852CE (C8852C): the HAXI host interface — 13 TX channels, the _V1
+ *     register bank, 32-byte wd_body_v1 with ADDR_INFO_NUM and 6-byte
+ *     addr_info_v1 entries;
+ *   - RTL8852BE (C8852B): the older PCIe DMA engine — 7 TX channels (ACH0-3,
+ *     CH8 B0MG, CH9 B0HI, CH12 FWCMD), the 0x10xx/0x11xx/0x12xx register bank,
+ *     24-byte wd_body without an ADDR_INFO_NUM field and one 8-byte
+ *     addr_info_32 entry per WD page.
+ * Register-level contract (ring register map, BDRAM table, channel set) from
+ * the vendor mac_ax `_pcie_8852c.c` / `_pcie_8852b.c`; the host-side
+ * ring/descriptor byte formats (TXBD/RXBD, WD page = body + info + wp_info +
+ * addr_info, rxbd_info, RPP) from rtw89 pci.{c,h}, because neither vendor USB
+ * drop ships its PCIe ring driver. Everything taken from rtw89 is marked so.
  *
- * TX: 13 channels (ACH0..7 data, CH8 B0MG mgmt, CH9 B0HI, CH10/11 band 1,
- * CH12 FWCMD), each a 256-entry ring of 8-byte TXBDs {len, option(LS), dma}.
+ * TX: per-die channel set, each a 256-entry ring of 8-byte TXBDs {len,
+ * option(LS), dma}.
  *   - CH12 carries FWDL + H2C: the HAL's [16-byte rxd_short][payload] buffer
  *     is DMA'd as-is from a bounce slot; completion = the CH12 hardware index
  *     passing the slot. No WD page, no release report.
@@ -50,9 +59,12 @@ namespace devourer {
 
 class PcieTransport;
 
+/* Which AX ring engine the card has — picked from the PCI device id. */
+enum class AxDie : uint8_t { C8852C, C8852B };
+
 class PcieDmaAx final : public IPcieDmaPlane {
 public:
-  static constexpr uint32_t kTxChannels = 13;
+  static constexpr uint32_t kTxChannels = 13;  /* DMA channel number space (hint) */
   static constexpr uint32_t kFwcmdCh = 12;
   static constexpr uint32_t kBdLen = 256;        /* RTW89_PCI_TXBD/RXBD_NUM_MAX */
   static constexpr uint32_t kWdPages = 512;      /* RTW89_PCI_TXWD_NUM_MAX */
@@ -61,9 +73,11 @@ public:
   static constexpr uint32_t kPayloadSize = 4096; /* per-page frame bounce */
   static constexpr uint32_t kFwcmdSlotSize = 2304; /* rxd 16 + fwcmd hdr 8 + 2020 section, rounded */
 
-  PcieDmaAx(PcieTransport &t, Logger_t logger, int rx_poll_us);
+  PcieDmaAx(PcieTransport &t, Logger_t logger, int rx_poll_us, AxDie die);
 
-  const char *name() const override { return "ax-haxi"; }
+  const char *name() const override {
+    return _die == AxDie::C8852C ? "ax-haxi" : "ax-pcie-8852b";
+  }
   size_t slab_bytes() const override;
   bool attach(uint8_t *slab_va, uint64_t slab_iova) override;
   void setup_rings() override;
@@ -87,6 +101,7 @@ private:
     uint32_t wp = 0;
     uint16_t reg_num = 0, reg_idx = 0, reg_bdram = 0, reg_desa_l = 0;
     uint32_t bdram = 0;
+    bool present = false; /* the die has this DMA channel */
   };
   struct RxRing {
     volatile uint8_t *bd = nullptr; /* kBdLen × 8 B */
@@ -113,6 +128,9 @@ private:
   PcieTransport &_t;
   Logger_t _logger;
   int _rx_poll_us;
+  AxDie _die;
+  uint32_t _wd_body_len = 32;  /* 8852C wd_body_v1 32 B; 8852B wd_body 24 B */
+  uint16_t _drv_info_unit = 16; /* RX_DESC_DRV_INFO_UNIT_8852{C,B}: 16 / 8 */
 
   std::array<TxRing, kTxChannels> _tx{};
   RxRing _rxq{}, _rpq{};
@@ -140,6 +158,12 @@ private:
   std::array<uint64_t, 16> _rx_types{};
   uint64_t _rx_bad_len = 0;
   std::atomic<bool> _dead_logged{false};
+  std::atomic<bool> _stall_dumped{false};
+  /* RXQ ownership: the RX loop while it runs, else the TX path (which
+   * drains and discards so the ring never fills — see submit_wd). */
+  std::atomic<bool> _rx_loop_active{false};
+  std::mutex _rxq_mu;
+  uint64_t _rx_txonly_dropped = 0;
 };
 
 } /* namespace devourer */

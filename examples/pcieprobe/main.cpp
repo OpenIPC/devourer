@@ -1,6 +1,6 @@
 /* pcieprobe — staged bring-up driver for the PCIe transport (RTL8821CE,
- * RTL8822BE and RTL8822CE on the 88xx ring plane; RTL8852CE on the AX plane
- * — see probe_8852c below).
+ * RTL8822BE and RTL8822CE on the 88xx ring plane; RTL8852BE and RTL8852CE on
+ * the AX plane — see probe_kestrel below).
  *
  * Validates the PCIe milestones one layer at a time, bottom-up:
  *   id     (M0) vfio open + BAR2 MMIO: chip-id @0xFC must read 0x09 (8821C),
@@ -43,7 +43,8 @@
 #include "jaguar3/HalmacJaguar3Fw.h"
 #include "jaguar3/HalmacJaguar3MacInit.h"
 #endif
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
+#if defined(DEVOURER_HAVE_KESTREL_8852C) || defined(DEVOURER_HAVE_KESTREL_8852B)
+#define PCIEPROBE_HAVE_KESTREL 1
 #include "kestrel/ChipVariant.h"
 #include "kestrel/HalKestrel.h"
 #endif
@@ -58,21 +59,27 @@ static uint16_t pci_device_id(const std::string &bdf) {
   return static_cast<uint16_t>(v);
 }
 
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
-/* RTL8852CE (Kestrel, AX): M0 die-id + cut, M1 = HalKestrel PCIe power-on
- * (mac_pwr_on_nic_pcie_8852c) + EFUSE, cross-checking the efuse copy of the
- * PCI ids against config space; M2 = firmware download over the AX HAXI
- * FWCMD ring (HalKestrel::download_firmware runs the PCIe pre-init, which
- * programs the rings through hci_setup, then the three-phase FWDL). */
-static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
+#if defined(PCIEPROBE_HAVE_KESTREL)
+/* RTL8852CE / RTL8852BE (Kestrel, AX): M0 die-id (0x52 / 0x51) + cut, M1 =
+ * HalKestrel PCIe power-on (mac_pwr_on_nic_pcie_8852c / mac_pwr_on_pcie_8852b)
+ * + EFUSE, cross-checking the efuse copy of the PCI ids against config
+ * space; M2 = firmware download over the FWCMD ring (HalKestrel::
+ * download_firmware runs the die's PCIe pre-init, which programs the rings
+ * through hci_setup, then the FWDL). */
+static int probe_kestrel(RtlAdapter &adapter, Logger_t logger, int want,
+                         kestrel::ChipVariant variant, uint16_t pci_did) {
+  const bool is_c = variant == kestrel::ChipVariant::C8852C;
+  const char *tag = is_c ? "8852C" : "8852B";
   const uint8_t die_id = adapter.rtw_read8(0x00FC);
-  kestrel::HalKestrel hal(adapter, logger, kestrel::ChipVariant::C8852C);
+  kestrel::HalKestrel hal(adapter, logger, variant);
   const uint8_t cut = hal.read_cut();
-  const bool id_ok = die_id == 0x52;
-  logger->info("M0 (8852C): die-id=0x{:02x} (want 0x52) cut={}", die_id, cut);
+  const uint8_t want_die = is_c ? 0x52 : 0x51;
+  const bool id_ok = die_id == want_die;
+  logger->info("M0 ({}): die-id=0x{:02x} (want 0x{:02x}) cut={}", tag, die_id,
+               want_die, cut);
   devourer::Ev(logger->events(), "pcie.id")
       .f("ok", id_ok)
-      .f("chip", "8852c")
+      .f("chip", is_c ? "8852c" : "8852b")
       .hexf("chip_id", die_id, 2)
       .f("cut", static_cast<int>(cut));
   if (!id_ok || want < 1)
@@ -83,17 +90,17 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
   try {
     power_ok = hal.power_on() && hal.read_efuse(ef);
   } catch (const std::exception &e) {
-    logger->error("M1 (8852C): power-on failed: {}", e.what());
+    logger->error("M1 ({}): power-on failed: {}", tag, e.what());
   }
   char mac[18];
   snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", ef.mac[0],
            ef.mac[1], ef.mac[2], ef.mac[3], ef.mac[4], ef.mac[5]);
-  const bool ids_ok = ef.pci_vid == 0x10EC && ef.pci_did == 0xC852;
+  const bool ids_ok = ef.pci_vid == 0x10EC && ef.pci_did == pci_did;
   const bool ok = power_ok && ef.autoload_ok && ids_ok;
-  logger->info("M1 (8852C): power_ok={} autoload={} efuse pci={:04x}:{:04x} "
-               "MAC(0x400)={} rfe={} xtal=0x{:02x}",
-               power_ok, ef.autoload_ok, ef.pci_vid, ef.pci_did, mac,
-               ef.rfe_type, ef.xtal_cap);
+  logger->info("M1 ({}): power_ok={} autoload={} efuse pci={:04x}:{:04x} "
+               "(config space {:04x}) MAC(0x400)={} rfe={} xtal=0x{:02x}",
+               tag, power_ok, ef.autoload_ok, ef.pci_vid, ef.pci_did, pci_did,
+               mac, ef.rfe_type, ef.xtal_cap);
   devourer::Ev(logger->events(), "pcie.power")
       .f("ok", ok)
       .hexf("efuse_vid", ef.pci_vid, 4)
@@ -114,11 +121,31 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
   try {
     fw_ok = hal.download_firmware(cut);
   } catch (const std::exception &e) {
-    logger->error("M2 (8852C): FWDL failed: {}", e.what());
+    logger->error("M2 ({}): FWDL failed: {}", tag, e.what());
   }
   const uint32_t wcpu = adapter.rtw_read32(0x01E0); /* R_AX_WCPU_FW_CTRL */
   const uint32_t err = hal.fw_err_state("pcieprobe-fw");
-  logger->info("M2 (8852C): fw_ok={} WCPU_FW_CTRL=0x{:08x} ser-err=0x{:08x}",
+  if (!fw_ok && !is_c) {
+    /* 8852B PCIe DMA state after a failed FWDL: the engine gates and the
+     * FWCMD ring registers (vendor _pcie_8852b.c names). */
+    struct { const char *n; uint16_t r; } regs[] = {
+        {"PCIE_INIT_CFG1", 0x1000}, {"PCIE_INIT_CFG2", 0x1004},
+        {"PCIE_PS_CTRL", 0x1008},   {"PCIE_DMA_STOP1", 0x1010},
+        {"TXBD_RWPTR_CLR1", 0x1014}, {"PCIE_DMA_BUSY1", 0x101C},
+        {"CH12_NUM(16)", 0x1038},    {"CH12_IDX", 0x1080},
+        {"CH12_BDRAM_CTRL", 0x1228}, {"CH12_DESA_L", 0x1160},
+        {"BD_ADDR_H", 0x10E0},       {"DBG_ERR_FLAG", 0x11C4},
+        {"PCIE_INFO", 0x10F8},       {"LBC_WATCHDOG", 0x11D8},
+        {"HCI_FUNC_EN", 0x8380},     {"DMAC_FUNC_EN", 0x8400},
+        {"PLATFORM_EN", 0x0088},     {"SYS_SDIO_CTRL", 0x0070},
+        {"HCI_OPT_CTRL", 0x0074},    {"PCIE_EXP_CTRL", 0x13F0},
+        {"TX_ADDR_INFO_MODE", 0x8810}, {"PKTIN_SETTING", 0x9A00},
+        {"PCIE_HISR00", 0x10B4}};
+    for (const auto &x : regs)
+      logger->info("  dump {:>18} 0x{:04x} = 0x{:08x}", x.n, x.r,
+                   adapter.rtw_read32(x.r));
+  }
+  logger->info("M2 ({}): fw_ok={} WCPU_FW_CTRL=0x{:08x} ser-err=0x{:08x}", tag,
                fw_ok, wcpu, err);
   devourer::Ev(logger->events(), "pcie.fw")
       .f("ok", fw_ok)
@@ -126,8 +153,8 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
       .hexf("ser_err", err, 8);
   if (!fw_ok)
     return 1;
-  if (want >= 3) {
-    /* M3 (bb): is the BB register window (+0x10000, halbb/halrf's plane)
+  if (want >= 3 && is_c) {
+    /* M3 (bb, 8852C): is the BB register window (+0x10000, halbb/halrf's plane)
      * reachable through BAR2? set_enable_bb_rf then read a few BB registers
      * both ways (adapter wide path vs raw BAR offset) plus a MAC register. */
     hal.enable_bb_rf();
@@ -266,11 +293,20 @@ int main(int argc, char **argv) {
 
   /* ---- stage id (M0): pure MMIO register plane, no power, no DMA ---- */
   RtlAdapter adapter(transport, logger, {});
-  if (pci_device_id(bdf) == 0xC852) {
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
-    return probe_8852c(adapter, logger, want);
+  const uint16_t did = pci_device_id(bdf);
+  if (did == 0xC852 || did == 0xB852) {
+#if defined(PCIEPROBE_HAVE_KESTREL)
+    const auto variant = did == 0xC852 ? kestrel::ChipVariant::C8852C
+                                       : kestrel::ChipVariant::C8852B;
+#if !defined(DEVOURER_HAVE_KESTREL_8852C)
+    if (did == 0xC852) { logger->error("RTL8852CE found but 8852C support not compiled in"); return 1; }
+#endif
+#if !defined(DEVOURER_HAVE_KESTREL_8852B)
+    if (did == 0xB852) { logger->error("RTL8852BE found but 8852B support not compiled in"); return 1; }
+#endif
+    return probe_kestrel(adapter, logger, want, variant, did);
 #else
-    logger->error("RTL8852CE found but 8852C support not compiled in");
+    logger->error("Kestrel PCIe card found but neither 8852B nor 8852C support is compiled in");
     return 1;
 #endif
   }

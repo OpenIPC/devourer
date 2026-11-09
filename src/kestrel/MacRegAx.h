@@ -1875,6 +1875,95 @@ constexpr uint16_t HFC_PCIE_CH011_PREC = 2;
 constexpr uint16_t HFC_PCIE_H2C_PREC = 40;
 constexpr uint16_t HFC_PCIE_WP_PREC = 0;
 constexpr uint16_t HFC_PCIE_DLFW_H2C_PREC_8852C = 256;
+
+/* ---- PCIe host interface, RTL8852BE: the older AX PCIe DMA engine the 8852B
+ * die drives (vendor mac_ax _pcie_8852b.c, hci_reg_ax.h, pwr_seq_func_8852b.c,
+ * init.c clr_pcie_avoid_pldr_polling_fail, dle.c / hci_fc.c 8852B PCIe rows).
+ * Different register bank and bit layout from the 8852C's HAXI; several
+ * HAXI addresses alias to other 8852B registers (0x1200 is ACH0_BDRAM_CTRL
+ * here), so nothing from the block above may run on this die. Ring geometry
+ * lives in src/PcieDmaAx.cpp (AxDie::C8852B). ---- */
+constexpr uint16_t R_AX_PCIE_INIT_CFG1 = 0x1000;
+constexpr uint32_t B_AX_TXHCI_EN = 1u << 11;
+constexpr uint32_t B_AX_RXHCI_EN = 1u << 13;
+constexpr uint32_t B_AX_RXBD_MODE = 1u << 18;        /* 0 = RXBD_PKT */
+constexpr uint32_t B_AX_LATENCY_CONTROL = 1u << 12;  /* multi-tag */
+constexpr uint32_t B_AX_TX_TRUNC_MODE = 1u << 5;
+constexpr uint32_t B_AX_RX_TRUNC_MODE = 1u << 4;
+constexpr uint8_t B_AX_PCIE_MAX_TXDMA_SH = 8;        /* 7 = 2048 B */
+constexpr uint32_t B_AX_PCIE_MAX_TXDMA_MSK = 0x7;
+constexpr uint8_t B_AX_PCIE_MAX_RXDMA_SH = 14;       /* 3 = 128 B */
+constexpr uint32_t B_AX_PCIE_MAX_RXDMA_MSK = 0x7;
+constexpr uint32_t MAC_AX_TX_BURST_2048B = 7;
+constexpr uint32_t MAC_AX_RX_BURST_128B = 3;
+constexpr uint16_t R_AX_PCIE_INIT_CFG2 = 0x1004;
+constexpr uint8_t B_AX_WD_ITVL_IDLE_SH = 24;
+constexpr uint32_t B_AX_WD_ITVL_IDLE_MSK = 0xf;
+constexpr uint8_t B_AX_WD_ITVL_ACT_SH = 16;
+constexpr uint32_t B_AX_WD_ITVL_ACT_MSK = 0xf;
+constexpr uint16_t R_AX_PCIE_PS_CTRL = 0x1008;
+constexpr uint32_t B_AX_PCIE_FORCE_L0 = 1u << 4;
+constexpr uint16_t R_AX_PCIE_DMA_STOP1 = 0x1010;     /* STOP_PCIEIO/WPDMA/CH12 as the HAXI */
+constexpr uint32_t PCIE_DMA_STOP1_CHANS_8852B =       /* ACH0-3, CH8, CH9, CH12 */
+    (0xFu << 8) | (1u << 16) | (1u << 17) | (1u << 18);
+constexpr uint16_t R_AX_RXBD_RWPTR_CLR = 0x1018;      /* RXQ bit0, RPQ bit1 */
+constexpr uint32_t TXBD_RWPTR_CLR1_8852B = 0xFu | (1u << 8) | (1u << 9) | (1u << 10);
+constexpr uint32_t RXBD_RWPTR_CLR_8852B = 0x3;
+constexpr uint16_t R_AX_PCIE_DMA_BUSY1 = 0x101C;
+constexpr uint32_t PCIE_DMA_BUSY1_TX_8852B = PCIE_DMA_STOP1_CHANS_8852B;
+constexpr uint32_t PCIE_DMA_BUSY1_RX_8852B = 0x3;    /* RXQ bit0, RPQ bit1 */
+constexpr uint16_t R_AX_PCIE_EXP_CTRL = 0x13F0;
+constexpr uint8_t B_AX_MAX_TAG_NUM_SH = 16;
+constexpr uint32_t B_AX_MAX_TAG_NUM_MSK = 0x7;
+constexpr uint16_t R_AX_LBC_WATCHDOG = 0x11D8;
+constexpr uint32_t B_AX_LBC_EN = 1u << 0;
+constexpr uint8_t B_AX_LBC_TIMER_SH = 4;
+constexpr uint32_t B_AX_LBC_TIMER_MSK = 0xf;
+constexpr uint32_t MAC_AX_LBC_TMR_2MS = 8;            /* enum mac_ax_lbc_tmr */
+/* LTR v0 (pcie_ltr_write_8852b, pcie_ltr_param_def_8852b): CTRL_0 LTR_EN
+ * is bit 1 here (bit 1 is WD_NOEMP_CHK_V1 on the 8852C), HW_EN bit 0,
+ * WD_NOEMP_CHK bit 6, SPACE_IDX [13:12], IDLE_TIMER_IDX [10:8]; CTRL_1 RX0/
+ * RX1 thresholds [11:0] / [27:16]; latencies in their own registers. */
+constexpr uint32_t B_AX_LTR_EN = 1u << 1;
+constexpr uint32_t B_AX_LTR_WD_NOEMP_CHK = 1u << 6;
+constexpr uint8_t B_AX_LTR_SPACE_IDX_SH = 12;
+constexpr uint32_t B_AX_LTR_SPACE_IDX_MSK = 0x3;
+constexpr uint8_t B_AX_LTR_RX1_TH_SH_8852B = 16;
+constexpr uint16_t R_AX_LTR_IDLE_LATENCY = 0x8418;
+constexpr uint16_t R_AX_LTR_ACTIVE_LATENCY = 0x841C;
+constexpr uint32_t LTR_IDLE_LATENCY_8852B = 0x90039003;
+constexpr uint32_t LTR_ACTIVE_LATENCY_8852B = 0x880b880b;
+constexpr uint32_t LTR_RX_TH_8852B = 0x28;
+/* mac_pwr_on_pcie_8852b deltas: 0x70[12] PCIE_CALIB_EN cleared after the
+ * platform enable; _patch_ck_buf_level (CAV/CBV only): 0xCC[2] set, HCI LDO
+ * 0x7A[3:0] = 0xA, 0xCC[2] cleared. */
+constexpr uint16_t R_AX_HCI_LDO_CTRL = 0x007A;
+constexpr uint8_t B_AX_R_AX_VADJ_SH = 0;
+constexpr uint16_t B_AX_R_AX_VADJ_MSK = 0xf;
+constexpr uint16_t HCI_LDO_VADJ_CK_BUF_8852B = 0xA;
+/* 8852B PCIe SCC_TURBO DLE quota (dle_mem_pcie_8852b: wde_size23 /
+ * ple_size24 / wde_qt23 / ple_qt57(min) / ple_qt19(max)) — the TURBO row,
+ * matching the qta_mode the USB path runs. */
+constexpr uint16_t PCIE_TURBO_WDE_LNK_PAGE_8852B = 1022;
+constexpr uint16_t PCIE_TURBO_WDE_UNLNK_PAGE_8852B = 2;
+constexpr uint16_t PCIE_TURBO_PLE_LNK_PAGE_8852B = 1008;
+constexpr uint16_t PCIE_TURBO_WDE_QT_HIF_8852B = 958;
+constexpr uint16_t PCIE_TURBO_WDE_QT_WCPU_8852B = 48;
+constexpr uint16_t PCIE_TURBO_WDE_QT_CPU_IO_8852B = 16;
+constexpr uint16_t PCIE_TURBO_PLE_MIN_8852B[11] = {147, 0, 16, 20, 13, 13,
+                                                   178, 0, 32, 14, 8};
+constexpr uint16_t PCIE_TURBO_PLE_MAX_8852B[11] = {147, 0, 32, 20, 580, 13,
+                                                   745, 0, 599, 14, 24};
+/* 8852B PCIe SCC_TURBO HFC (hfc_chcfg_pcie_8852b_turbo: ACH0-3 {16,742},
+ * B0MGQ/B0HIQ {15,743}, the rest 0; hfc_pubcfg_pcie_8852b_turbo 958/0/958;
+ * hfc_preccfg_pcie CH0-11 2, H2C 40, WP 0/0, full-cond X2/X1/X1/X1; MODE
+ * POH). The DLFW row uses the same hfc_preccfg_pcie (H2C pre-cost 40). */
+constexpr uint16_t HFC_PCIE_TURBO_ACH_MIN_8852B = 16;
+constexpr uint16_t HFC_PCIE_TURBO_ACH_MAX_8852B = 742;
+constexpr uint16_t HFC_PCIE_TURBO_MG_MIN_8852B = 15;
+constexpr uint16_t HFC_PCIE_TURBO_MG_MAX_8852B = 743;
+constexpr uint16_t HFC_PCIE_TURBO_PUB_8852B = 958;
+constexpr uint16_t HFC_PCIE_DLFW_H2C_PREC_8852B = 40;
 constexpr uint8_t HFC_FULL_COND_X1 = 0;
 constexpr uint8_t MAC_AX_HCIFC_POH = 0;
 constexpr uint16_t R_AX_ACH4_PAGE_CTRL_V1 = 0x1720;

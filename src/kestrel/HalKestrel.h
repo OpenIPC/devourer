@@ -610,7 +610,10 @@ private:
 
   bool usb_pre_init();
   void usb_init(); /* runtime USB init (endpoint NUMP/burst) — usb_init_8852b */
-  /* pcie_pre_init pieces (rtw89 pci.c, 8852C branches only). */
+  /* pcie_pre_init pieces for the 8852C (HAXI) — the functions below up to
+   * pcie_ltr_silence. The 8852B (older PCIe DMA engine, vendor
+   * _pcie_8852b.c) has its own set, pcie_b_*; pcie_pre_init / pcie_init /
+   * pcie_deinit dispatch on _variant. */
   void pcie_disable_eq();
   void pcie_ctrl_dma_all(bool enable);
   bool pcie_poll_dma_idle();
@@ -626,6 +629,21 @@ private:
    * Returns false, writing nothing, if the LTR block reads back as
    * unreachable (the same sentinels pcie_ltr_set refuses). */
   bool pcie_ltr_silence();
+  /* 8852B PCIe (vendor _pcie_8852b.c): ctrl_trxdma / poll_dma_all_idle /
+   * clr_idx_ch (all) / mode_op / rst_bdram / ctrl_txdma_ch / LTR v0 write;
+   * pcie_b_pldr_fix is init.c clr_pcie_avoid_pldr_polling_fail, which the
+   * 8852A/B run between power-on and hci_func_en. */
+  void pcie_b_ctrl_trxdma(bool tx, bool rx, bool io);
+  bool pcie_b_poll_dma_idle();
+  void pcie_b_clr_idx_all();
+  void pcie_b_mode_op();
+  bool pcie_b_rst_bdram();
+  void pcie_b_ctrl_txdma_ch(bool enable);
+  bool pcie_b_ltr_set(bool enable);
+  bool pcie_b_pldr_fix();
+  bool pcie_b_pre_init();
+  void pcie_b_init();
+  void pcie_b_deinit();
   /* BB/RF channel helpers (all over the wIndex=1 window). */
   void bb_rmw(uint32_t addr, uint32_t mask, uint32_t val); /* masked BB write */
   /* R_AX_WMAC_RFMOD + R_AX_TX_SUB_CARRIER_VALUE for `bw` around `center`. */

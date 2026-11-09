@@ -358,8 +358,9 @@ per-frame CCX `tx.report` — are measured true on this die.
 The detailed ARQ characterization below used the original `f72b` RTL8731BU,
 an RTL8812AU peer, and an RTL8812CU passive witness. The live responder-disarm
 cell was independently repeated on the `b733` sample by the maintainer and on
-a second vehicle-mounted `f72b`; both agreed. No vendor-driver A/B exists, and
-the other ARQ rows remain single-bench results rather than population
+a second vehicle-mounted `f72b`; both agreed. The vendor-driver control
+(`docs/rtl8733b.md` "Vendor-driver control") covers raw TX/RX decode, not
+these ARQ rows, which remain single-bench results rather than population
 qualification. Witness copy counts are conservative observations because a
 passive monitor can miss airings.
 
@@ -557,8 +558,12 @@ cross-decode with an RTL8812CU narrowband peer on both bands, legacy and HT;
 packets across the whole DAC/ADC divider code space, with a
 continuous-carrier failure mode observed warm
 (`DEVOURER_NB_DAC`/`DEVOURER_NB_ADC` map the codes for any future attempt).
-No vendor-driver A/B control was obtained (its module does not build on
-modern kernels). The full tested/deferred matrix, the provenance pins and the
+The vendor module builds and runs on the 6.18 host
+(`tests/rtl8733b_vendor_build.sh`, `tests/rtl8733b_vendor_ko_smoke.sh`); the
+`regress.py` encoding matrices against a devourer RTL8822BU peer are in
+`docs/rtl8733b.md` "Vendor-driver control" — RX parity on every encoding on
+both bands, including zero HT-LDPC under both drivers. The full
+tested/deferred matrix, the provenance pins and the
 second `f72b` unit that overheated and was excluded: `docs/rtl8733b.md`.
 
 Headless coverage: `tests/rtl8733b_{efuse,phy_table,rx_parse,tx_desc}_selftest.cpp`

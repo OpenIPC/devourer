@@ -931,6 +931,14 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
    * use the same SetTxMode default as the established backends and txdemo. */
   bool short_gi = false;
   bool ldpc = false;
+  /* Every refusal below is said once, by name: a silent `return 0` reaches
+   * txdemo as a run of failed sends, and the operator is then told to look
+   * at the USB path for a frame this backend never tried to send. */
+  const auto refuse = [this](const char *why) -> size_t {
+    if (!_refusal_logged.exchange(true))
+      _logger->error("RTL8733B TX refused: {}", why);
+    return 0;
+  };
   if (_tx_mode_default) {
     const auto &mode = *_tx_mode_default;
     /* One predicate covers the family (VHT/HE refused outright) and its
@@ -938,7 +946,9 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
      * below cannot drift apart — and the refusals are testable without
      * hardware (tests/rtl8733b_tx_desc_selftest.cpp). */
     if (!rtl8733b::tx_mode_supported_8733b(mode))
-      return 0;
+      return refuse("the configured TX mode is outside this die's contract "
+                    "(1SS legacy/HT MCS0-7, 20/40 MHz, no STBC/VHT/HE; CCK "
+                    "on 2.4 GHz at 20 MHz only)");
     if (mode.mode == devourer::TxMode::Mode::Legacy) {
       fixed_rate = mode.legacy_rate_500kbps;
     } else {
@@ -967,7 +977,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
       requested_channel =
           devourer::freq_to_chan(get_unaligned_le16(iterator.this_arg));
       if (requested_channel <= 0)
-        return 0;
+        return refuse("radiotap CHANNEL names no 802.11 channel");
       break;
     case IEEE80211_RADIOTAP_MCS: {
       const auto m = devourer::decode_radiotap_mcs_field(iterator.this_arg);
@@ -975,7 +985,8 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
           !rtl8733b::ht_request_supported_8733b(m.mcs, m.bw40 ? 40 : 20,
                                                 m.sgi != 0, m.ldpc != 0,
                                                 m.stbc != 0))
-        return 0;
+        return refuse("radiotap MCS asks for HT this die refuses (MCS > 7, "
+                      "a second stream, or STBC)");
       fixed_rate = static_cast<uint8_t>(MGN_MCS0 + m.mcs);
       frame_width = m.bw40 ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_20;
       short_gi = m.sgi != 0;
@@ -984,7 +995,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
     }
     case IEEE80211_RADIOTAP_VHT:
     case IEEE80211_RADIOTAP_HE:
-      return 0; // RTL8733B contract is legacy CCK/OFDM + HT 1SS only
+      return refuse("radiotap VHT/HE — this die is 802.11b/g/n only");
     default:
       break;
     }
@@ -993,16 +1004,22 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
   /* This initial path does not retune during a submission. Refuse a mismatched
    * radiotap CHANNEL instead of silently airing on the session channel. */
   if (requested_channel > 0 && requested_channel != _channel.Channel)
-    return 0;
+    return refuse("radiotap CHANNEL differs from the tuned channel — this "
+                  "backend retunes for nobody mid-submission (FastRetune "
+                  "first, or drop the field)");
 
   if (frame_width == CHANNEL_WIDTH_40 &&
       _channel.ChannelWidth != CHANNEL_WIDTH_40)
-    return 0;
+    return refuse(_channel.ChannelWidth == CHANNEL_WIDTH_20
+                      ? "a 40 MHz frame on a 20 MHz-configured channel — "
+                        "bring the channel up at 40 MHz (txdemo: "
+                        "DEVOURER_HOP_BW=40) or send a 20 MHz frame"
+                      : "a 40 MHz frame on a narrowband-configured channel");
   if (_channel.ChannelWidth != CHANNEL_WIDTH_20 &&
       _channel.ChannelWidth != CHANNEL_WIDTH_40 &&
       _channel.ChannelWidth != CHANNEL_WIDTH_5 &&
       _channel.ChannelWidth != CHANNEL_WIDTH_10)
-    return 0;
+    return refuse("the tuned channel width is not one this die injects on");
 
   uint8_t data_sc = 0;
   if (_channel.ChannelWidth == CHANNEL_WIDTH_40 &&
@@ -1062,10 +1079,10 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
     cfg.spe_rpt = k % static_cast<uint64_t>(_cfg.tx.report) == 0;
     cfg.sw_define = static_cast<uint16_t>(k & 0xff);
   }
-  if (!rtl8733b::fill_tx_desc_8733b(out, rtl8733b::kTxDescSize, cfg)) {
-    _logger->error("RTL8733B TX rejected: unsupported rate/width/coding");
-    return 0;
-  }
+  if (!rtl8733b::fill_tx_desc_8733b(out, rtl8733b::kTxDescSize, cfg))
+    return refuse("the descriptor encoder rejected the rate/width/coding "
+                  "combination (CCK off 2.4 GHz or at 40 MHz, legacy SGI/"
+                  "LDPC, or an out-of-range field)");
 
   const size_t frame_offset =
       rtl8733b::kTxDescSize + static_cast<size_t>(packet_offset) * 8u;

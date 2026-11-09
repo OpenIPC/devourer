@@ -201,9 +201,41 @@ def _mediatek_duts() -> dict[str, str]:
     return out
 
 
+def _kestrel_duts() -> dict[str, str]:
+    """The Kestrel (RTL8852B/C) USB ids, read from the C++ gate table the
+    factory consults (src/kestrel/KestrelUsbIds.h) for the same reason as
+    _mediatek_duts(): a hand-copied list drifts silently."""
+    root = Path(__file__).resolve().parent.parent
+    header = root / "src" / "kestrel" / "KestrelUsbIds.h"
+    unavailable = "Kestrel DUTs unavailable —"
+    try:
+        text = header.read_text(encoding="utf-8")
+    except OSError as e:
+        sys.stderr.write(f"{unavailable} cannot read {header}: {e}\n")
+        return {}
+    body = re.search(r"kKestrelUsbIds\[\]\s*=\s*\{(.*?)\n\};", text, re.S)
+    if not body:
+        sys.stderr.write(f"{unavailable} no kKestrelUsbIds[] in {header}\n")
+        return {}
+    out: dict[str, str] = {}
+    for vid, pid, variant, comment in re.findall(
+        r"\{\s*0x([0-9a-fA-F]{4})\s*,\s*0x([0-9a-fA-F]{4})\s*,\s*"
+        r"ChipVariant::(C8852[BC])\s*\}\s*,?"
+        r"(?:[^\S\n]*/\*\s*(.*?)\s*\*/)?",
+        body.group(1),
+    ):
+        die = "RTL8852B" if variant == "C8852B" else "RTL8852C"
+        label = comment.strip() or "Realtek default id"
+        out[f"{vid.lower()}:{pid.lower()}"] = f"{die} ({label}, Kestrel)"
+    if not out:
+        sys.stderr.write(f"{unavailable} kKestrelUsbIds[] parsed empty in {header}\n")
+    return out
+
+
 # The MediaTek half, kept separately as well as merged below: a cell has to
 # know which side of the matrix needs firmware and a MediaTek-enabled build.
 MEDIATEK_DUTS = _mediatek_duts()
+KESTREL_DUTS = _kestrel_duts()
 
 # Map every supported PID to the chipset family used for log readability.
 # Detection of the kernel driver claiming the device is dynamic (via sysfs);
@@ -223,6 +255,7 @@ SUPPORTED_DUTS = {
     "0bda:c82c": "RTL8822CU (Jaguar3)",
     "0bda:a81a": "RTL8812EU (Jaguar3 EU)",
     "0bda:e822": "RTL8822EU (Jaguar3 EU)",
+    **KESTREL_DUTS,
     **MEDIATEK_DUTS,
 }
 

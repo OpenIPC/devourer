@@ -238,6 +238,12 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
       throw std::runtime_error("RTL8733B monitor RX configuration failed");
     _tx_ready = true;
     _tx_submits = 0;
+    /* DEVOURER_TX_AMPDU_MODE: MAC init rewrote the pacing registers, so a
+     * recorded mode is re-applied on every TX bring-up. */
+    if (_cfg.tx.ampdu && !_ampdu.enabled)
+      _ampdu = *_cfg.tx.ampdu;
+    if (_ampdu.enabled)
+      apply_ampdu_mode_locked();
     /* One-shot thermal snapshot at bring-up — the PA-heating baseline for the
      * session, same as the Kestrel InitWrite snapshot. Logged, never acted on:
      * the meter is a PA-bias tracking index, not a calibrated °C sensor, and
@@ -620,7 +626,7 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
    * profile, hence bulk-out ID 0 / the first enumerated endpoint (0x05 on the
    * tested f72b). Use synchronous TX so every submission has an
    * immediate, bounded result and no buffer outlives this call. */
-  const uint8_t endpoint = _device.first_bulk_out_ep();
+  const uint8_t endpoint = ep_for_qsel(usb_frame[0x05] & 0x1f);
   const uint8_t rate_hw = usb_frame[0x10] & 0x7f;
   const uint8_t rate_id = usb_frame[0x06] & 0x1f;
   const uint8_t bandwidth = (usb_frame[0x14] >> 5) & 0x3;
@@ -646,6 +652,83 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   }
   return true;
 }
+
+uint8_t Rtl8733bDevice::ep_for_qsel(uint8_t qsel) const {
+  if (_device.bulk_out_ep_count() < 3)
+    return _device.first_bulk_out_ep();
+  switch (qsel) {
+  case 0: case 3: case 1: case 2: /* BE, BK -> LOW */
+    return _device.nth_bulk_out_ep(2);
+  case 4: case 5: case 6: case 7: /* VI, VO -> NORMAL */
+    return _device.nth_bulk_out_ep(1);
+  default: /* MGT 0x12, HIQ 0x11, beacon, cmd -> HIGH */
+    return _device.first_bulk_out_ep();
+  }
+}
+
+/* EDCA parameter register of the access category a TID rides (802.11 UP ->
+ * AC): BE 0x0508 (TIDs 0, 3), BK 0x050c (1, 2), VI 0x0504 (4, 5), VO 0x0500
+ * (6, 7). */
+static uint16_t edca_reg_for_tid(uint8_t tid) {
+  switch (tid & 7) {
+  case 1: case 2: return 0x050c;
+  case 4: case 5: return 0x0504;
+  case 6: case 7: return 0x0500;
+  default: return 0x0508;
+  }
+}
+
+/* The pacing half of the A-MPDU mode on this die. The Jaguar2 pair is
+ * programmed too (REG_AMPDU_MAX_TIME is 0x0456 here; the burst gate
+ * 0x04BC[6] reads 0x40 after init) but neither moved the needle: what paces
+ * a data queue on this MAC is its EDCA TXOP limit — the vendor init's BE
+ * value 0x005ea42b holds each launch for the full 0x5e x 32 us = 3.0 ms
+ * (VO 0x2f = 1.5 ms), so a data-queue frame airs every ~3.3 ms (~310 fps
+ * against ~2600 on the MGMT queue, measured). With the TXOP limit zeroed
+ * the queue runs free and aggregates form (EN_HWSEQ permitting). The AC's
+ * register is saved on first enable and restored on disable. */
+void Rtl8733bDevice::apply_ampdu_mode_locked() {
+  const uint16_t edca = edca_reg_for_tid(_ampdu.tid);
+  if (_ampdu.enabled) {
+    if (_ampdu.max_time != 0)
+      _device.rtw_write8(0x0456, _ampdu.max_time); /* REG_AMPDU_MAX_TIME_8733B */
+    if (_ampdu.clear_burst_mode) {
+      const uint8_t cur = _device.rtw_read8(0x04bc);
+      if (!_burst_ctrl_orig)
+        _burst_ctrl_orig = cur;
+      _device.rtw_write8(0x04bc, static_cast<uint8_t>(cur & ~(1u << 6)));
+    }
+    const uint32_t cur_edca = _device.rtw_read32(edca);
+    if (!_edca_orig || _edca_orig->first != edca)
+      _edca_orig = std::make_pair(edca, cur_edca);
+    _device.rtw_write32(edca, cur_edca & 0x0000ffffu); /* TXOP limit 0 */
+    _logger->info("RTL8733B: A-MPDU mode ON (tid={} max={} density={} {} "
+                  "max_time=0x{:02x} burst_ctrl 0x{:02x}->0x{:02x} "
+                  "EDCA[0x{:03x}] 0x{:08x}->0x{:08x}, HW sequence numbers)",
+                  _ampdu.tid, _ampdu.max_num, _ampdu.density,
+                  _ampdu.no_ack ? "no-ack" : "ack", _ampdu.max_time,
+                  _burst_ctrl_orig.value_or(_device.rtw_read8(0x04bc)),
+                  _device.rtw_read8(0x04bc), edca, cur_edca,
+                  _device.rtw_read32(edca));
+  } else {
+    _device.rtw_write8(0x0456, 0x70);
+    if (_burst_ctrl_orig)
+      _device.rtw_write8(0x04bc, *_burst_ctrl_orig);
+    if (_edca_orig)
+      _device.rtw_write32(_edca_orig->first, _edca_orig->second);
+    _logger->info("RTL8733B: A-MPDU mode OFF (pacing restored)");
+  }
+}
+
+bool Rtl8733bDevice::SetAmpduMode(const devourer::AmpduMode &mode) {
+  std::lock_guard<std::recursive_mutex> lock(_reg_mu);
+  _ampdu = mode;
+  if (_mac_ready)
+    apply_ampdu_mode_locked();
+  return true;
+}
+
+void Rtl8733bDevice::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 void Rtl8733bDevice::SetTxMode(const devourer::TxMode &mode) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
@@ -760,7 +843,8 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
       continue;
     }
 
-    const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+    const uint8_t agg_ep = ep_for_qsel(urb[0x05] & 0x1f);
+    const int rc = _device.bulk_send_sync_ep(agg_ep,
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/100);
     /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` also covers a
@@ -776,7 +860,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
        * backend has no NAK-backoff flood concern excusing silence. */
       _logger->error("RTL8733B aggregated TX failed/short on EP 0x{:02x}: "
                      "{}/{} ({} frames dropped)",
-                     _device.first_bulk_out_ep(), rc, urb.size(),
+                     agg_ep, rc, urb.size(),
                      plan.frames());
     devourer::Ev(_logger->events(), "tx.agg")
         .f("frames", (unsigned long long)plan.frames())
@@ -795,7 +879,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
         _logger->info(
             "RTL8733B first TX accepted (aggregated): EP=0x{:02x} frames={} "
             "bytes={} shim={}",
-            _device.first_bulk_out_ep(), plan.frames(), urb.size(), plan.shim);
+            agg_ep, plan.frames(), urb.size(), plan.shim);
     }
     done += plan.frames();
   }
@@ -927,6 +1011,27 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
   cfg.short_gi = short_gi;
   cfg.ldpc = ldpc;
   cfg.bmc = bmc;
+  if (_ampdu.enabled) {
+    cfg.qsel = static_cast<uint8_t>(_ampdu.tid & 0x07);
+    cfg.agg_en = true;
+    cfg.max_agg_num = static_cast<uint8_t>(_ampdu.max_num & 0x1f);
+    cfg.ampdu_density = static_cast<uint8_t>(_ampdu.density & 0x07);
+    cfg.hw_seq = true;
+    if (_ampdu.no_ack)
+      cfg.retry_limit = 0;
+  }
+  /* The raw per-field spike knobs (DeviceConfig::debug tx_qsel / tx_ampdu_*)
+   * override the product mode, as on Jaguar2 — register-level isolation of
+   * queue vs AGG_EN vs retry, nothing a consumer should set. */
+  if (_cfg.debug.tx_qsel)
+    cfg.qsel = static_cast<uint8_t>(*_cfg.debug.tx_qsel & 0x1f);
+  if (_cfg.debug.tx_ampdu_max) {
+    cfg.agg_en = true;
+    cfg.max_agg_num = static_cast<uint8_t>(*_cfg.debug.tx_ampdu_max & 0x1f);
+    cfg.ampdu_density = static_cast<uint8_t>(_cfg.debug.tx_ampdu_density & 0x7);
+    if (_cfg.debug.tx_ampdu_rty)
+      cfg.retry_limit = static_cast<uint8_t>(*_cfg.debug.tx_ampdu_rty & 0x3f);
+  }
   if (_cfg.tx.report) {
     /* DEVOURER_TX_REPORT: SPE_RPT on every Nth frame, the SW_DEFINE tag on
      * every frame, the same shape as Jaguar2/3 so tests/txrpt_coverage_attrib

@@ -151,6 +151,23 @@ struct TxDescConfig {
    * inside the checksummed span. */
   bool spe_rpt = false;
   uint16_t sw_define = 0;
+  /* 802.11 A-MPDU half (SetAmpduMode): the data QSEL the aggregatable frames
+   * ride (dword1[12:8]; the MGMT queue 0x12 never aggregates), AGG_EN
+   * dword2[12], AMPDU_DENSITY dword2[22:20], MAX_AGG_NUM dword3[21:17] — the
+   * generic halmac placements the 8733B macros alias. The QSEL also selects
+   * the bulk-OUT endpoint through TXDMA_PQ_MAP (Rtl8733bDevice::ep_for_qsel),
+   * as the vendor's rtw_get_ff_hwaddr does. */
+  uint8_t qsel = kTxQselManagement;
+  uint8_t macid = kTxMacidManagement; /* dword1[6:0] */
+  bool agg_en = false;
+  uint8_t max_agg_num = 0;
+  uint8_t ampdu_density = 0;
+  /* EN_HWSEQ dword8[15]: the MAC numbers the frame from its own SSN counter
+   * (HW_SSN_SEL 0) instead of carrying the caller's sequence. Required for
+   * aggregation on this die — with host sequence numbers the MAC airs
+   * AGG_EN frames as singles (measured, see Rtl8733bDevice::SetAmpduMode);
+   * the vendor sets it on every data frame. Off, the caller's SN is kept. */
+  bool hw_seq = false;
 };
 
 inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
@@ -162,6 +179,8 @@ inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
          cfg.bandwidth <= 1 && cfg.data_sc <= 0x0f &&
          cfg.packet_offset <= 1 && cfg.agg_num <= 3 &&
          cfg.retry_limit <= 0x3f && cfg.sw_define <= 0x0fff &&
+         cfg.qsel <= 0x1f && cfg.macid <= 0x7f && cfg.max_agg_num <= 0x1f &&
+         cfg.ampdu_density <= 7 &&
          (!legacy_cck || cfg.bandwidth == 0) && (!cfg.ldpc || ht_1ss) &&
          (!(legacy_cck || legacy_ofdm) || !cfg.short_gi);
 }
@@ -186,11 +205,14 @@ inline bool fill_tx_desc_8733b(uint8_t *desc, size_t desc_len,
   txdesc_set_bits(desc + 0x00, 0, 16, cfg.packet_size);
   txdesc_set_bits(desc + 0x00, 16, 8, kTxDescSize);
   txdesc_set_bits(desc + 0x00, 24, 1, cfg.bmc ? 1 : 0);
-  txdesc_set_bits(desc + 0x04, 0, 7, kTxMacidManagement);
-  txdesc_set_bits(desc + 0x04, 8, 5, kTxQselManagement);
+  txdesc_set_bits(desc + 0x04, 0, 7, cfg.macid);
+  txdesc_set_bits(desc + 0x04, 8, 5, cfg.qsel);
   txdesc_set_bits(desc + 0x04, 16, 5, cfg.rate_id);
   txdesc_set_bits(desc + 0x04, 24, 5, cfg.packet_offset);
+  txdesc_set_bits(desc + 0x08, 12, 1, cfg.agg_en ? 1 : 0);
   txdesc_set_bits(desc + 0x08, 19, 1, cfg.spe_rpt ? 1 : 0);
+  txdesc_set_bits(desc + 0x08, 20, 3, cfg.ampdu_density);
+  txdesc_set_bits(desc + 0x0c, 17, 5, cfg.max_agg_num);
   txdesc_set_bits(desc + 0x0c, 8, 1, 1);  // USE_RATE
   txdesc_set_bits(desc + 0x0c, 9, 1, 1);  // DISRTSFB
   txdesc_set_bits(desc + 0x0c, 10, 1, 1); // DISDATAFB
@@ -202,7 +224,7 @@ inline bool fill_tx_desc_8733b(uint8_t *desc, size_t desc_len,
   txdesc_set_bits(desc + 0x14, 5, 2, cfg.bandwidth);
   txdesc_set_bits(desc + 0x14, 7, 1, cfg.ldpc ? 1 : 0);
   txdesc_set_bits(desc + 0x18, 0, 12, cfg.sw_define);
-  txdesc_set_bits(desc + 0x20, 15, 1, 0); // preserve caller sequence
+  txdesc_set_bits(desc + 0x20, 15, 1, cfg.hw_seq ? 1 : 0); // EN_HWSEQ
   txdesc_set_bits(desc + 0x24, 12, 12, cfg.sequence);
   /* DMA_TXAGG_NUM before the checksum, not after: the fold covers 32 bytes
    * skipping only 0x1c-0x1d (the checksum field itself), so byte 0x1f is

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <utility>
 
 #include "DeviceConfig.h"
 #include "FrameParser8733b.h"
@@ -55,6 +56,14 @@ public:
   size_t send_packets(const TxPacketView *pkts, size_t count) override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
+  /* 802.11 A-MPDU TX (src/AmpduMode.h): the descriptor half rides every
+   * frame build_tx_block makes while the mode is on (data QSEL, AGG_EN,
+   * MAX_AGG_NUM, density, retry 0 for no-ack); the pacing half is
+   * REG_AMPDU_MAX_TIME, 0x0456 on this die, and the burst-mode gate
+   * 0x04BC[6]. Recorded before bring-up and applied by InitWrite, like the
+   * other sticky TX knobs. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
   SelectedChannel GetSelectedChannel() override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
@@ -157,6 +166,11 @@ private:
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
   void bring_up_to_phy();
   void apply_cca_gates_locked(bool primary_disabled, bool edcca_disabled);
+  void apply_ampdu_mode_locked();
+  /* Bulk-OUT endpoint for a descriptor QSEL, from the normal-profile
+   * TXDMA_PQ_MAP (0xf5a0: HIQ/MGQ -> HIGH, VI/VO -> NORMAL, BE/BK -> LOW),
+   * the vendor's rtw_get_ff_hwaddr -> halmac bulk-out id mapping. */
+  uint8_t ep_for_qsel(uint8_t qsel) const;
   bool configure_tx_power(SelectedChannel channel);
   /* Fill one [txdesc][frame] block at `out`. `agg_num` is the USB TX
    * aggregation block count and belongs on the FIRST descriptor of a packed
@@ -205,6 +219,14 @@ private:
   std::atomic<uint64_t> _c2h_seen{0};
   mutable std::recursive_mutex _reg_mu;
   std::optional<devourer::TxMode> _tx_mode_default;
+  /* A-MPDU session mode, read by build_tx_block under _reg_mu. */
+  devourer::AmpduMode _ampdu;
+  /* 0x04BC as bring-up left it, captured the first time the mode clears
+   * its burst gate so ClearAmpduMode restores what was there, not a guess. */
+  std::optional<uint8_t> _burst_ctrl_orig;
+  /* (EDCA register, value) of the aggregated TID's access category as
+   * bring-up left it; the mode zeroes its TXOP limit and restores it. */
+  std::optional<std::pair<uint16_t, uint32_t>> _edca_orig;
   std::optional<uint32_t> _ack_disarm_after_ms;
 };
 

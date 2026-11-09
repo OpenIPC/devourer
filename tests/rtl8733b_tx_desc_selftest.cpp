@@ -106,6 +106,32 @@ int main() {
   expect("legacy LDPC refused by the encoder",
          !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), legacy_ldpc));
 
+  /* A-MPDU half: QSEL dword1[12:8], AGG_EN dword2[12], density dword2[22:20],
+   * MAX_AGG_NUM dword3[21:17]; defaults keep the MGMT queue and no AGG_EN. */
+  TxDescConfig agg = ht;
+  agg.short_gi = false;
+  agg.qsel = 0;
+  agg.agg_en = true;
+  agg.max_agg_num = 16;
+  agg.ampdu_density = 7;
+  agg.hw_seq = true;
+  expect("A-MPDU descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), agg));
+  expect("A-MPDU fields land",
+         (desc[0x05] & 0x1f) == 0 && ((desc[0x09] >> 4) & 1) == 1 &&
+             ((desc[0x0a] >> 4) & 0x7) == 7 &&
+             (((desc[0x0e] | (desc[0x0f] << 8)) >> 1) & 0x1f) == 16 &&
+             ((desc[0x21] >> 7) & 1) == 1 &&
+             rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+  expect("default descriptor keeps the MGMT queue and no AGG_EN",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ht) &&
+             (desc[0x05] & 0x1f) == rtl8733b::kTxQselManagement &&
+             ((desc[0x09] >> 4) & 1) == 0 && ((desc[0x21] >> 7) & 1) == 0);
+  TxDescConfig bad_agg = agg;
+  bad_agg.max_agg_num = 0x20;
+  expect("MAX_AGG_NUM wider than 5 bits rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), bad_agg));
+
   /* CCX request + tag: SPE_RPT dword2[19] and SW_DEFINE dword6[11:0], both
    * inside the checksummed span, so the fold must still close. */
   TxDescConfig rpt = ht;

@@ -93,6 +93,34 @@ int main() {
       0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xab, 0x00};
   expect("MCS7 descriptor golden bytes", desc == expected_ht);
 
+  /* CCX request + tag: SPE_RPT dword2[19] and SW_DEFINE dword6[11:0], both
+   * inside the checksummed span, so the fold must still close. */
+  TxDescConfig rpt = ht;
+  rpt.short_gi = false;
+  rpt.spe_rpt = true;
+  rpt.sw_define = 0xa5;
+  expect("SPE_RPT descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), rpt));
+  expect("SPE_RPT lands in dword2 bit 19", ((desc[0x0a] >> 3) & 1) == 1);
+  expect("SW_DEFINE lands in dword6[11:0]",
+         desc[0x18] == 0xa5 && (desc[0x19] & 0x0f) == 0);
+  expect("SPE_RPT descriptor checksum closes",
+         rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+  rpt.spe_rpt = false;
+  rpt.sw_define = 0;
+  std::array<uint8_t, rtl8733b::kTxDescSize> plain{};
+  expect("no-report descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(plain.data(), plain.size(), rpt));
+  expect("report fields off leaves dword2/dword6 untouched",
+         ((plain[0x0a] >> 3) & 1) == 0 && plain[0x18] == 0 &&
+             (plain[0x19] & 0x0f) == 0);
+  TxDescConfig bad_tag = rpt;
+  bad_tag.sw_define = 0x1000;
+  expect("SW_DEFINE wider than 12 bits rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), bad_tag));
+  expect("MCS7 descriptor rebuilds for the checksum probes",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ht));
+
   const uint16_t original_checksum =
       static_cast<uint16_t>(desc[28] | (desc[29] << 8));
   desc[39] ^= 0xff;

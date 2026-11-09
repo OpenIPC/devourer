@@ -185,6 +185,12 @@ private:
   std::atomic<bool> _rx_active{false};
   std::atomic<uint8_t> _rx_configured_bw{0};
   std::atomic<uint64_t> _tx_submits{0};
+  /* Rotating SW_DEFINE tag stamped when tx.report is on; the CCX report
+   * echoes its low byte (src/TxReport.h). 64-bit for the same reason as
+   * Jaguar2's: the counter also gates the sampled SPE_RPT request. */
+  std::atomic<uint64_t> _tx_rpt_tag{0};
+  /* Firmware reports seen by the RX loop; gates the first-few C2H dump. */
+  std::atomic<uint64_t> _c2h_seen{0};
   mutable std::recursive_mutex _reg_mu;
   std::optional<devourer::TxMode> _tx_mode_default;
   std::optional<uint32_t> _ack_disarm_after_ms;

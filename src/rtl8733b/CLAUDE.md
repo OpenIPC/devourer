@@ -240,9 +240,7 @@ untouched) and fall back to the full path.
 
 ## Not ported
 
-`ReadTsf`/beacons, A-MPDU, CCX `tx.report` per-frame TX outcomes (the
-TX-report engine — CCX **CLM** busy airtime IS ported, see below),
-`FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
+`ReadTsf`/beacons, A-MPDU TX, `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
 relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
 and CCA disable. These inherit `IRadio`'s not-ported defaults (`false`,
@@ -279,9 +277,8 @@ knob is told too, and so it fires exactly once per bring-up.
 
 ## Hardware ARQ
 
-Two of the three hardware-ARQ knobs are measured true on this die; the third is
-refused loudly because the backend lacks the control path needed to complete
-its diagnosis safely.
+All three hardware-ARQ knobs — the ACK responder, the retry limit and the
+per-frame CCX `tx.report` — are measured true on this die.
 
 The detailed ARQ characterization below used the original `f72b` RTL8731BU,
 an RTL8812AU peer, and an RTL8812CU passive witness. The live responder-disarm
@@ -370,36 +367,58 @@ The retry-12 shortfall from the ideal 13 may be passive-monitor loss or
 genuinely fewer airings, so the ratio is reported as an observation, not an
 exact hardware count.
 
-**CCX `tx.report` is NOT ported, and its root cause is unresolved.** This is
-the per-frame TX-outcome engine, a different thing from the CCX **CLM**
-busy-airtime measurement documented under "Frame-free sensing" below, which
-is ported and measured. The
-descriptor and receive-side investigation narrows the problem but does not
-prove a firmware defect: SPE_RPT is dword2[19] and SW_DEFINE dword6[11:0] via
-the generic halmac
-NIC macros the 8733B maps straight onto (`hal/halmac/halmac_tx_desc_chip.h`
-maps `SET_TX_DESC_{SPE_RPT,SW_DEFINE}_8733B` onto the non-V2 pair, not the
-0x20/0x24 V2 placement), and a probe build confirmed the bit set in a live
-descriptor; the RX side already decodes C2H at the vendor's own dword2[28]
-(`GET_RX_DESC_C2H_8733B`); the delivery path is bulk-IN, which is what the
-vendor uses (its USB interrupt handler is an empty stub behind an undefined
-config); and the vendor's C2H dispatch confirms this firmware speaks the
-fw-offload format `parse_ccx_halmac` already decodes (`C2H_EXTEND` 0xFF +
-sub_cmd 0x0F, `hal/rtl8733b/rtl8733b_cmd.c`). With an RX loop live and 3160
-frames received, the firmware returned **zero** C2H packets in any format —
-with and without a net_type armed, and with the peer both ACKing and silent.
-The leading missing prerequisite is the halmac H2C queue plus a
-MEDIA_STATUS_RPT registering the descriptor MACID with the firmware; this
-backend has no H2C transport. Until that path is implemented and tested, the
-absence of reports cannot be assigned to firmware. The knob warns at bring-up
-rather than stamping descriptors that are not known to produce anything —
-`tx.report` requested on this die is refused out loud, not silently dropped.
+**CCX `tx.report` is ported, and the thing that hid it was the bring-up, not
+the firmware.** The descriptor stamps are the generic halmac pair the 8733B
+macros alias (`SPE_RPT` dword2[19], `SW_DEFINE` dword6[11:0], inside the
+checksummed span — `TxDescriptor8733b.h`), the report is the fw-offload C2H pkt
+`0xFF`/`0x0F` that `src/TxReport.h`'s `parse_ccx_halmac` already decodes, and
+it rides bulk-IN like every frame, so the RX loop hands it to `DeliverTxReport`
+when the descriptor's C2H bit is set. None of that was ever the gap. The gap
+was `download_firmware` skipping the download when `MCUFW_CTRL` said a firmware
+was already running: that image answers the ready poll and consumes H2C, but
+emits **no C2H at all**. Measured on the b733 unit, MCS3 unicast, ~950 frames
+per 8 s cell, RTL8822BU responder: after a download 920-970 reports per cell;
+on a reused image 0, in every arm — including arms that first cleared the
+0x0420 report gates and sent MEDIA_STATUS_RPT. The vendor reloads at every hal
+init, and so does this backend now (~200 ms of a ~2.8 s USB-HS bring-up).
 
-Consequence a consumer should plan around: the measured 8733BU can be **either
-end** of a normal-ACK hardware-ARQ link, but it cannot see per-frame delivery.
-`TxReport.state == 1`
-— the retry write-off that says a peer stopped ACKing — is unavailable here, so
-detecting a departed peer needs an application-level timeout.
+Two firmware facts that fell out of the same bench, both measured rather than
+read:
+
+- **MEDIA_STATUS_RPT (H2C 0x01) is not a prerequisite.** With a fresh image the
+  reports flow for the descriptor MACID whether or not the firmware was told
+  the MACID is a connected station (arm with neither mechanism: 920/935).
+  The mailbox itself is ported (`Halmac8733bMac::send_h2c`, the legacy HMEBOX
+  path at 0x01CC/0x01D0/0x01F0 the vendor USB driver uses — its halmac
+  packet-queue H2C is SDIO-only) and `rtl8733bprobe`'s `fw` stage uses a
+  consumed MEDIA_STATUS_RPT as the MCU-liveness check; the bring-up sends no
+  H2C.
+- **`REG_FWHW_TXQ_CTRL` 0x0420 bit 18 (`BIT_TXFAILRPT_DIS`, a bit the 88xx
+  siblings' maps do not name) selects the report shape.** MAC init leaves it
+  set, and the firmware then emits one terminal report per frame — the
+  Jaguar2/3 shape (`state` 0 on ACK, 1 with `retries` at the limit on a dead
+  peer). Clearing it makes the firmware report every failed attempt: 12036
+  reports for 941 frames to a dead RA at retry limit 12 (one per retry with the
+  running count, then the terminal one), while an ACKed stream stays at one
+  per frame. Not exposed — a consumer counting reports per frame would be
+  misled by it — but it is a real per-attempt retry trace if one is ever
+  wanted. Bit 19 (`BIT_TXRPT_DIS`) reads clear after init.
+
+The shipped shape, `tests/ack_txreport_matrix.sh` with the 8733B as the
+soliciting TX (`CELLS="8733b:0x0bda:0xb733" RESP_PID=0xb812`, ch36, MCS3,
+retry limit 12, 8 s per phase): on 1.00 ACK / 0.01 mean retries, retarget
+1.00 / 0.02, off 0.00 ACK with retries pinned 12.0 (pin rate 1.00), report
+coverage 0.984-0.985, zero SW_DEFINE tag gaps. `missed` is the constant 4 on
+every report, as on the 8812CU — drop detection is the tag, not that field.
+One unit, one responder, one bench; the mixed case (a frame ACKed after some
+retries) shows up as `retries` 1-4 in the on cells and nothing more was
+measured about it.
+
+Consequence a consumer can now plan on: the measured 8733BU is a complete
+hardware-ARQ endpoint — responder, autonomous retry, and the per-frame delivery
+report, so `TxReport.state == 1` (the peer stopped ACKing) is available here
+like on the Jaguars. The reports need an RX loop (`DEVOURER_TX_WITH_RX=thread`
+in txdemo), the same as Jaguar1/2.
 
 ## Validation status
 

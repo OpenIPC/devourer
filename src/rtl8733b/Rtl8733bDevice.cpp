@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -18,6 +20,7 @@
 #include "rtl8733b/TxDescriptor8733b.h"
 #include "SignalStop.h"
 #include "TxAggPlan.h" /* shared USB TX aggregation layout planner */
+#include "TxReport.h"  /* CCX C2H decode + tx.report emission */
 
 extern "C" {
 #include "ieee80211_radiotap.h"
@@ -152,21 +155,14 @@ void Rtl8733bDevice::bring_up_to_phy() {
     _logger->warn(
         "RTL8733B: DEVOURER_DIS_CCA / tuning.disable_cca is not implemented by "
         "this backend — carrier-sense stays ENABLED for this session");
-  /* DEVOURER_TX_REPORT: the CCX per-frame TX-status path is not ported. The
-   * descriptor and receive-side pieces were checked, but this backend lacks
-   * the H2C/MEDIA_STATUS_RPT path needed to register the MACID, so the observed
-   * absence of C2H reports is not assigned to firmware. The full bench
-   * narrative lives in src/rtl8733b/CLAUDE.md "Hardware ARQ".
-   *
-   * Warn rather than drop it silently: a consumer that sets this knob is
-   * asking for its per-frame delivery sensor, and would otherwise read the
-   * absence of tx.report events as a quiet link rather than an absent
-   * feature. */
+  /* DEVOURER_TX_REPORT needs nothing at bring-up beyond a freshly loaded
+   * firmware (download_firmware never reuses a running image — a reused one
+   * emits no C2H) and the SPE_RPT/SW_DEFINE stamps build_tx_block adds. The
+   * reports need an RX loop to arrive on, like Jaguar1/2. */
   if (_cfg.tx.report)
-    _logger->warn(
-        "RTL8733B: DEVOURER_TX_REPORT / tx.report is not implemented by this "
-        "backend — no CCX reports were observed, and the H2C/MACID "
-        "registration path is missing (see src/rtl8733b/CLAUDE.md)");
+    _logger->info(
+        "RTL8733B: tx.report armed — CCX reports arrive on the C2H RX path, "
+        "one terminal report per frame (src/rtl8733b/CLAUDE.md)");
 }
 
 void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
@@ -438,6 +434,31 @@ void Rtl8733bDevice::start_rx_loop(
       packet.RxAtrib.pkt_rpt_type = frame.c2h
                                        ? RX_PACKET_TYPE::C2H_PACKET
                                        : RX_PACKET_TYPE::NORMAL_RX;
+      if (frame.c2h) {
+        /* Firmware report, not an 802.11 frame. The payload starts right
+         * after the RX descriptor (parse_rx_8733b keeps drvinfo/shift at 0
+         * for C2H). The CCX report is the fw-offload C2H pkt 0xFF/0x0F the
+         * shared parser decodes (src/TxReport.h); anything else is counted
+         * and, for the first few, dumped for the diagnostic plane. */
+        const uint64_t n = _c2h_seen.fetch_add(1) + 1;
+        if (devourer::is_ccx_halmac(frame.frame, frame.frame_len)) {
+          DeliverTxReport(_logger->events(),
+                          devourer::parse_ccx_halmac(frame.frame,
+                                                     frame.frame_len),
+                          "halmac");
+        } else if (n <= 8) {
+          std::string hex;
+          for (size_t i = 0; i < frame.frame_len && i < 16; ++i) {
+            char b[4];
+            std::snprintf(b, sizeof b, "%02x ", frame.frame[i]);
+            hex += b;
+          }
+          _logger->debug("RTL8733B RX: C2H #{} len={} id=0x{:02x} sub=0x{:02x} "
+                         "bytes={}",
+                         n, frame.frame_len, frame.frame[0],
+                         frame.frame_len > 2 ? frame.frame[2] : 0, hex);
+        }
+      }
       bool phy_parsed = false;
       if (!frame.c2h && frame.physt && frame.drvinfo_size >= 24)
         phy_parsed = rtl8733b::parse_phy_status_8733b(
@@ -904,6 +925,14 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
   cfg.short_gi = false;
   cfg.ldpc = false;
   cfg.bmc = bmc;
+  if (_cfg.tx.report) {
+    /* DEVOURER_TX_REPORT: SPE_RPT on every Nth frame, the SW_DEFINE tag on
+     * every frame, the same shape as Jaguar2/3 so tests/txrpt_coverage_attrib
+     * reads this die's reports unchanged. */
+    const uint64_t k = _tx_rpt_tag.fetch_add(1);
+    cfg.spe_rpt = k % static_cast<uint64_t>(_cfg.tx.report) == 0;
+    cfg.sw_define = static_cast<uint16_t>(k & 0xff);
+  }
   if (!rtl8733b::fill_tx_desc_8733b(out, rtl8733b::kTxDescSize, cfg)) {
     _logger->error("RTL8733B TX rejected: unsupported rate/width/coding");
     return 0;

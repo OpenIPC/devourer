@@ -132,6 +132,13 @@ struct TxDescConfig {
   bool short_gi = false;
   bool ldpc = false;
   bool bmc = false;
+  /* CCX per-frame TX report request (SPE_RPT, dword2[19]) and the SW_DEFINE
+   * tag (dword6[11:0]) the firmware echoes in the report — the same generic
+   * halmac placement the 8733B macros alias (halmac_tx_desc_chip.h maps
+   * SET_TX_DESC_{SPE_RPT,SW_DEFINE}_8733B onto the non-V2 pair). Both sit
+   * inside the checksummed span. */
+  bool spe_rpt = false;
+  uint16_t sw_define = 0;
 };
 
 inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
@@ -142,7 +149,7 @@ inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
          (legacy_cck || legacy_ofdm || ht_1ss) && cfg.rate_id <= 0x1f &&
          cfg.bandwidth <= 1 && cfg.data_sc <= 0x0f &&
          cfg.packet_offset <= 1 && cfg.agg_num <= 3 &&
-         cfg.retry_limit <= 0x3f &&
+         cfg.retry_limit <= 0x3f && cfg.sw_define <= 0x0fff &&
          (!legacy_cck || cfg.bandwidth == 0) && !cfg.ldpc &&
          (!(legacy_cck || legacy_ofdm) || !cfg.short_gi);
 }
@@ -171,6 +178,7 @@ inline bool fill_tx_desc_8733b(uint8_t *desc, size_t desc_len,
   txdesc_set_bits(desc + 0x04, 8, 5, kTxQselManagement);
   txdesc_set_bits(desc + 0x04, 16, 5, cfg.rate_id);
   txdesc_set_bits(desc + 0x04, 24, 5, cfg.packet_offset);
+  txdesc_set_bits(desc + 0x08, 19, 1, cfg.spe_rpt ? 1 : 0);
   txdesc_set_bits(desc + 0x0c, 8, 1, 1);  // USE_RATE
   txdesc_set_bits(desc + 0x0c, 9, 1, 1);  // DISRTSFB
   txdesc_set_bits(desc + 0x0c, 10, 1, 1); // DISDATAFB
@@ -181,6 +189,7 @@ inline bool fill_tx_desc_8733b(uint8_t *desc, size_t desc_len,
   txdesc_set_bits(desc + 0x14, 4, 1, cfg.short_gi ? 1 : 0);
   txdesc_set_bits(desc + 0x14, 5, 2, cfg.bandwidth);
   txdesc_set_bits(desc + 0x14, 7, 1, cfg.ldpc ? 1 : 0);
+  txdesc_set_bits(desc + 0x18, 0, 12, cfg.sw_define);
   txdesc_set_bits(desc + 0x20, 15, 1, 0); // preserve caller sequence
   txdesc_set_bits(desc + 0x24, 12, 12, cfg.sequence);
   /* DMA_TXAGG_NUM before the checksum, not after: the fold covers 32 bytes

@@ -36,6 +36,7 @@
 #include "UsbOpen.h"
 #include "logger.h"
 #include "rtl8733b/Halmac8733bMac.h"
+#include "rtl8733b/TxDescriptor8733b.h"
 #include "rtl8733b/Phy8733b.h"
 #include "rtl8733b/Rtl8733bBringup.h"
 #include "rtl8733b/Rtl8733bUsbIds.h"
@@ -296,11 +297,17 @@ int main(int argc, char **argv) {
 
     const bool fw_ok = dev.download_default_firmware(info.cut);
     const uint16_t mcufw = adapter.rtw_read16(0x0080);
-    logger->info("fw: ok={} checksum={} ready={} MCUFW_CTRL=0x{:04x}", fw_ok,
-                 dev.checksum_ok(), dev.ready_ok(), mcufw);
+    /* Liveness beyond the ready bit: a MEDIA_STATUS_RPT the firmware actually
+     * consumes (mailbox slot released) proves the MCU is servicing commands. */
+    const bool h2c_ok =
+        fw_ok && mac.media_status_rpt(rtl8733b::kTxMacidManagement, true, 1);
+    logger->info("fw: ok={} checksum={} ready={} h2c_consumed={} "
+                 "MCUFW_CTRL=0x{:04x}",
+                 fw_ok, dev.checksum_ok(), dev.ready_ok(), h2c_ok, mcufw);
     devourer::Ev(logger->events(), "rtl8733b.fw")
         .f("ok", fw_ok).f("checksum", dev.checksum_ok())
-        .f("ready", dev.ready_ok()).hexf("mcufw", mcufw, 4);
+        .f("ready", dev.ready_ok()).f("h2c_consumed", h2c_ok)
+        .hexf("mcufw", mcufw, 4);
     log_snapshot(logger, dev, "firmware");
     if (!fw_ok || wanted < 4)
       return fw_ok ? 0 : 1;

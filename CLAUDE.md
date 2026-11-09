@@ -68,7 +68,7 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   only what an independent witness decoded — legacy OFDM + HT MCS0-7, BCC,
   20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz, plus
   10 MHz narrowband (5 MHz refused — `src/rtl8733b/CLAUDE.md`).
-  Everything the backend has not ported (TSF/beacons, A-MPDU, CCX/`tx.report`,
+  Everything the backend has not ported (TSF/beacons, A-MPDU TX,
   the flat-index and per-rate TX-power knobs) falls through to `IRadio`/`IRtlRadio`'s
   not-ported defaults rather than being faked, so read the base class before
   assuming a cross-generation feature below applies here. `FastRetune` IS
@@ -597,7 +597,7 @@ so the chip declines further ACKs and the loss stays ARQ-visible
 lose 5.5k+ frames on the `drop` policy, which remains opt-in and counted as
 `pool_dropped`). Per-frame TX
 outcomes surface as `tx.report` events (CCX via C2H) — the TX-side link
-sensor; C2H rides the RX path, so J1/J2 TX-only sessions see none (run
+sensor; C2H rides the RX path, so J1/J2/RTL8733B TX-only sessions see none (run
 `DEVOURER_TX_WITH_RX=thread`; J3's coex thread drains C2H regardless).
 `GetRxQuality()` is the device-wide windowed RX sensor;
 `cell::UeRxAttribution` is its per-transmitter (per-UE) counterpart. Docs:

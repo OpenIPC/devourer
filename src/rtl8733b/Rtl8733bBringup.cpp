@@ -494,12 +494,17 @@ bool Rtl8733bBringup::download_firmware(const uint8_t *fw, size_t size) {
   _ready_ok = false;
   if (!_powered && !power_on())
     return false;
-  if ((r16(R8733_MCUFW_CTRL) & 0xc078) == 0xc078) {
-    _checksum_ok = true;
-    _ready_ok = true;
-    _logger->info("RTL8733B DLFW: firmware was already running");
-    return true;
-  }
+  /* Always download, even when MCUFW_CTRL says a firmware is already running
+   * (the vendor does the same at every hal init). A firmware that survived a
+   * card-disable/enable cycle without a reload answers the MCU-ready poll and
+   * receives H2C commands, but emits NO C2H: measured on the b733 unit with
+   * tx.report on — 920-970 CCX reports per ~950 frames after a download, zero
+   * in every session that reused the running image, including sessions that
+   * cleared the 0x0420 report gates and sent MEDIA_STATUS_RPT first. The
+   * reload costs ~200 ms of a ~2.8 s bring-up on USB high speed. */
+  if ((r16(R8733_MCUFW_CTRL) & 0xc078) == 0xc078)
+    _logger->info("RTL8733B DLFW: firmware already running — reloading anyway "
+                  "(a reused image emits no C2H)");
   if ((r8(R8733_SECURE_CTRL) & 0x03) == 0) {
     _logger->error("RTL8733B DLFW: secure-download silicon is not implemented");
     return false;

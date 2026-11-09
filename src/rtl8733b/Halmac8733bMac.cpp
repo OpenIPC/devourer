@@ -28,6 +28,12 @@ constexpr uint16_t kExpectedId = 0x8129;
 /* HALMAC 87xx / RTL8733B normal-mode register plane. Values are transcribed
  * from halmac_reg2.h and halmac_init_8733b.c at vendor commit 9e5f684. */
 constexpr uint16_t kRegCr = 0x0100;
+/* H2C mailbox (halmac_reg_8733b.h): REG_HMETFR busy bits, REG_HMEBOX0..3 the
+ * command dwords, REG_HMEBOX_E0..E3 the extension dwords. */
+constexpr uint16_t kRegHmetfr = 0x01cc;
+constexpr uint16_t kRegHmebox0 = 0x01d0;
+constexpr uint16_t kRegHmeboxExt0 = 0x01f0;
+constexpr unsigned kH2cBoxCount = 4;
 constexpr uint16_t kRegTxdmaPqMap = 0x010c;
 constexpr uint16_t kRegRxBoundary = 0x0116;
 constexpr uint16_t kRegRqpnHlpq = 0x0200;
@@ -806,6 +812,75 @@ bool Halmac8733bMac::configure_monitor_rx(bool keep_corrupted) {
       _device.rtw_read8(kRegRxPacketLimit + 3) & 0x0f,
       _device.rtw_read16(kRegCr));
   return ok;
+}
+
+bool Halmac8733bMac::send_h2c(const std::array<uint8_t, 8> &cmd,
+                              uint32_t *waited_us) {
+  const uint8_t box = _h2c_box;
+  /* The vendor polls 100 x 1 ms. Poll finer here: a free slot is the normal
+   * case and the per-call cost is one register read. */
+  const auto start = std::chrono::steady_clock::now();
+  bool free_slot = false;
+  for (unsigned attempt = 0; attempt < 1000; ++attempt) {
+    if ((_device.rtw_read8(kRegHmetfr) & (1u << box)) == 0) {
+      free_slot = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  const auto waited = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - start);
+  if (waited_us != nullptr)
+    *waited_us = static_cast<uint32_t>(waited.count());
+  if (!free_slot) {
+    _logger->error("RTL8733B H2C: mailbox {} never freed (REG_HMETFR=0x{:02x}) "
+                   "— firmware is not consuming commands",
+                   box, _device.rtw_read8(kRegHmetfr));
+    return false;
+  }
+  const uint32_t ext = le32(cmd.data() + 4);
+  const uint32_t main = le32(cmd.data());
+  const bool ok =
+      _device.rtw_write32(static_cast<uint16_t>(kRegHmeboxExt0 + 4u * box),
+                          ext) &&
+      _device.rtw_write32(static_cast<uint16_t>(kRegHmebox0 + 4u * box),
+                          main);
+  _h2c_box = static_cast<uint8_t>((box + 1) % kH2cBoxCount);
+  /* Consumption check: the firmware clears the box bit when it has read the
+   * command. Observed on the bench to take well under a millisecond. */
+  bool consumed = false;
+  for (unsigned attempt = 0; attempt < 50; ++attempt) {
+    if ((_device.rtw_read8(kRegHmetfr) & (1u << box)) == 0) {
+      consumed = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  _logger->debug("RTL8733B H2C: id=0x{:02x} box={} slot_wait={}us write_ok={} "
+                 "consumed={} bytes={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} "
+                 "{:02x} {:02x}",
+                 cmd[0], box, waited.count(), ok, consumed, cmd[0], cmd[1],
+                 cmd[2], cmd[3], cmd[4], cmd[5], cmd[6], cmd[7]);
+  if (ok && !consumed)
+    _logger->warn("RTL8733B H2C: firmware did not consume mailbox {} within "
+                  "5 ms (REG_HMETFR=0x{:02x})",
+                  box, _device.rtw_read8(kRegHmetfr));
+  return ok && consumed;
+}
+
+bool Halmac8733bMac::media_status_rpt(uint8_t macid, bool connected,
+                                      uint8_t role) {
+  /* hal_com_h2c.h _MEDIA_STATUS_RPT_PARM_CMD_0x01: byte0 OPMODE[0]
+   * MACID_IND[1] MIRACAST[2] MIRACAST_SINK[3] ROLE[7:4]; byte1 MACID; byte2
+   * MACID_END (unused with MACID_IND=0); byte3 PORT_NUM[2:0]. */
+  std::array<uint8_t, 8> cmd{};
+  cmd[0] = 0x01;
+  cmd[1] = static_cast<uint8_t>((connected ? 1u : 0u) |
+                                (static_cast<unsigned>(role & 0x0f) << 4));
+  cmd[2] = macid;
+  cmd[3] = 0;
+  cmd[4] = 0;
+  return send_h2c(cmd);
 }
 
 void Halmac8733bMac::stop() {

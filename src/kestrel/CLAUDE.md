@@ -397,9 +397,12 @@ does differently on PCIe hangs off `is_usb()`; nothing here is a second HAL:
   witness's receive leg on a busy channel, not the BE's transmitter — the
   reason every delivery figure here names its witness. One module, one
   rate; no throughput bench; MSI and interrupt mitigation unported as on
-  the C. The 8852CU itself (`tests/regress.py` devourer cells, 15 s, vs the
-  8812AU): CU→8812AU 7818/8000 on ch36 and 6161/8500 on ch6 — the 8812AU's
-  ch6 receive leg again — and 8812AU→CU 9285/9000, 9231/9000. Standalone
+  the C. The 8852CU itself (`tests/regress.py` devourer cells, 15 s, vs
+  the 8812AU — that harness reports hits against a TX count taken from
+  rate-limited `tx.frame` events, which undercounts, so its ratios are not
+  delivery percentages and can read above 1): CU→8812AU 7818 hits on ch36
+  and 6161 on ch6 — the 8812AU's ch6 receive leg again — and 8812AU→CU 9285
+  and 9231 hits, both with the harness's pass verdict. Standalone
   on this host it decoded 8709 ambient frames in 60 s on ch6 but only 3 on
   ch36 while the 8852BE beside it saw ~1000/s there — near-field peers
   reach it at 98%, distant 5 GHz traffic does not; an antenna/module

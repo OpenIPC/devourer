@@ -80,8 +80,18 @@ public:
    * stability probe there would flag healthy units. Returns false on 8822E. */
   bool probe_efuse_map(uint8_t *map, size_t len);
 
-  /* Per-unit MAC at logical EFUSE offset 0x157 on this generation (why the MAC
-   * is the identity key at all: IRadio::GetPermanentMacAddress).
+  /* Staged bring-up probes (examples/pcieprobe): the power sequence and the
+   * pre-firmware EFUSE logical-map decode that rtw_hal_init runs, exposed one
+   * layer at a time so a new transport can be validated bottom-up. Pre-DLFW
+   * only — rtw_hal_init remains the one bring-up path for a session. */
+  void probe_power_on() { power_on(); }
+  void probe_efuse_logical_map(uint8_t *map, size_t len) {
+    read_efuse_logical_map(map, len);
+  }
+
+  /* Per-unit MAC at logical EFUSE offset 0x157 (USB) / 0x120 (PCIe) on this
+   * generation (why the MAC is the identity key at all:
+   * IRadio::GetPermanentMacAddress).
    *
    * On 8822E this is served from the value captured during rtw_hal_init: the
    * OTP is not reliably readable after TX/coex bring-up by design, the same
@@ -222,8 +232,15 @@ private:
   /* EFUSE MAC (see perm_mac). Logical 0x157 sits past _efuse_cache, so the
    * 8822E capture decodes into a larger local buffer and copies both out —
    * one OTP walk, and _efuse_cache keeps its size so the health probe's
-   * compare surface is unchanged. */
+   * compare surface is unchanged. kMacLogicalOff sizes that buffer (the
+   * larger of the two interface layouts); mac_logical_off() is where the
+   * MAC actually sits: the EFUSE's per-interface section starts at 0x100
+   * and the PCIe layout (rtw8822ce_efuse) puts the MAC first, the USB one
+   * (rtw8822cu_efuse) after its descriptor fields. */
   static constexpr uint16_t kMacLogicalOff = 0x0157;
+  uint16_t mac_logical_off() const {
+    return _device.is_usb() ? kMacLogicalOff : 0x0120;
+  }
   static bool mac_programmed(const uint8_t m[6]);
   uint8_t _perm_mac[6] = {};
   bool _perm_mac_valid = false;

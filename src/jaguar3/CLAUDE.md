@@ -2,7 +2,8 @@
 
 Deep per-generation facts for this subtree, loaded alongside the root
 CLAUDE.md. Chips: rtl8822c (RTL8812CU/8822CU, chip-id `0x13`) and rtl8822e
-(RTL8812EU/8822EU, chip-id `0x17`).
+(RTL8812EU/8822EU, chip-id `0x17`); the RTL8822CE (PCIe, `10ec:c822`) rides
+the rtl8822c path through `PcieTransport` (see **PCIe** below).
 
 ## HAL layout
 
@@ -21,7 +22,42 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   antenna. It also drains C2H, so TX-only sessions still see `tx.report`.
   Opt-out: `tuning.j3_runtime_thread = false` (`DEVOURER_J3_RUNTIME=0`), for
   a host that owns bulk-IN itself. A TX-only session then gets no
-  `tx.report`, no `pwr_track` and no coex/FW heartbeats.
+  `tx.report`, no `pwr_track` and no coex/FW heartbeats. On PCIe the thread
+  keeps only the heartbeat cadence: there is no single-shot bulk read, the
+  BD ring is the one RX path and only `StartRxLoop` drains it — so a
+  TX-only PCIe session sees no `tx.report` (run `DEVOURER_TX_WITH_RX=thread`
+  for those, as on J1/J2).
+- **PCIe (RTL8822CE)**: the 8822C's PCIe ring register map and BD geometry
+  are the 8821C's, so `PcieDma88xx` carries it unchanged and the port is
+  HAL gates keyed on `is_usb()` (rtw88 v6.12 `rtw8822c.c`/`pci.c` are the
+  reference; the vendor drop ships no 8822CE PCIe HAL): `hci_setup()` right
+  before `pre_init_system_cfg` (the power sequence resets the TRX DMA, the
+  DLFW rsvd-page path needs the BCN ring); `kPwrOn/Off8822cPcie` tables
+  (PCI rows: `0x75[0]` toggled around the `0x06[1]` poll, `0x74[5]`,
+  `0x71[4]`, the `0x62/0x61` dance; off: `0x92=0x20`, `0x93=0x04`,
+  `0x05[2]`) with the `PFM_WOWL` poll-retry; `0x74[8]` + `0x75[0]` pre-set
+  instead of the USB-page `0xFE5B` write; no `init_usb_cfg`, no
+  `BLK_DESC_NUM`; MGQ → EXQ with 64 extra-queue pages (64/64/64/64/1);
+  `pcie_intf_cfg` = DBI `CLKDLY_CTRL(0x725)=0` + cut≥D `HCI_MIX_CFG[26]`
+  (the 8822C has no MDIO PHY table); EFUSE MAC at logical `0x120`
+  (`rtw8822ce_efuse`) vs `0x157` on USB. The data send path is unchanged:
+  QSEL 0x12 routes to the MGMT ring. Completion timeout stays enabled (rtw88
+  disables it on the 8821C only). Measured on one z890p unit (cut D, RFE 1)
+  vs a USB RTL8812AU witness, 6M, 2000 frames/cell
+  (`tests/pcie_8822ce_onair.sh`): ch36 usb→pcie 98.6%, pcie→usb 99.5%; ch6
+  91.5% / 90.6%. FastRetune hop over 36/40/44 (and 1/6/11) with the witness
+  parked on each channel in turn delivers 34.8 / 32.3 / 32.2% (32.1 / 30.0 /
+  31.5%) — the one-third split a three-channel hop should give, so the hop
+  lands and returns on every channel; `tests/pcie_rx_smoke.py` 858/949
+  ambient beacons on ch6/ch36, 0 CRC fails; `tests/pcie_teardown_asan.sh`
+  RX and TX sessions exit clean, 0 DMAR faults. One pair, one rate, one
+  unit: no throughput bench, no USB-sibling regression on this host (it has
+  no 8822CU), and the 2.4 GHz ~91% is a busy ambient channel's figure for
+  this pair, not a transmitter number. The card logs AER correctable
+  replay-timer timeouts in bursts of 10 every 5 s whenever powered — the
+  same under rtw88 with the interface down, zero on the idle vfio-held link —
+  so it is a board/link property, not a bring-up regression; the harness
+  brackets it per cell (`aer_delta`).
 - **5/10 MHz narrowband**: the re-clock lives in the `0x9b0`/`0x9b4`
   dividers (vs the `0x8ac` block the Jaguar1/2 chips share). 80 MHz works,
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.

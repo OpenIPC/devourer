@@ -546,7 +546,14 @@ void RtlJaguar3Device::coex_runtime_loop() {
   auto next_tick = std::chrono::steady_clock::now();
   const auto period = std::chrono::seconds(2);
   while (!_coex_stop && !g_devourer_should_stop) {
-    if (!_rx_loop_active.load()) {
+    if (!_device.is_usb()) {
+      /* PCIe: there is no single-shot bulk read — RX (and so C2H) is the
+       * BD ring, which only StartRxLoop drains. A TX-only PCIe session keeps
+       * the coex heartbeat cadence here and sees no CCX tx.report (run
+       * DEVOURER_TX_WITH_RX=thread for those, as on J1/J2). Without this
+       * branch bulk_read_raw returns -1 at once and the loop spins. */
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    } else if (!_rx_loop_active.load()) {
       /* Drain bulk-IN (empties the FW C2H buffer). 200 ms timeout bounds
        * shutdown latency when the pipe is idle. */
       int n =

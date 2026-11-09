@@ -1,5 +1,8 @@
 #include "HalmacJaguar3MacInit.h"
 
+#include <chrono>
+#include <thread>
+
 #include <cstdint>
 
 /* The Jaguar1 hal/hal_com_reg.h (pulled in transitively) #defines many of
@@ -394,13 +397,22 @@ void HalmacJaguar3MacInit::enable_bb_rf(bool enable) {
   }
 }
 
-/* pre_init_system_cfg_8822c (USB path) */
+/* pre_init_system_cfg_8822c */
 void HalmacJaguar3MacInit::pre_init_system_cfg() {
   _device.rtw_write8(REG_RSV_CTRL, 0);
 
-  /* USB: REG_SYS_CFG2+3 == 0x20 workaround */
-  if (_device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20)
+  /* USB: REG_SYS_CFG2+3 == 0x20 workaround (0xFExx is USB-page register
+   * space — undefined over PCIe MMIO, hence the gate). */
+  if (_device.is_usb() && _device.rtw_read8(REG_SYS_CFG2 + 3) == 0x20)
     _device.rtw_write8(0xFE5B, _device.rtw_read8(0xFE5B) | (1u << 4));
+
+  /* PCIe: rtw_mac_pre_system_cfg sets REG_HCI_OPT_CTRL BIT_USB_SUS_DIS
+   * (0x74[8]) on PCIe too, and halmac's 8822C PCIe power-on fix pre-sets
+   * 0x75[0] (the REFCLK/power gate the power sequence then toggles). */
+  if (!_device.is_usb()) {
+    _device.rtw_write32(0x0074, _device.rtw_read32(0x0074) | (1u << 8));
+    _device.rtw_write8(0x0075, _device.rtw_read8(0x0075) | 0x01);
+  }
 
   /* pinmux */
   uint32_t v = _device.rtw_read32(REG_PAD_CTRL1) & ~((1u << 28) | (1u << 29));
@@ -466,6 +478,49 @@ void HalmacJaguar3MacInit::init_usb_cfg() {
                 v);
 }
 
+void HalmacJaguar3MacInit::pcie_intf_cfg(uint8_t cut, uint8_t rfe_type) {
+  if (_device.is_usb())
+    return;
+  /* DBI write (rtw_dbi_write8): REG_DBI_WDATA_V1 0x3E8 holds the byte at its
+   * lane, REG_DBI_FLAG_V1 0x3F0 carries addr[11:2], the byte-enable lane in
+   * [15:12] and the write kick BIT16; poll the kick clear. Plain MAC
+   * registers, so this works through the MMIO register plane. */
+  constexpr uint16_t REG_DBI_WDATA_V1 = 0x03E8;
+  constexpr uint16_t REG_DBI_FLAG_V1 = 0x03F0;
+  constexpr uint16_t RTK_PCIE_CLKDLY_CTRL = 0x725;
+  const uint16_t addr = RTK_PCIE_CLKDLY_CTRL;
+  const uint16_t wr_addr = static_cast<uint16_t>(addr & 0x0FFC);
+  const uint8_t lane = static_cast<uint8_t>(addr & 0x3);
+  _device.rtw_write8(static_cast<uint16_t>(REG_DBI_WDATA_V1 + lane), 0);
+  _device.rtw_write16(REG_DBI_FLAG_V1,
+                      static_cast<uint16_t>(wr_addr | ((1u << lane) << 12)));
+  _device.rtw_write8(REG_DBI_FLAG_V1 + 2, 0x01); /* write kick (BIT16) */
+  bool done = false;
+  for (int i = 0; i < 20 && !done; i++) {
+    done = _device.rtw_read8(REG_DBI_FLAG_V1 + 2) == 0;
+    if (!done)
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+  }
+  if (!done)
+    _logger->warn("Jaguar3: PCIe DBI write (CLKDLY_CTRL=0) did not complete "
+                  "(non-fatal)");
+
+  /* rtw_pci_interface_cfg: cut >= D (3 = D with A = 0) */
+  constexpr uint16_t REG_HCI_MIX_CFG = 0x03FC;
+  if (cut >= 3)
+    _device.rtw_write32(REG_HCI_MIX_CFG,
+                        _device.rtw_read32(REG_HCI_MIX_CFG) | (1u << 26));
+  /* rtw_pci_phy_cfg tail: RFE option 5 boards need REG_ANAPARSW_MAC_0
+   * BIT_CF_L_V2 (0x1010[29:28]) = 1. */
+  if (rfe_type == 5) {
+    constexpr uint16_t REG_ANAPARSW_MAC_0 = 0x1010;
+    uint32_t v = _device.rtw_read32(REG_ANAPARSW_MAC_0) & ~(3u << 28);
+    _device.rtw_write32(REG_ANAPARSW_MAC_0, v | (1u << 28));
+  }
+  _logger->info("Jaguar3: PCIe interface cfg applied (CLKDLY=0, cut={}, rfe={})",
+                static_cast<int>(cut), static_cast<int>(rfe_type));
+}
+
 /* init_system_cfg_8822c */
 void HalmacJaguar3MacInit::init_system_cfg(ChannelWidth_t bw, uint8_t cut) {
   uint32_t v = _device.rtw_read32(REG_CPU_DMEM_CON);
@@ -519,6 +574,12 @@ bool HalmacJaguar3MacInit::init_trx_cfg() {
    * 2-bit fields: VOQ<<4 VIQ<<6 BEQ<<8 BKQ<<10 MGQ<<12 HIQ<<14. */
   uint16_t pqmap = (3u << 14) | (3u << 12) | (1u << 10) | (1u << 8) |
                    (2u << 6) | (2u << 4); /* = 0xF5A0 */
+  /* PCIe (halmac HALMAC_TRX_MODE_NORMAL PCIE row / rtw88 rqpn_table_8822c[1]):
+   * MG rides the extra queue (0), whose 64 pages the PCIe page table
+   * allocates, instead of sharing HQ. */
+  if (!_device.is_usb())
+    pqmap = (3u << 14) | (0u << 12) | (1u << 10) | (1u << 8) | (2u << 6) |
+            (2u << 4);
   _device.rtw_write16(REG_TXDMA_PQ_MAP, pqmap);
 
   uint8_t en_fwff = _device.rtw_read8(REG_WMAC_FWPKT_CR) & BIT_FWEN;
@@ -559,13 +620,17 @@ bool HalmacJaguar3MacInit::priority_queue_cfg() {
   cur -= RSVD_PG_H2CQ_NUM;
   const uint16_t rsvd_h2cq_addr = cur; /* 1986 */
 
+  /* Extra-queue pages: 0 on the 3-bulkout USB table, 64 on PCIe (halmac
+   * HALMAC_PG_NUM_PCIE / rtw88 page_table_8822c[1] = 64/64/64/64/1) where
+   * the MGQ is mapped onto it. */
+  const uint16_t pg_exq = _device.is_usb() ? PG_EXQ : 64;
   const uint16_t pub_pg =
-      acq_pg_num - PG_HQ - PG_NQ - PG_LQ - PG_EXQ - PG_GAP; /* 1745 */
+      acq_pg_num - PG_HQ - PG_NQ - PG_LQ - pg_exq - PG_GAP; /* 1745 USB */
 
   _device.rtw_write16(REG_FIFOPAGE_INFO_1, PG_HQ);
   _device.rtw_write16(REG_FIFOPAGE_INFO_2, PG_LQ);
   _device.rtw_write16(REG_FIFOPAGE_INFO_3, PG_NQ);
-  _device.rtw_write16(REG_FIFOPAGE_INFO_4, PG_EXQ);
+  _device.rtw_write16(REG_FIFOPAGE_INFO_4, pg_exq);
   _device.rtw_write16(REG_FIFOPAGE_INFO_5, pub_pg);
   _device.rtw_write32(REG_RQPN_CTRL_2,
                       _device.rtw_read32(REG_RQPN_CTRL_2) | (1u << 31));
@@ -581,12 +646,15 @@ bool HalmacJaguar3MacInit::priority_queue_cfg() {
   _device.rtw_write32(REG_RXFF_BNDY,
                       RX_FIFO_SIZE_8822C - C2H_PKT_BUF - 1); /* 0x5EFF */
 
-  /* USB: block descriptor number + TXDMA offset check */
-  uint8_t v8 = _device.rtw_read8(REG_AUTO_LLT_V1);
-  v8 &= ~(0xf << 4);
-  v8 |= (BLK_DESC_NUM << 4);
-  _device.rtw_write8(REG_AUTO_LLT_V1, v8);
-  _device.rtw_write8(REG_AUTO_LLT_V1 + 3, BLK_DESC_NUM);
+  /* USB only: block descriptor number (halmac writes BLK_DESC_NUM on the
+   * USB interface alone). The TXDMA offset check is interface-neutral. */
+  if (_device.is_usb()) {
+    uint8_t v8 = _device.rtw_read8(REG_AUTO_LLT_V1);
+    v8 &= ~(0xf << 4);
+    v8 |= (BLK_DESC_NUM << 4);
+    _device.rtw_write8(REG_AUTO_LLT_V1, v8);
+    _device.rtw_write8(REG_AUTO_LLT_V1 + 3, BLK_DESC_NUM);
+  }
   _device.rtw_write8(REG_TXDMA_OFFSET_CHK + 1,
                      _device.rtw_read8(REG_TXDMA_OFFSET_CHK + 1) | (1u << 1));
 

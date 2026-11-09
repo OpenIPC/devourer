@@ -105,6 +105,7 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8731BU**                 | 1T1R              | —             | —             | —                | —                | bare unbranded 1T1R module (`0bda:f72b`, cut D): monitor RX and CCK/legacy/HT raw TX validated on 2.4 GHz, legacy/HT on 5 GHz, 20/40 MHz. Not benchmarked. [Status and test limits](docs/rtl8733b.md) |
 | **RTL8733BU**                 | 1T1R + BT         | 62            | 50            | 50               | —                | LB-LINK BL-M8733BU2-L (`0bda:b733`); rides the RTL8731BU (RTL8733B) code path. 10 MHz capable |
 | **RTL8821CE** (PCIe)          | 1T1R + BT         | —             | —             | —                | —                | Radxa X4 onboard Wi-Fi (`10ec:c821`); not benchmarked |
+| **RTL8822CE** (PCIe)          | 2T2R + BT         | —             | —             | —                | —                | M.2 module (`10ec:c822`); not benchmarked |
 | **RTL8852BU** (11ax)          | 2T2R + BT         | 43            | 36            | 33               | —          | TP-Link Archer TX20U Nano (`35bc:0108`); Wi-Fi 6, dual-band. 5/10 MHz capable; HE ER SU + DCM extended range |
 | **RTL8832BU** (11ax)          | 2T2R              | —             | —             | —                | —          | Wi-Fi-only SKU of the 8852B die; rides the 8852BU code path. Not benchmarked. 5/10 MHz capable; HE ER SU + DCM extended range |
 | **RTL8832CU** (11ax)          | 2T2R              | 40            | 33            | 32               | 32          | TP-Link Archer TX50UH (`35bc:0101`); Wi-Fi 6E tri-band (2.4/5/6 GHz). 5/10 and 160 MHz capable; HE ER SU + DCM extended range. Host-push injection over USB 2.0 (~50% duty ceiling); 6 GHz TX+RX validated ([cells](tests/pcie_8852ce_onair.sh) `--band 6`, with the 8852CE as the peer) |
@@ -226,7 +227,7 @@ tables — an 8812AU-only
 `rxdemo` is ~1.6 MB against ~6.3 MB with everything on, and dropping just the
 two Wi-Fi 6 dies takes it to ~4.2 MB (their verbatim-vendored halbb/halrf plane
 is the single largest contributor). `DEVOURER_PCIE` (default OFF, Linux-only)
-adds the vfio-pci transport for the RTL8821CE and RTL8852CE.
+adds the vfio-pci transport for the RTL8821CE, RTL8822CE and RTL8852CE.
 
 ## Using the library
 

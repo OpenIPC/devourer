@@ -456,6 +456,72 @@ has one UE, and a direction c→o is UE c measuring cell o.
 - **The counterfactual:** without suspend gaps, the geometric limit is real
   on air. Cells 2 and 3 never measure each other, in any of 3 runs.
 
+### Handover among three cells
+
+The three-cell layout, with the CU's A3 executing on the UEs' own
+measurements. Each UE is strongest to the DU on its own box:
+
+| UE (serving) | cell 1 | cell 2 | cell 3 |
+|---|---|---|---|
+| UE1 (1) | −55 | −46 | **−33** |
+| UE2 (2) | −57 | −39 | −38 |
+| UE3 (3) | **−33** | −56 | −48 |
+
+**Expected moves** (each UE moves at most once; the A3 dwell is long):
+- At the A3 defaults, UE1 goes 1→3 and UE3 3→1, each to the stronger of its
+  two neighbours: a swap.
+- At a −2 dB offset, UE2 also goes 2→3. That is a handover into the cell
+  UE2 could measure only in suspend gaps, since cells 2 and 3 share a phase.
+
+**The first runs found two bugs:**
+- **The A3 fired for a weaker neighbour.** It fired for the best neighbour
+  *among those past their time-to-trigger*. UE1's timer toward cell 2
+  started a second before its timer toward cell 3, so the CU sent UE1 to
+  cell 2 at −51 dBm, with cell 3 at −32. Now only the strongest neighbour
+  meeting the entry condition can fire, once it has held it for the
+  time-to-trigger (cell_m6 ctest).
+- **A re-plan cost an arrival its window.** When UE1 left cell 1, the CU
+  re-planned and sent DU1 a schedule effective one superframe before UE3's
+  arrival there. A DU publishes one instant at a time, so the arrival's
+  grant never got its window: it expired, and UE3 fell back to cell 3. The
+  CU now sends no new schedule to a DU while it is a handover's source or
+  target; it re-plans once the handover concludes.
+  - Meanwhile a schedule the DU refused is not dropped but goes on as the
+    keepalive, since any fresh-sequence schedule is CU contact. So a long
+    handover cannot cost the DU its CU contact; the fresh version follows
+    after.
+- **A refused command, recovered:** the first command for UE3's arrival
+  named id 2, from DU1's report taken before it freed UE1's id 1. DU1's
+  registry gives the lowest free id, so it refused the command (invalid);
+  the CU's next command, with id 1, was staged.
+
+**Rig result** (testrig `scripts/m6_three_ho.sh`): 2 runs per case, all pass.
+
+| case | moves (each to the strongest neighbour in its last report) | target heard in slot after the switch |
+|---|---|---|
+| A3 defaults (2) | UE1 1→3 (−32 vs −51), UE3 3→1 (−31 vs −51); UE2 stays | 99.9 % |
+| A3 −2 dB (2) | the same, plus UE2 2→3 (−37/−38 vs −57), measured in 9 and 13 suspend gaps, never in an idle one | 99.9–100 % |
+
+- **The misses behind 99.9 %:** every switch between cells of different
+  phase (1↔3: 51.2 ms apart) had exactly one target uplink out of slot, of
+  724–786. It came in the second superframe after the switch, 49–51 ms off,
+  about the phase difference, as if that one uplink still ran on the source
+  cell's timing. The switch 2→3, between cells of the same phase, had none
+  (0 of 530 and 596). Its cause is not established, and no fallback
+  followed.
+- **Every switch:** TSF continuity (18–134 ms after the network instant,
+  under 2 P), `ran.ho_done` 5–17 superframes after it, and no fallback.
+- **No DL in a deaf window:** no DU aired a UE a DL frame inside a suspend
+  gap, on either side of its switch (each side on its own clock).
+- **Measuring from the new cell:** every moved UE went on measuring both
+  other cells in 100 % of its reports there. UE2 in cell 3 measures cell 2
+  in suspend gaps and cell 1 in idle ones.
+- **Cell 3 ends with two UEs:** UE1 and UE2, each with its own suspend
+  pattern.
+- **Regression:** the two-cell emulated crossing (A3 at defaults, and the
+  hover case), the measurement-gap handover and the plain and fault
+  handovers pass with the A3 change.
+
 ## The UE's clock fit across a jump of its DU's TSF
 
 The UE fits the DU's TSF against its own free-running counter
@@ -1176,10 +1242,11 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   variant, with its retune and deaf-time budget. The downlink is duplicated
   through the target's buffer, but not received from both DUs at once (see
   the downlink duplication section).
-- **More than three cells, and handover among three:** the rig runs three
-  cells, one UE each, measuring. Handovers ran with two cells (including
-  one on suspend-gap measurements alone). Re-phasing live cells is still
-  open; it is not needed for measurability.
+- **More than three cells:** the rig runs three cells, with handovers among
+  them, including one into a cell measured only in suspend gaps. A UE
+  crossing all three in turn, as in the emulated crossing, has not run.
+  Re-phasing live cells is still open; it is not needed for
+  measurability.
 - **A real moving UE:** the crossing below is emulated by the DUs' TX
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,

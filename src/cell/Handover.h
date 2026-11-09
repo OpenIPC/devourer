@@ -93,11 +93,13 @@ public:
 
   /* One evaluation. `serving` / `neigh` are the filtered measurements, each
    * with its validity. Returns the target cell when its condition has held
-   * for time-to-trigger (the best such neighbour), else nullopt. */
+   * for time-to-trigger, else nullopt. Only the STRONGEST neighbour meeting
+   * the condition can fire: a weaker one whose timer started first never
+   * wins over a stronger one still running its time-to-trigger. */
   std::optional<uint16_t> evaluate(std::optional<double> serving,
                                    const std::map<uint16_t, std::optional<double>> &neigh,
                                    int64_t now_ms) {
-    std::optional<uint16_t> best;
+    std::optional<uint16_t> best; /* the strongest neighbour holding the condition */
     double best_v = 0;
     for (const auto &kv : neigh) {
       const uint16_t cell = kv.first;
@@ -121,14 +123,16 @@ public:
         continue;
       }
       /* In the band between leave and enter the timer keeps running. */
-      if (now_ms - it->second >= cfg_.ttt_ms && (!best || n > best_v)) {
+      if (!best || n > best_v) {
         best = cell;
         best_v = n;
       }
     }
     for (auto it = since_.begin(); it != since_.end();) /* neighbours no longer reported */
       it = neigh.count(it->first) ? std::next(it) : since_.erase(it);
-    if (best && have_ho_ && now_ms - last_ho_ms_ < cfg_.min_dwell_ms)
+    if (!best || now_ms - since_.at(*best) < cfg_.ttt_ms)
+      return std::nullopt; /* the strongest has not held it long enough yet */
+    if (have_ho_ && now_ms - last_ho_ms_ < cfg_.min_dwell_ms)
       return std::nullopt; /* dwell: the timers keep running, nothing fires */
     return best;
   }

@@ -78,13 +78,24 @@ void Rtl8733bDevice::bring_up_to_phy() {
     _firmware_ready = true;
     /* MAC init just wrote 0x0520 = 0x6f (both carrier-sense gates ON), so a
      * fresh MAC resets the gate pair to the configured default — bring-up IS
-     * a reset here, as on Jaguar1. Runtime SetCcaGates/SetCcaMode state set
+     * a reset here, as on Jaguar1 — unless SetCcaMode was called BEFORE this
+     * bring-up, in which case that request is what gets applied (it returns
+     * void, so recording it is the only way to honour it; SetCcaGates
+     * refuses pre-bring-up instead, per its contract). Runtime state set
      * later in the session survives retunes (re-asserted there), not a
      * Stop()/Init() cycle. */
-    _cca_primary_disabled = _cfg.tuning.disable_cca;
-    _cca_edcca_disabled = _cfg.tuning.disable_cca;
-    if (_cfg.tuning.disable_cca)
-      apply_cca_gates_locked(true, true);
+    if (!_cca_requested) {
+      _cca_primary_disabled = _cfg.tuning.disable_cca;
+      _cca_edcca_disabled = _cfg.tuning.disable_cca;
+    }
+    _cca_requested = false;
+    /* Written unconditionally, the enabled state included: the chip keeps
+     * 0x0520 across a warm re-init (the vendor MAC table's 0x6f is not among
+     * the registers this bring-up rewrites), so a session that ended with a
+     * gate off would otherwise hand the next session that gate still off
+     * while its state said "default". Seen on the bench as a regcheck that
+     * passed once and failed on the run after it. */
+    apply_cca_gates_locked(_cca_primary_disabled, _cca_edcca_disabled);
   }
   if (!_phy.initialize(_chip.cut, _efuse))
     throw std::runtime_error("RTL8733B PHY/RF initialization failed");
@@ -698,8 +709,15 @@ void Rtl8733bDevice::apply_ampdu_mode_locked() {
         _burst_ctrl_orig = cur;
       _device.rtw_write8(0x04bc, static_cast<uint8_t>(cur & ~(1u << 6)));
     }
+    /* A TID change across access categories hands the previous register
+     * its saved value back before the new one is captured and zeroed, so a
+     * clear restores every register the mode touched, not just the last. */
+    if (_edca_orig && _edca_orig->first != edca) {
+      _device.rtw_write32(_edca_orig->first, _edca_orig->second);
+      _edca_orig.reset();
+    }
     const uint32_t cur_edca = _device.rtw_read32(edca);
-    if (!_edca_orig || _edca_orig->first != edca)
+    if (!_edca_orig)
       _edca_orig = std::make_pair(edca, cur_edca);
     _device.rtw_write32(edca, cur_edca & 0x0000ffffu); /* TXOP limit 0 */
     _logger->info("RTL8733B: A-MPDU mode ON (tid={} max={} density={} {} "
@@ -716,6 +734,10 @@ void Rtl8733bDevice::apply_ampdu_mode_locked() {
       _device.rtw_write8(0x04bc, *_burst_ctrl_orig);
     if (_edca_orig)
       _device.rtw_write32(_edca_orig->first, _edca_orig->second);
+    /* Forgotten once restored: the next enable captures what bring-up or a
+     * caller left there, not a value from a previous session's registers. */
+    _burst_ctrl_orig.reset();
+    _edca_orig.reset();
     _logger->info("RTL8733B: A-MPDU mode OFF (pacing restored)");
   }
 }
@@ -1208,8 +1230,17 @@ void Rtl8733bDevice::SetCcaMode(bool disabled) {
   std::lock_guard<std::recursive_mutex> lock(_reg_mu);
   _cca_primary_disabled = disabled;
   _cca_edcca_disabled = disabled;
-  if (_mac_ready)
+  if (_mac_ready) {
     apply_cca_gates_locked(disabled, disabled);
+  } else {
+    /* Nothing to write yet; bring-up applies this instead of the config
+     * default. Said out loud so a pre-bring-up call is never mistaken for
+     * one that took effect on the chip. */
+    _cca_requested = true;
+    _logger->info("RTL8733B: MAC carrier-sense {} recorded before bring-up — "
+                  "applied when the MAC comes up",
+                  disabled ? "DISABLE" : "enable");
+  }
   _logger->info("RTL8733B: MAC carrier-sense {}",
                 disabled ? "DISABLED (dis_cca: CCA+EDCCA)" : "enabled (default)");
 }
@@ -1263,7 +1294,10 @@ void Rtl8733bDevice::Stop() {
 devourer::TxCaps Rtl8733bDevice::GetTxCaps() {
   /* Advertised surface: one spatial stream, 2.4-GHz long-preamble CCK, legacy
    * OFDM, and HT MCS0-7 at 20/40 MHz, long or short GI, BCC or LDPC — SGI
-   * and LDPC each measured on air (TxDescriptor8733b.h). TxCaps has no
+   * and LDPC each measured on air (TxDescriptor8733b.h). ldpc_ok is the
+   * TRANSMIT claim — the frame airs LDPC-coded and a witness decodes it with
+   * its LDPC flag set; the coding GAIN (the Jaguars' ~+3 dB waterfall) is
+   * unmeasured on this die and not implied by the flag. TxCaps has no
    * separate CCK flag. Experimental 5/10 MHz is omitted until an
    * occupied-bandwidth and cross-receiver gate passes. */
   return devourer::tx_caps_for_chains(1, true, true, 40);

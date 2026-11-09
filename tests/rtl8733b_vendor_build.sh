@@ -45,4 +45,5 @@ KO=$(find "$BUILD_DIR/src" -maxdepth 1 -name '*.ko' | head -1)
 [ -n "$KO" ] || { echo "FAIL: make succeeded but no .ko produced (see $LOG)"; exit 1; }
 echo "OK: $KO"
 modinfo "$KO" 2>/dev/null | grep -E "^(filename|vermagic|version):" | sed 's/^/   /'
-grep -c "warning:" "$LOG" | sed 's/^/   warnings: /'
+echo "   warnings: $(grep -c 'warning:' "$LOG" || true)"
+exit 0

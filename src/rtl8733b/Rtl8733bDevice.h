@@ -198,6 +198,9 @@ private:
   /* Sticky carrier-sense gate state (true = that gate OFF), under _reg_mu. */
   bool _cca_primary_disabled = false;
   bool _cca_edcca_disabled = false;
+  /* A SetCcaMode call landed before bring-up; bring-up applies it instead
+   * of tuning.disable_cca, then clears this. */
+  bool _cca_requested = false;
   /* Session TX-power offset in qdB, over the int8 delta field's full
    * [-128, +127] (GetTxPowerCaps argues the range and records where the chip
    * stops responding at each end), plus the rails the last apply hit. Sticky

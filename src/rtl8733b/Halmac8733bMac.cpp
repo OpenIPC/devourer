@@ -848,17 +848,23 @@ bool Halmac8733bMac::send_h2c(const std::array<uint8_t, 8> &cmd,
                           ext) &&
       _device.rtw_write32(static_cast<uint16_t>(kRegHmebox0 + 4u * box),
                           main);
-  _h2c_box = static_cast<uint8_t>((box + 1) % kH2cBoxCount);
   /* Consumption check: the firmware clears the box bit when it has read the
-   * command. Observed on the bench to take well under a millisecond. */
+   * command. Observed on the bench to take well under a millisecond. The slot
+   * index advances only once the command is known consumed — a failed write
+   * or an unconsumed box leaves the firmware waiting on THIS slot, and moving
+   * on would put every later command one slot ahead of it. */
   bool consumed = false;
-  for (unsigned attempt = 0; attempt < 50; ++attempt) {
-    if ((_device.rtw_read8(kRegHmetfr) & (1u << box)) == 0) {
-      consumed = true;
-      break;
+  if (ok) {
+    for (unsigned attempt = 0; attempt < 50; ++attempt) {
+      if ((_device.rtw_read8(kRegHmetfr) & (1u << box)) == 0) {
+        consumed = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
+  if (consumed)
+    _h2c_box = static_cast<uint8_t>((box + 1) % kH2cBoxCount);
   _logger->debug("RTL8733B H2C: id=0x{:02x} box={} slot_wait={}us write_ok={} "
                  "consumed={} bytes={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} "
                  "{:02x} {:02x}",

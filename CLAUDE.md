@@ -411,12 +411,9 @@ Behavioural traps the per-field docs can't carry:
   8852C runs the same enabled default (measured: full-rate TX, 2.4x flood
   deferral); the 8852B TX bring-up still clears the gates and WARNS pending
   its measurement arm (`tests/kestrel_cca_default_check.sh`). The RTL8733B
-  is the Jaguar3 shape again: same `0x520[14]`/`[15]` + `0x524[11]` map, and
-  on air the primary bit is the one that works — the 8733B injecting MCS3 at
-  max duty on this bench's ch36 submits ~3.0k fps with carrier-sense on
-  against ~6.9k with `[14]` cleared, 4.1k → 7.2k against a co-channel 8822BU
-  flooder, while clearing `[15]` alone moves nothing (3 reps each, spread
-  under 3%; `src/rtl8733b/CLAUDE.md`). Does NOT apply
+  is the Jaguar3 shape again — same gate map, and on air the primary bit is
+  the one that works while EDCCA alone is null; the figures are in
+  `src/rtl8733b/CLAUDE.md` "Carrier-sense gates". Does NOT apply
   the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
   separate null (`tests/dis_cca_onair.sh`).
 

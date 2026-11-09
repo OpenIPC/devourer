@@ -11,15 +11,22 @@
 #
 # Usage: sudo tests/rtl8733b_vendor_ko_smoke.sh            # 0bda:b733
 #        PID=f72b sudo tests/rtl8733b_vendor_ko_smoke.sh   # the Wi-Fi-only module
+#        SYSFS=9-2 sudo tests/rtl8733b_vendor_ko_smoke.sh  # two same-model adapters: pin the port
 set -euo pipefail
 cd "$(dirname "$0")/.."
-VID="${VID:-0bda}"; PID="${PID:-b733}"; CH="${CH:-36}"
+VID="${VID:-0bda}"; PID="${PID:-b733}"; CH="${CH:-36}"; SYSFS="${SYSFS:-}"
 KO="${KO:-build/vendor-8733bu/src/8733bu.ko}"
 [ "$(id -u)" -eq 0 ] || { echo "FAIL: needs root"; exit 2; }
 [ -f "$KO" ] || { echo "FAIL: $KO not built — run tests/rtl8733b_vendor_build.sh"; exit 2; }
 
-find_devdir() { local d; for d in /sys/bus/usb/devices/*; do [ -f "$d/idVendor" ] || continue
-  [ "$(cat "$d/idVendor")" = "$1" ] && [ "$(cat "$d/idProduct")" = "$2" ] && { echo "$d"; return 0; }; done; return 1; }
+# Every match, not the first: a bench with two same-model adapters must name
+# the one it means (SYSFS=bus-port) before anything here unbinds a driver.
+find_devdir() { local d hits=(); for d in /sys/bus/usb/devices/*; do [ -f "$d/idVendor" ] || continue
+  [ "$(cat "$d/idVendor")" = "$1" ] && [ "$(cat "$d/idProduct")" = "$2" ] && hits+=("$d"); done
+  if [ -n "$SYSFS" ]; then [ -d "/sys/bus/usb/devices/$SYSFS" ] && echo "/sys/bus/usb/devices/$SYSFS" && return 0; return 1; fi
+  [ "${#hits[@]}" -eq 1 ] && { echo "${hits[0]}"; return 0; }
+  [ "${#hits[@]}" -gt 1 ] && { echo "ambiguous: ${#hits[@]} adapters match $1:$2 — set SYSFS=<bus-port>: ${hits[*]##*/}" >&2; }
+  return 1; }
 iface_for_devdir() { local n; for n in /sys/class/net/*; do [ -e "$n/device" ] || continue
   case "$(readlink -f "$n/device")" in "$(readlink -f "$1")"*) basename "$n"; return 0;; esac; done; return 1; }
 
@@ -34,7 +41,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-devdir="$(find_devdir "$VID" "$PID")" || { echo "FAIL: $VID:$PID not on the bus"; exit 1; }
+devdir="$(find_devdir "$VID" "$PID")" || { echo "FAIL: $VID:$PID not on the bus (or ambiguous — see above)"; exit 1; }
 for ifdir in "$devdir":*; do
   [ -L "$ifdir/driver" ] || continue
   [ "$(cat "$ifdir/bInterfaceClass" 2>/dev/null)" = "e0" ] && continue   # Bluetooth stays with btusb

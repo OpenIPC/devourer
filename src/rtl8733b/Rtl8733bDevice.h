@@ -214,7 +214,8 @@ private:
   std::atomic<bool> _rx_active{false};
   std::atomic<uint8_t> _rx_configured_bw{0};
   std::atomic<uint64_t> _tx_submits{0};
-  std::atomic<bool> _width_refusal_logged{false};
+  /* First TX refusal of the session is logged by name; the rest stay quiet. */
+  std::atomic<bool> _refusal_logged{false};
   /* Rotating SW_DEFINE tag stamped when tx.report is on; the CCX report
    * echoes its low byte (src/TxReport.h). 64-bit for the same reason as
    * Jaguar2's: the counter also gates the sampled SPE_RPT request. */

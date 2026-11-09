@@ -122,8 +122,11 @@ if a==0: print("  (no baseline)"); sys.exit()
 # far/dis1 7.1k).
 ceiling=a; usb_ref=f0
 if d1 > a*1.1:
-    ceiling=d1; usb_ref=f1
-    print(f"  note: alone={a} < co-chan/dis1={d1} — 'alone' is not an idle baseline here (resident traffic); ceiling=dis1, USB term from far-chan/dis1={f1}")
+    # The ceiling must be independent of the co-channel cell it judges:
+    # far-chan/dis1 is the gates-off injector with no co-channel load, so a
+    # dis1 that falls short of it still shows as a shortfall.
+    ceiling=f1; usb_ref=f1
+    print(f"  note: alone={a} < co-chan/dis1={d1} — 'alone' is not an idle baseline here (resident traffic); ceiling=far-chan/dis1={f1}")
 defr=100*(1-d0/ceiling); usb=100*(1-usb_ref/ceiling); rec=(d1/d0) if d0 else 0
 print(f"  co-chan deferral(dis0)={defr:+.0f}%  USB-only(far)={usb:+.0f}%  recovery dis1/dis0={rec:.2f}x  dis1 vs ceiling={100*(1-d1/ceiling):+.0f}%")
 real = defr - usb   # deferral net of USB contention

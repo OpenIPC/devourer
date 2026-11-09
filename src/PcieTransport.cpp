@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #include "Event.h"
-#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR3_8822C)
 #include "PcieDma88xx.h"
 #endif
 #if defined(DEVOURER_HAVE_KESTREL_8852C)

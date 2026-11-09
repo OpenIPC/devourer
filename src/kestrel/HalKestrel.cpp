@@ -610,10 +610,16 @@ bool HalKestrel::pcie_b_pldr_fix() {
 }
 
 bool HalKestrel::pcie_b_pre_init() {
-  /* A host that forbids LTR must never see one (DEVCTL2 LTR_EN=0). The LTR
-   * block is the same v0 register set on/off here, so "silence" = off. */
-  if (!_device.ltr_allowed())
-    pcie_b_ltr_set(false);
+  /* A host that forbids LTR must never see one (DEVCTL2 LTR_EN=0 — an LTR
+   * message behind a non-LTR port is an Unsupported Request and resets the
+   * link). The LTR block is the same v0 register set on/off here, so
+   * "silence" = off, and an unreadable block means it cannot be proven off:
+   * stop here rather than open the TX channels on such a host. */
+  if (!_device.ltr_allowed() && !pcie_b_ltr_set(false)) {
+    _logger->error("Kestrel PCIe(8852B): host forbids LTR and the LTR block "
+                   "could not be disabled — refusing to bring the DMA up");
+    return false;
+  }
   set32(r::R_AX_HCI_OPT_CTRL, r::B_AX_WAKE_CTRL); /* power_wake */
   /* intf_info_def_8852b: LBC on, 2 ms (R_AX_LBC_WATCHDOG); io_rcy off. */
   {

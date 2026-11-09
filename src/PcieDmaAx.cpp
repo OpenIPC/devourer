@@ -330,7 +330,7 @@ bool PcieDmaAx::wait_consumed(TxRing &r, int ch, int timeout_ms) {
         struct { const char *n; uint16_t reg; } regs_c[] = {
             {"HAXI_INIT_CFG1", 0x1000}, {"HAXI_DMA_STOP1", 0x1010},
             {"HAXI_DMA_BUSY1", 0x101C}, {"HAXI_DMA_BUSY2", 0x11C8},
-            {"HAXI_DMA_BUSY3", 0x1208}, {"HAXI_HISR00", 0x10B0}};
+            {"HAXI_DMA_BUSY3", 0x1208}, {"HAXI_HISR00", 0x10B4}};
         if (_die == AxDie::C8852B)
           for (const auto &x : regs_b)
             _logger->error("  stall dump {:>13} 0x{:04x} = 0x{:08x}", x.n, x.reg,
@@ -423,11 +423,22 @@ int PcieDmaAx::submit_wd(int ch, uint8_t *buf, size_t len, int timeout_ms) {
    * measured: B0MG stalled after 57-195 frames on a busy channel — so the
    * TX path re-arms the RXQ itself, discarding what it reaps, whenever the
    * RX loop is not running. */
-  if (!_rx_loop_active.load()) {
-    std::lock_guard<std::mutex> lk(_rxq_mu);
-    const uint32_t dropped = reap_rxq([](const uint8_t *, int) {});
-    if (dropped)
-      _rx_txonly_dropped += dropped;
+  /* Not on every frame — the send path owes no register read per frame: a
+   * drain every 16 submissions or 50 ms (both decided from host state)
+   * keeps well ahead of the 256-buffer ring at any ambient rate seen (the
+   * measured fill took ~300 ms on a busy channel). Ownership is decided
+   * under _rxq_mu so an RX loop starting in between cannot lose frames. */
+  {
+    const auto now = std::chrono::steady_clock::now();
+    const bool due = (++_tx_since_drain >= 16) ||
+                     (now - _last_drain) > std::chrono::milliseconds(50);
+    if (due) {
+      _tx_since_drain = 0;
+      _last_drain = now;
+      std::lock_guard<std::mutex> lk(_rxq_mu);
+      if (!_rx_loop_active.load())
+        _rx_txonly_dropped += reap_rxq(nullptr);
+    }
   }
 
   /* A free page, reaping release reports first; starve → wait on the RPQ. */
@@ -588,7 +599,10 @@ uint32_t PcieDmaAx::reap_rxq(
     const uint32_t info = rd_le32(buf);
     const uint32_t blen = info & RXBD_INFO_LEN_MSK;
     const bool fs = info & RXBD_INFO_FS, ls = info & RXBD_INFO_LS;
-    if (blen > 4 && blen <= kRxBufSize) {
+    if (!on_data) {
+      /* TX-only drain: re-arm and count, deliver nothing, keep the delivery
+       * statistics honest. */
+    } else if (blen > 4 && blen <= kRxBufSize) {
       const uint8_t *data = buf + 4;
       const int dlen = static_cast<int>(blen - 4);
       if (fs && dlen >= 4) {
@@ -632,11 +646,19 @@ void PcieDmaAx::rx_loop(
   _logger->info("PcieDmaAx: RX loop started (polled, {} us; RXQ + RPQ)",
                 _rx_poll_us);
   uint64_t rxq_bufs = 0, rpq_bufs = 0;
-  _rx_loop_active = true;
+  {
+    /* Take RXQ ownership under the same mutex the TX-only drain checks. */
+    std::lock_guard<std::mutex> lk(_rxq_mu);
+    _rx_loop_active = true;
+  }
   struct ActiveGuard {
     std::atomic<bool> &f;
-    ~ActiveGuard() { f = false; }
-  } active_guard{_rx_loop_active};
+    std::mutex &mu;
+    ~ActiveGuard() {
+      std::lock_guard<std::mutex> lk(mu);
+      f = false;
+    }
+  } active_guard{_rx_loop_active, _rxq_mu};
   while (!should_stop()) {
     uint32_t n;
     {
@@ -667,6 +689,12 @@ void PcieDmaAx::rx_loop(
 }
 
 void PcieDmaAx::irq_mask() {
+  /* Teardown-time hook (the transport masks before dropping the vector):
+   * the one place a TX-only session's RXQ drain can be reported. */
+  if (_rx_txonly_dropped)
+    _logger->info("PcieDmaAx: TX-only RXQ drain re-armed {} buffers (ambient "
+                  "RX discarded while no RX loop ran)",
+                  _rx_txonly_dropped);
   if (_die == AxDie::C8852C) {
     _t.mmio_write<uint32_t>(R_AX_PCIE_HIMR00_V1, 0);
     _t.mmio_write<uint32_t>(R_AX_HAXI_HIMR00, 0);

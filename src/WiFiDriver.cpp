@@ -356,6 +356,7 @@ std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
   if (auto kvariant = kestrel::variant_for_pci_id(transport->pci_vendor_id(),
                                                   transport->pci_device_id())) {
     const bool is_c = *kvariant == kestrel::ChipVariant::C8852C;
+#if defined(DEVOURER_HAVE_KESTREL)
 #if !defined(DEVOURER_HAVE_KESTREL_8852C)
     if (is_c) {
       _logger->error("RTL8852CE detected but 8852C support not compiled in "
@@ -377,6 +378,12 @@ std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
     return std::make_unique<RtlKestrelDevice>(
         RtlAdapter(std::move(transport), _logger, cfg), _logger, *kvariant,
         cfg);
+#else
+    _logger->error("{} detected but no Kestrel support is compiled in "
+                   "(DEVOURER_KESTREL_8852B/8852C both OFF)",
+                   is_c ? "RTL8852CE" : "RTL8852BE");
+    return nullptr;
+#endif
   }
 
   /* Chip identity from SYS_CFG2 (0x00FC) over BAR2 MMIO — the same dispatch

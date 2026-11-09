@@ -153,6 +153,12 @@ static int probe_kestrel(RtlAdapter &adapter, Logger_t logger, int want,
       .hexf("ser_err", err, 8);
   if (!fw_ok)
     return 1;
+  if (want >= 3 && !is_c) {
+    logger->error("M3 (8852B): the bb stage is written for the 8852C's BB "
+                  "window probe only — not run");
+    devourer::Ev(logger->events(), "pcie.bb").f("ok", false).f("skipped", true);
+    return 1;
+  }
   if (want >= 3 && is_c) {
     /* M3 (bb, 8852C): is the BB register window (+0x10000, halbb/halrf's plane)
      * reachable through BAR2? set_enable_bb_rf then read a few BB registers

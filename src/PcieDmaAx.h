@@ -47,6 +47,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -164,6 +165,8 @@ private:
   std::atomic<bool> _rx_loop_active{false};
   std::mutex _rxq_mu;
   uint64_t _rx_txonly_dropped = 0;
+  uint32_t _tx_since_drain = 0;
+  std::chrono::steady_clock::time_point _last_drain{};
 };
 
 } /* namespace devourer */

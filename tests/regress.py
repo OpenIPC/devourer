@@ -223,6 +223,10 @@ SUPPORTED_DUTS = {
     "0bda:c82c": "RTL8822CU (Jaguar3)",
     "0bda:a81a": "RTL8812EU (Jaguar3 EU)",
     "0bda:e822": "RTL8822EU (Jaguar3 EU)",
+    "35bc:0100": "RTL8852BU (TP-Link TX20U, Kestrel)",
+    "35bc:0108": "RTL8852BU (TP-Link TX20U Nano, Kestrel)",
+    "35bc:0101": "RTL8832CU (TP-Link TX50UH, Kestrel)",
+    "0bda:c85a": "RTL8852CU (LB-LINK BL-M8852CU1, Kestrel)",
     **MEDIATEK_DUTS,
 }
 

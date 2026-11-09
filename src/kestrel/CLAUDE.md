@@ -390,11 +390,20 @@ does differently on PCIe hangs off `is_usb()`; nothing here is a second HAL:
   28.3%. `tests/pcie_rx_smoke.py` 1356/956 beacons on ch6/ch36, 0 CRC fails;
   two rounds of `tests/pcie_teardown_asan.sh` RX+TX clean, 0 DMAR faults,
   0 AER errors (this card's link is clean in the z890p slot that was
-  marginal for the 88xx cards). One module, one witness, one rate: the BE's
-  own TX on ch6 is the weak leg (75% where the witness's TX toward it holds
-  98%) — a busy 2.4 GHz channel seen from a card whose CCA gates the 8852B
-  bring-up clears and warns about, unmeasured beyond this pair; no
-  throughput bench; MSI and interrupt mitigation unported as on the C.
+  marginal for the 88xx cards). The same BE against a second witness, a
+  USB RTL8852CU (LB-LINK BL-M8852CU1, `0bda:c85a`, USB 2.0) on the same
+  host: ch36 CU→BE 98.9%, BE→CU 98.7%, hop 32.8 / 32.4 / 32.3%; ch6 99.2% /
+  98.0%, hop 32.6 / 32.5 / 31.7%. So the ch6 "75%" above was the 8812AU
+  witness's receive leg on a busy channel, not the BE's transmitter — the
+  reason every delivery figure here names its witness. One module, one
+  rate; no throughput bench; MSI and interrupt mitigation unported as on
+  the C. The 8852CU itself (`tests/regress.py` devourer cells, 15 s, vs the
+  8812AU): CU→8812AU 7818/8000 on ch36 and 6161/8500 on ch6 — the 8812AU's
+  ch6 receive leg again — and 8812AU→CU 9285/9000, 9231/9000. Standalone
+  on this host it decoded 8709 ambient frames in 60 s on ch6 but only 3 on
+  ch36 while the 8852BE beside it saw ~1000/s there — near-field peers
+  reach it at 98%, distant 5 GHz traffic does not; an antenna/module
+  question for that unit, unmeasured.
 - **Not ported**: MSI (the plane polls the ring indices, 200 µs), the
   CAV-cut-only `l12_vmain`/`gen2_force_ib` rows (the lab modules are cut 1),
   and interrupt mitigation.

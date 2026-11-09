@@ -68,12 +68,13 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   only what an independent witness decoded — legacy OFDM + HT MCS0-7, BCC,
   20/40 MHz on 2.4/5 GHz, plus long-preamble CCK on 2.4 GHz at 20 MHz, plus
   10 MHz narrowband (5 MHz refused — `src/rtl8733b/CLAUDE.md`).
-  Everything the backend has not ported (TSF/beacons, A-MPDU, CCX/`tx.report`,
+  Everything the backend has not ported (TSF/beacons,
   the flat-index and per-rate TX-power knobs) falls through to `IRadio`/`IRtlRadio`'s
   not-ported defaults rather than being faked, so read the base class before
   assuming a cross-generation feature below applies here. `FastRetune` IS
-  ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI, LDPC, STBC, VHT
-  and HE are refused outright. Scope, one-unit validation record and the
+  ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI and LDPC TX
+  are advertised (measured on air; RX-LDPC measured absent); STBC, VHT and HE
+  are refused outright. Scope, one-unit validation record and the
   deferred matrix: `docs/rtl8733b.md`.
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2
@@ -396,7 +397,7 @@ Behavioural traps the per-field docs can't carry:
   with EDCCA off and primary CCA left on, the same Jaguar1 injector delivers
   95% on an idle channel and still 78% under a co-channel flooder; with both
   gates off it collapses to 0.3%, because it stops waiting for a gap and
-  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1, Jaguar3 and Kestrel —
+  collides instead. `SetCcaGates` (`IRtlRadio`, Jaguar1, Jaguar3, Kestrel and the RTL8733B —
   there "primary" is CCA_EN + the sec20/40/80 bits and "edcca" EDCCA_EN;
   txdemo drives it as `DEVOURER_CCA_GATES=<primary>,<edcca>`, 1 = that gate
   off) is the one-bit-at-a-time form for exactly this; `SetCcaMode` remains the portable
@@ -409,13 +410,10 @@ Behavioural traps the per-field docs can't carry:
   `DEVOURER_DIS_CCA=0` forces standard carrier-sense back. On Kestrel the
   8852C runs the same enabled default (measured: full-rate TX, 2.4x flood
   deferral); the 8852B TX bring-up still clears the gates and WARNS pending
-  its measurement arm (`tests/kestrel_cca_default_check.sh`). On the RTL8733B
-  the disable is **not ported** — the HALMAC 87xx carrier-sense gate has not
-  been located and measured there, so `SetCcaMode(true)` throws (loudly, but
-  without tearing the session down) while `SetCcaMode(false)`, the state its
-  MAC bring-up already leaves programmed, succeeds as a no-op; setting the
-  config knob warns once at bring-up (RX-only sessions included) and airs
-  with carrier-sense. Does NOT apply
+  its measurement arm (`tests/kestrel_cca_default_check.sh`). The RTL8733B
+  is the Jaguar3 shape again — same gate map, and on air the primary bit is
+  the one that works while EDCCA alone is null; the figures are in
+  `src/rtl8733b/CLAUDE.md` "Carrier-sense gates". Does NOT apply
   the vendor BB CCA-off writes (they deafen the RX). RX-decode side is a
   separate null (`tests/dis_cca_onair.sh`).
 
@@ -597,7 +595,7 @@ so the chip declines further ACKs and the loss stays ARQ-visible
 lose 5.5k+ frames on the `drop` policy, which remains opt-in and counted as
 `pool_dropped`). Per-frame TX
 outcomes surface as `tx.report` events (CCX via C2H) — the TX-side link
-sensor; C2H rides the RX path, so J1/J2 TX-only sessions see none (run
+sensor; C2H rides the RX path, so J1/J2/RTL8733B TX-only sessions see none (run
 `DEVOURER_TX_WITH_RX=thread`; J3's coex thread drains C2H regardless).
 `GetRxQuality()` is the device-wide windowed RX sensor;
 `cell::UeRxAttribution` is its per-transmitter (per-UE) counterpart. Docs:

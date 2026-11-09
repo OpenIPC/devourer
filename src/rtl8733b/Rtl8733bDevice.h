@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <utility>
 
 #include "DeviceConfig.h"
 #include "FrameParser8733b.h"
@@ -55,6 +56,14 @@ public:
   size_t send_packets(const TxPacketView *pkts, size_t count) override;
   void SetTxMode(const devourer::TxMode &mode) override;
   void ClearTxMode() override;
+  /* 802.11 A-MPDU TX (src/AmpduMode.h): the descriptor half rides every
+   * frame build_tx_block makes while the mode is on (data QSEL, AGG_EN,
+   * MAX_AGG_NUM, density, retry 0 for no-ack); the pacing half is
+   * REG_AMPDU_MAX_TIME, 0x0456 on this die, and the burst-mode gate
+   * 0x04BC[6]. Recorded before bring-up and applied by InitWrite, like the
+   * other sticky TX knobs. */
+  bool SetAmpduMode(const devourer::AmpduMode &mode) override;
+  void ClearAmpduMode() override;
   SelectedChannel GetSelectedChannel() override;
   bool SetAckResponder(const devourer::MacAddr &mac) override;
   void ClearAckResponder() override;
@@ -66,6 +75,14 @@ public:
   }
   /* Shared by ClearAckResponder and SetAckResponder rollback. */
   bool disarm_ack_responder();
+  /* The MAC carrier-sense gates, 0x0520[14] primary CCA and [15] EDCCA (+
+   * 0x0524[11] EDCCA countdown mask) — the same register map and bit names
+   * as the 88xx siblings (halmac_bit_8733b.h BIT_DIS_CCA_8733B /
+   * BIT_DIS_EDCCA_8733B / BIT_EDCCA_MSK_CNTDOWN_EN_8733B). Post-bring-up
+   * only per the IRtlRadio contract; bring-up resets the pair to
+   * tuning.disable_cca, SetMonitorChannel and FastRetune re-assert it. */
+  bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
   void SetCcaMode(bool disabled) override;
   void Stop() override;
 
@@ -148,6 +165,12 @@ private:
 
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
   void bring_up_to_phy();
+  void apply_cca_gates_locked(bool primary_disabled, bool edcca_disabled);
+  void apply_ampdu_mode_locked();
+  /* Bulk-OUT endpoint for a descriptor QSEL, from the normal-profile
+   * TXDMA_PQ_MAP (0xf5a0: HIQ/MGQ -> HIGH, VI/VO -> NORMAL, BE/BK -> LOW),
+   * the vendor's rtw_get_ff_hwaddr -> halmac bulk-out id mapping. */
+  uint8_t ep_for_qsel(uint8_t qsel) const;
   bool configure_tx_power(SelectedChannel channel);
   /* Fill one [txdesc][frame] block at `out`. `agg_num` is the USB TX
    * aggregation block count and belongs on the FIRST descriptor of a packed
@@ -172,6 +195,12 @@ private:
   bool _phy_ready = false;
   bool _tx_ready = false;
   bool _tssi_tracking = false;
+  /* Sticky carrier-sense gate state (true = that gate OFF), under _reg_mu. */
+  bool _cca_primary_disabled = false;
+  bool _cca_edcca_disabled = false;
+  /* A SetCcaMode call landed before bring-up; bring-up applies it instead
+   * of tuning.disable_cca, then clears this. */
+  bool _cca_requested = false;
   /* Session TX-power offset in qdB, over the int8 delta field's full
    * [-128, +127] (GetTxPowerCaps argues the range and records where the chip
    * stops responding at each end), plus the rails the last apply hit. Sticky
@@ -185,8 +214,22 @@ private:
   std::atomic<bool> _rx_active{false};
   std::atomic<uint8_t> _rx_configured_bw{0};
   std::atomic<uint64_t> _tx_submits{0};
+  /* Rotating SW_DEFINE tag stamped when tx.report is on; the CCX report
+   * echoes its low byte (src/TxReport.h). 64-bit for the same reason as
+   * Jaguar2's: the counter also gates the sampled SPE_RPT request. */
+  std::atomic<uint64_t> _tx_rpt_tag{0};
+  /* Firmware reports seen by the RX loop; gates the first-few C2H dump. */
+  std::atomic<uint64_t> _c2h_seen{0};
   mutable std::recursive_mutex _reg_mu;
   std::optional<devourer::TxMode> _tx_mode_default;
+  /* A-MPDU session mode, read by build_tx_block under _reg_mu. */
+  devourer::AmpduMode _ampdu;
+  /* 0x04BC as bring-up left it, captured the first time the mode clears
+   * its burst gate so ClearAmpduMode restores what was there, not a guess. */
+  std::optional<uint8_t> _burst_ctrl_orig;
+  /* (EDCA register, value) of the aggregated TID's access category as
+   * bring-up left it; the mode zeroes its TXOP limit and restores it. */
+  std::optional<std::pair<uint16_t, uint32_t>> _edca_orig;
   std::optional<uint32_t> _ack_disarm_after_ms;
 };
 

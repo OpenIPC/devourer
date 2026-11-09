@@ -93,6 +93,73 @@ int main() {
       0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xab, 0x00};
   expect("MCS7 descriptor golden bytes", desc == expected_ht);
 
+  TxDescConfig ldpc = ht;
+  ldpc.short_gi = false;
+  ldpc.ldpc = true;
+  expect("MCS7 LDPC descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ldpc));
+  expect("LDPC lands in dword5 bit 7 and the checksum closes",
+         ((desc[0x14] >> 7) & 1) == 1 &&
+             rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+  TxDescConfig legacy_ldpc = ofdm;
+  legacy_ldpc.ldpc = true;
+  expect("legacy LDPC refused by the encoder",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), legacy_ldpc));
+
+  /* A-MPDU half: QSEL dword1[12:8], AGG_EN dword2[12], density dword2[22:20],
+   * MAX_AGG_NUM dword3[21:17]; defaults keep the MGMT queue and no AGG_EN. */
+  TxDescConfig agg = ht;
+  agg.short_gi = false;
+  agg.qsel = 0;
+  agg.agg_en = true;
+  agg.max_agg_num = 16;
+  agg.ampdu_density = 7;
+  agg.hw_seq = true;
+  expect("A-MPDU descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), agg));
+  expect("A-MPDU fields land",
+         (desc[0x05] & 0x1f) == 0 && ((desc[0x09] >> 4) & 1) == 1 &&
+             ((desc[0x0a] >> 4) & 0x7) == 7 &&
+             (((desc[0x0e] | (desc[0x0f] << 8)) >> 1) & 0x1f) == 16 &&
+             ((desc[0x21] >> 7) & 1) == 1 &&
+             rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+  expect("default descriptor keeps the MGMT queue and no AGG_EN",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ht) &&
+             (desc[0x05] & 0x1f) == rtl8733b::kTxQselManagement &&
+             ((desc[0x09] >> 4) & 1) == 0 && ((desc[0x21] >> 7) & 1) == 0);
+  TxDescConfig bad_agg = agg;
+  bad_agg.max_agg_num = 0x20;
+  expect("MAX_AGG_NUM wider than 5 bits rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), bad_agg));
+
+  /* CCX request + tag: SPE_RPT dword2[19] and SW_DEFINE dword6[11:0], both
+   * inside the checksummed span, so the fold must still close. */
+  TxDescConfig rpt = ht;
+  rpt.short_gi = false;
+  rpt.spe_rpt = true;
+  rpt.sw_define = 0xa5;
+  expect("SPE_RPT descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), rpt));
+  expect("SPE_RPT lands in dword2 bit 19", ((desc[0x0a] >> 3) & 1) == 1);
+  expect("SW_DEFINE lands in dword6[11:0]",
+         desc[0x18] == 0xa5 && (desc[0x19] & 0x0f) == 0);
+  expect("SPE_RPT descriptor checksum closes",
+         rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+  rpt.spe_rpt = false;
+  rpt.sw_define = 0;
+  std::array<uint8_t, rtl8733b::kTxDescSize> plain{};
+  expect("no-report descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(plain.data(), plain.size(), rpt));
+  expect("report fields off leaves dword2/dword6 untouched",
+         ((plain[0x0a] >> 3) & 1) == 0 && plain[0x18] == 0 &&
+             (plain[0x19] & 0x0f) == 0);
+  TxDescConfig bad_tag = rpt;
+  bad_tag.sw_define = 0x1000;
+  expect("SW_DEFINE wider than 12 bits rejected",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), bad_tag));
+  expect("MCS7 descriptor rebuilds for the checksum probes",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ht));
+
   const uint16_t original_checksum =
       static_cast<uint16_t>(desc[28] | (desc[29] << 8));
   desc[39] ^= 0xff;
@@ -130,10 +197,6 @@ int main() {
   invalid.short_gi = true;
   expect("legacy SGI rejected",
          !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
-  invalid = ht;
-  invalid.ldpc = true;
-  expect("RTL8733B LDPC rejected",
-         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
   invalid = ofdm;
   invalid.packet_offset = 2;
   expect("oversized USB boundary shim rejected",
@@ -162,7 +225,7 @@ int main() {
 
   /* The modulation-admission contract shared by the SetTxMode and radiotap
    * branches of Rtl8733bDevice::build_tx_block. Asserting it here is what makes
-   * the SGI/LDPC/STBC and second-stream refusals a tested property rather than
+   * the STBC and second-stream refusals a tested property rather than
    * a doc claim — the descriptor encoder has no STBC field to reject on. */
   expect("HT MCS0-7 BCC at 20/40 MHz admitted",
          rtl8733b::ht_request_supported_8733b(0, 20, false, false, false) &&
@@ -171,10 +234,12 @@ int main() {
          !rtl8733b::ht_request_supported_8733b(8, 20, false, false, false));
   expect("HT 80 MHz refused",
          !rtl8733b::ht_request_supported_8733b(7, 80, false, false, false));
-  expect("HT SGI refused",
-         !rtl8733b::ht_request_supported_8733b(7, 20, true, false, false));
-  expect("HT LDPC refused",
-         !rtl8733b::ht_request_supported_8733b(7, 20, false, true, false));
+  expect("HT short GI admitted",
+         rtl8733b::ht_request_supported_8733b(7, 20, true, false, false) &&
+             rtl8733b::ht_request_supported_8733b(0, 40, true, false, false));
+  expect("HT LDPC admitted",
+         rtl8733b::ht_request_supported_8733b(7, 20, false, true, false) &&
+             rtl8733b::ht_request_supported_8733b(0, 40, false, true, false));
   expect("HT STBC refused",
          !rtl8733b::ht_request_supported_8733b(7, 20, false, false, true));
   expect("legacy 20 MHz BCC admitted",

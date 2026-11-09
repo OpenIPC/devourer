@@ -202,9 +202,57 @@ things that header cannot tell you:
   `tx_rate_id_8733b` returns a `0xff` sentinel off 2.4 GHz/20 MHz, and that
   same range check refuses the sentinel rather than encoding it.
 
-The SGI refusal is the one worth re-opening: the descriptor bit was set and the
-frame submitted, but the witness decoded long GI. Descriptor and air disagree,
-and the reason is not yet understood.
+**SGI airs, and the old refusal measured the witness.** The record said a
+descriptor-SGI probe decoded as long GI at an RTL8812AU; the descriptor bit
+(dword5[4]) is exactly the vendor's injection placement and nothing in the
+vendor tree enables SGI anywhere else, so the air was measured decode-free
+instead: SDR burst-length histogram (`tests/sdr_burst_len.py`, ch36, 1500 B
+frames, 4 ms gap), b733 unit against an RTL8822BU control transmitter.
+MCS0/20: 1890 us bin long GI -> 1700 us short GI on both parts (computed
+1920/1732 for 471 data symbols at 4.0/3.6 us); MCS7/20: 220 -> 200 us on
+both. An RTL8822BU witness then decoded 8733B MCS7/20/SGI at 98.6% (1987/2015
+distinct payload counters) against 96.9% (1953/2015) long GI, every frame at
+rate index 19. SGI is therefore admitted for HT (`ht_request_supported_8733b`)
+and advertised (`TxCaps.sgi_ok`). What the witnesses here cannot do is
+*report* GI — only the Jaguar1 RX descriptor path exposes it, and no Jaguar1
+unit was on the bench — so the per-frame `rx.frame.sgi` cross-check remains
+unrun; the SDR shape is the primary evidence and does not depend on any
+parser. One unit, one control, one witness; 2.4 GHz SGI unmeasured.
+
+**LDPC TX airs; the global enable was the blocker, and RX-LDPC is absent.**
+The descriptor bit (dword5[7]) is the vendor's placement, and it is gated by
+`REG_BF_TIMEOUT_EN` 0x1430[8] (`BIT_EN_HT_LDPC_8733B`): MAC init leaves
+0x1430 = 0x0300, the vendor's default build never touches it (its clear sits
+under `CONFIG_TWO_MAC_DRIVER`), and the first port cleared both bits on the
+belief that raw HT only worked that way. Four cells, b733 → RTL8822BU
+witness (`rx.frame.ldpc` per frame), MCS7/20, 2015 frames each, ch36:
+
+| 0x1430[8] | descriptor LDPC | delivered | witness LDPC flag |
+|---|---|---|---|
+| cleared (old port) | 0 | 98.5% | 0 on all |
+| set (vendor) | 0 | 98.5% | 0 on all |
+| set (vendor) | 1 | 98.0% | **1 on all** |
+| cleared | 1 | 98.2% | 0 on all — the bit is silently ignored |
+
+So BCC is unaffected by the enable, the enable is what makes the descriptor
+bit real, and the register now stays at the vendor value (the MAC readback
+check requires it). The counterparts: the other direction is dead — the same
+b733 decoded **0 of 1542** MCS7/20/LDPC frames from the 8822BU against
+1435/1542 (93%) BCC in the same shape, so `ldpc_rx_*` stay false and the
+vendor's TX-only LDPC declaration is confirmed rather than inherited. And
+the coding gain is **not measured**: a three-point TX-power-offset probe
+(0 / −64 / −96 qdB, the loop's floor) kept both codings at 79–89% delivery
+near-field, with BCC-vs-LDPC differences of −7 and +3 points — inside the
+±3-point single-probe noise this repo warns about. `tests/ldpc_waterfall.sh`
+cannot run here as written (it steps the flat TXAGC index this family
+refuses), and a near-field bench has no waterfall to trace anyway; the
+"+3 dB at the 10% crossing" figure from the Jaguars is not claimed for this
+die.
+
+**STBC stays refused, with the vendor's reason.** `core/rtw_xmit.c` leaves
+`pattrib->stbc` unset on injected frames with the comment "873xb has only
+1tx; enable it will cause irregular TX spectrum"; a 1T1R part has nothing to
+space-time code across, and the encoder writes no STBC field.
 
 ## FastRetune
 
@@ -240,19 +288,13 @@ untouched) and fall back to the full path.
 
 ## Not ported
 
-`ReadTsf`/beacons, A-MPDU, CCX `tx.report` per-frame TX outcomes (the
-TX-report engine — CCX **CLM** busy airtime IS ported, see below),
-`FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
+`ReadTsf`/beacons, `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
-relative `SetTxPowerOffsetQdb` is ported), `rx.path` per-chain telemetry,
-and CCA disable. These inherit `IRadio`'s not-ported defaults (`false`,
-`0`, or a full-path fallback) rather than being faked. `SetCcaMode` is the one
-exception to the silent-default rule: it is pure virtual, so `true` throws
-loudly — without tearing the session down, since an unported optional knob is
-not a hardware-safety event — while `false` succeeds as a no-op because that is
-the state MAC bring-up already leaves programmed.
+relative `SetTxPowerOffsetQdb` is ported) and `rx.path` per-chain telemetry.
+These inherit `IRadio`'s not-ported defaults (`false`, `0`, or a full-path
+fallback) rather than being faked.
 
-The TX-power knobs are the other exceptions, in the same spirit:
+The TX-power knobs are the exceptions to the silent-default rule:
 
 - `SetTxPowerOffsetQdb` **refuses loudly and returns 0** on a unit whose EFUSE
   carries no TSSI calibration, rather than reporting a successful zero-offset
@@ -271,23 +313,54 @@ The TX-power knobs are the other exceptions, in the same spirit:
   `SetTxPowerRateDiffs` needs no such override: its `false` return already says
   it.
 
-`DeviceConfig::tuning::disable_cca` cannot be honoured either, and bring-up
-warns rather than dropping it — a config knob must not be the one door where a
-request the setter refuses loudly instead vanishes without a word. The warning
-sits in `bring_up_to_phy`, not `InitWrite`, so an RX-only session that set the
-knob is told too, and so it fires exactly once per bring-up.
+## Carrier-sense gates
+
+`SetCcaGates` / `GetCcaGates` / `SetCcaMode` are ported on the Jaguar3 recipe,
+and the register map is not a guess: `halmac_bit_8733b.h` names `0x0520[14]`
+`BIT_DIS_CCA_8733B`, `[15]` `BIT_DIS_EDCCA_8733B` and `0x0524[11]`
+`BIT_EDCCA_MSK_CNTDOWN_EN_8733B`, and the shipped MAC init table writes
+`0x520 = 0x6f` (both gates ON). MAC bits only — the vendor's BB CCA-off
+writes (`0x1d58[11:3]`, and this die's own `0x2a24[13]` CCK-CCA bit, which
+`Phy8733b` toggles only around a band switch) stop detection and deafen the
+RX. `tests/cca_gates_regcheck.sh` passes every cell on the b733 (api, regs,
+cntdown, legacy, retune + fast-retune within and across bands; the `track`
+cell skips — no EDCCA tracker runs here). Bring-up resets the pair to
+`tuning.disable_cca` (MAC init rewrites 0x520), retunes re-assert it.
+
+On air, this family agrees with Jaguar3 about which bit matters. The b733
+injecting MCS3 at maximum duty on ch36, host submit rate in fps over the
+~5 s TX window, three repeats each:
+
+| cell | gates on | primary `[14]` off | EDCCA `[15]` off | both off |
+|---|---|---|---|---|
+| alone (this bench's ch36 ambient) | 3008 / 2938 / 3015 | 6903 / 6914 / 7021 | — | — |
+| co-channel 8822BU 6M flooder | 4001 / 4159 / 4079 | 7148 / 7237 / 7127 | 4100 / 4140 / 4112 | 7206 / 7131 / 7162 |
+| far-channel (ch149) flooder | 2920 / 3011 / 2911 | 7147 / 7036 / 7080 | 3043 / 2942 / 2926 | — |
+
+Three things to read off it, with their counterparts. "Alone" is not an idle
+channel: this bench's ch36 carries a resident network, and carrier-sense
+costs the injector 57% of its rate against it, which is why the primary gate
+buys 2.3× with no flooder of ours running (one earlier alone cell read
+6934 fps — ambient varies, and a single alone reading is not a baseline).
+Against the co-channel flooder the injector keeps 57% with the gates on and
+recovers to the gates-off ceiling (~7.15k) with `[14]` cleared, 1.75×. The
+far-channel flooder costs nothing beyond ambient (2.95k vs 3.0k alone), so
+there is no USB-contention term to subtract on this pairing. EDCCA alone is
+null in every arm. One unit, one flooder, one channel; the RX-decode side with
+the gates off decodes the same flood as with them on (`DEVOURER_DIS_CCA=1`
+rxdemo cell, below), so the MAC-bits-only rule holds here as on Jaguar3.
 
 ## Hardware ARQ
 
-Two of the three hardware-ARQ knobs are measured true on this die; the third is
-refused loudly because the backend lacks the control path needed to complete
-its diagnosis safely.
+All three hardware-ARQ knobs — the ACK responder, the retry limit and the
+per-frame CCX `tx.report` — are measured true on this die.
 
 The detailed ARQ characterization below used the original `f72b` RTL8731BU,
 an RTL8812AU peer, and an RTL8812CU passive witness. The live responder-disarm
 cell was independently repeated on the `b733` sample by the maintainer and on
-a second vehicle-mounted `f72b`; both agreed. No vendor-driver A/B exists, and
-the other ARQ rows remain single-bench results rather than population
+a second vehicle-mounted `f72b`; both agreed. The vendor-driver control
+(`docs/rtl8733b.md` "Vendor-driver control") covers raw TX/RX decode, not
+these ARQ rows, which remain single-bench results rather than population
 qualification. Witness copy counts are conservative observations because a
 passive monitor can miss airings.
 
@@ -354,8 +427,7 @@ produced 128,702 at 1.001 plus 14,402 addressed `0x94` BlockAcks, every one
 carrying a nonzero bitmap. Both arms were real A-MPDUs (`paggr` 0.665/1.000,
 max burst 9). The control-frame event checks RA=the Jaguar2 TA and TA=the
 configured RTL8733B MAC, so ambient BlockAcks do not count. This establishes
-the RTL8733B responder on that measured combination only. RTL8733B A-MPDU
-**TX** remains unported and unmeasured.
+the RTL8733B responder on that measured combination only.
 
 **`tx.retry_limit` drives real autonomous retransmission** — `tx_retry_limit_ok`
 is true. `tests/rtl8733b_retry_limit_onair.sh` judges from the air because this
@@ -370,36 +442,105 @@ The retry-12 shortfall from the ideal 13 may be passive-monitor loss or
 genuinely fewer airings, so the ratio is reported as an observation, not an
 exact hardware count.
 
-**CCX `tx.report` is NOT ported, and its root cause is unresolved.** This is
-the per-frame TX-outcome engine, a different thing from the CCX **CLM**
-busy-airtime measurement documented under "Frame-free sensing" below, which
-is ported and measured. The
-descriptor and receive-side investigation narrows the problem but does not
-prove a firmware defect: SPE_RPT is dword2[19] and SW_DEFINE dword6[11:0] via
-the generic halmac
-NIC macros the 8733B maps straight onto (`hal/halmac/halmac_tx_desc_chip.h`
-maps `SET_TX_DESC_{SPE_RPT,SW_DEFINE}_8733B` onto the non-V2 pair, not the
-0x20/0x24 V2 placement), and a probe build confirmed the bit set in a live
-descriptor; the RX side already decodes C2H at the vendor's own dword2[28]
-(`GET_RX_DESC_C2H_8733B`); the delivery path is bulk-IN, which is what the
-vendor uses (its USB interrupt handler is an empty stub behind an undefined
-config); and the vendor's C2H dispatch confirms this firmware speaks the
-fw-offload format `parse_ccx_halmac` already decodes (`C2H_EXTEND` 0xFF +
-sub_cmd 0x0F, `hal/rtl8733b/rtl8733b_cmd.c`). With an RX loop live and 3160
-frames received, the firmware returned **zero** C2H packets in any format —
-with and without a net_type armed, and with the peer both ACKing and silent.
-The leading missing prerequisite is the halmac H2C queue plus a
-MEDIA_STATUS_RPT registering the descriptor MACID with the firmware; this
-backend has no H2C transport. Until that path is implemented and tested, the
-absence of reports cannot be assigned to firmware. The knob warns at bring-up
-rather than stamping descriptors that are not known to produce anything —
-`tx.report` requested on this die is refused out loud, not silently dropped.
+**CCX `tx.report` is ported, and the thing that hid it was the bring-up, not
+the firmware.** The descriptor stamps are the generic halmac pair the 8733B
+macros alias (`SPE_RPT` dword2[19], `SW_DEFINE` dword6[11:0], inside the
+checksummed span — `TxDescriptor8733b.h`), the report is the fw-offload C2H pkt
+`0xFF`/`0x0F` that `src/TxReport.h`'s `parse_ccx_halmac` already decodes, and
+it rides bulk-IN like every frame, so the RX loop hands it to `DeliverTxReport`
+when the descriptor's C2H bit is set. None of that was ever the gap. The gap
+was `download_firmware` skipping the download when `MCUFW_CTRL` said a firmware
+was already running: that image answers the ready poll and consumes H2C, but
+emits **no C2H at all**. Measured on the b733 unit, MCS3 unicast, ~950 frames
+per 8 s cell, RTL8822BU responder: after a download 920-970 reports per cell;
+on a reused image 0, in every arm — including arms that first cleared the
+0x0420 report gates and sent MEDIA_STATUS_RPT. The vendor reloads at every hal
+init, and so does this backend now (~200 ms of a ~2.8 s USB-HS bring-up).
 
-Consequence a consumer should plan around: the measured 8733BU can be **either
-end** of a normal-ACK hardware-ARQ link, but it cannot see per-frame delivery.
-`TxReport.state == 1`
-— the retry write-off that says a peer stopped ACKing — is unavailable here, so
-detecting a departed peer needs an application-level timeout.
+Two firmware facts that fell out of the same bench, both measured rather than
+read:
+
+- **MEDIA_STATUS_RPT (H2C 0x01) is not a prerequisite.** With a fresh image the
+  reports flow for the descriptor MACID whether or not the firmware was told
+  the MACID is a connected station (arm with neither mechanism: 920/935).
+  The mailbox itself is ported (`Halmac8733bMac::send_h2c`, the legacy HMEBOX
+  path at 0x01CC/0x01D0/0x01F0 the vendor USB driver uses — its halmac
+  packet-queue H2C is SDIO-only) and `rtl8733bprobe`'s `fw` stage uses a
+  consumed MEDIA_STATUS_RPT as the MCU-liveness check; the bring-up sends no
+  H2C.
+- **`REG_FWHW_TXQ_CTRL` 0x0420 bit 18 (`BIT_TXFAILRPT_DIS`, a bit the 88xx
+  siblings' maps do not name) selects the report shape.** MAC init leaves it
+  set, and the firmware then emits one terminal report per frame — the
+  Jaguar2/3 shape (`state` 0 on ACK, 1 with `retries` at the limit on a dead
+  peer). Clearing it makes the firmware report every failed attempt: 12036
+  reports for 941 frames to a dead RA at retry limit 12 (one per retry with the
+  running count, then the terminal one), while an ACKed stream stays at one
+  per frame. Not exposed — a consumer counting reports per frame would be
+  misled by it — but it is a real per-attempt retry trace if one is ever
+  wanted. Bit 19 (`BIT_TXRPT_DIS`) reads clear after init.
+
+The shipped shape, `tests/ack_txreport_matrix.sh` with the 8733B as the
+soliciting TX (`CELLS="8733b:0x0bda:0xb733" RESP_PID=0xb812`, ch36, MCS3,
+retry limit 12, 8 s per phase): on 1.00 ACK / 0.01 mean retries, retarget
+1.00 / 0.02, off 0.00 ACK with retries pinned 12.0 (pin rate 1.00), report
+coverage 0.984-0.985, zero SW_DEFINE tag gaps. `missed` is the constant 4 on
+every report, as on the 8812CU — drop detection is the tag, not that field.
+One unit, one responder, one bench; the mixed case (a frame ACKed after some
+retries) shows up as `retries` 1-4 in the on cells and nothing more was
+measured about it.
+
+Consequence a consumer can now plan on: the measured 8733BU is a complete
+hardware-ARQ endpoint — responder, autonomous retry, and the per-frame delivery
+report, so `TxReport.state == 1` (the peer stopped ACKing) is available here
+like on the Jaguars. The reports need an RX loop (`DEVOURER_TX_WITH_RX=thread`
+in txdemo), the same as Jaguar1/2.
+
+## A-MPDU TX
+
+`SetAmpduMode` is ported, and the two things that make it work here are
+measured rather than copied from Jaguar2. The descriptor half is the generic
+halmac placement (data QSEL dword1[12:8], `AGG_EN` dword2[12], density
+dword2[22:20], `MAX_AGG_NUM` dword3[21:17]); the QSEL also picks the bulk-OUT
+endpoint through `TXDMA_PQ_MAP` (BE/BK → LOW, VI/VO → NORMAL, MGMT → HIGH,
+`ep_for_qsel`), as the vendor's `rtw_get_ff_hwaddr` does. On its own that
+half does nothing on this die: with `AGG_EN`, a data QSEL, 0x0456 at 0x20,
+0x04BC[6] cleared and three frames per URB, the b733 aired every frame as a
+single (RTL8812EU witness `paggr` 0.00, control: an RTL8822BU through the
+same witness reads `paggr` 1.00), at ~305 fps.
+
+- **The MAC aggregates only frames it numbers itself.** `EN_HWSEQ`
+  (dword8[15]), which the vendor sets on every data frame and the inject path
+  does not, flipped `paggr` from 0.00 to 1.00 with nothing else changed. So an
+  aggregated frame's sequence number is the MAC's SSN counter, not the
+  caller's; a consumer that keys on its own sequence numbers must not run
+  this mode (the payload counter, `DEVOURER_TX_QOS_DATA` + `DEVOURER_RX_PCTR`,
+  is the right ledger for it).
+- **Data queues are paced by the EDCA TXOP limit, not by 0x0456/0x04BC.**
+  Isolated by QSEL alone (same endpoint, no `AGG_EN`): BE ~310 fps, VO
+  ~600 fps, MGMT ~2600 fps — the vendor init's BE parameter 0x005ea42b holds
+  each launch for 0x5e × 32 µs ≈ 3.0 ms and VO's 0x2f for 1.5 ms; MACID 0 vs
+  1, MEDIA_STATUS_RPT and the endpoint changed nothing. Zeroing the TXOP limit
+  took the BE queue to 1446 fps alone and, with `EN_HWSEQ`, to the aggregated
+  figures below. `SetAmpduMode` zeroes the TID's AC register (0x0500/04/08/0c)
+  and restores it on clear; 0x0456 and 0x04BC are programmed too, measured
+  inert here.
+
+Delivered distinct payload counters per second at the RTL8812EU witness,
+ch36, 1000 B QoS-Data, no-ack (`0/16/7/1/0x20`), ~9 s cells:
+
+| | singles (MGMT queue) | A-MPDU, 3 frames/URB (`send_packets`) | A-MPDU, depth-1 `send_packet` |
+|---|---|---|---|
+| MCS7/20 | 2050/s | **3829/s** (+87%, `paggr` 1.00) | 3671/s (+79%) |
+| MCS3/20 | 1360/s | **1758/s** (+29%) | — |
+
+Counterparts: one unit, one witness, a busy ch36 (the singles baseline moved
+between 2050 and 2700/s across the session, so the gain is the within-run
+ratio, not the absolute); the witness reports `paggr` but not burst
+boundaries (every MPDU carries its own `tsfl` on the 8812EU), so the
+aggregate size is unmeasured; the unicast-ARQ shape (BlockAck responder,
+`no_ack=0`) that cost Jaguar2 −8% at MCS3 was not run here; and the depth-1
+result means this die aggregates from a sync single-frame feed too, unlike
+the Jaguar2 recipe's batched-feed requirement.
 
 ## Validation status
 
@@ -417,8 +558,12 @@ cross-decode with an RTL8812CU narrowband peer on both bands, legacy and HT;
 packets across the whole DAC/ADC divider code space, with a
 continuous-carrier failure mode observed warm
 (`DEVOURER_NB_DAC`/`DEVOURER_NB_ADC` map the codes for any future attempt).
-No vendor-driver A/B control was obtained (its module does not build on
-modern kernels). The full tested/deferred matrix, the provenance pins and the
+The vendor module builds and runs on the 6.18 host
+(`tests/rtl8733b_vendor_build.sh`, `tests/rtl8733b_vendor_ko_smoke.sh`); the
+`regress.py` encoding matrices against a devourer RTL8822BU peer are in
+`docs/rtl8733b.md` "Vendor-driver control" — RX parity on every encoding on
+both bands, including zero HT-LDPC under both drivers. The full
+tested/deferred matrix, the provenance pins and the
 second `f72b` unit that overheated and was excluded: `docs/rtl8733b.md`.
 
 Headless coverage: `tests/rtl8733b_{efuse,phy_table,rx_parse,tx_desc}_selftest.cpp`
@@ -458,18 +603,15 @@ that same flooder at 69% as well, so the two device paths onto the JGR3 map
 agree on one load. The retune and premature-read spoilers each refused with
 their reason, and a re-armed window never returned the previous latched value.
 
-**`src/sensing/` cannot reach this reading.** `SenseWindow` picks its source
-by whether the `IRtlRadio*` is non-null rather than by `rx_energy_ok`, so on
-this die it takes the phydm branch and never arms or reads CLM —
-`examples/chanscout` on an RTL8733B reports neither. That is a sensing-layer
-bug this die is merely the first to expose; it is described, with what a fix
-needs, in `src/sensing/CLAUDE.md`. Until it lands, a caller on this die
-reaches `IRadio::ArmChannelBusy`/`GetChannelBusy` directly.
+**`src/sensing/` reaches this reading through the armed window.**
+`SenseWindow` gates its source on `AdapterCaps::rx_energy_ok` (false here) and
+arms `ArmChannelBusy` to the dwell the executor carries, so a `chanscout` on
+this die records CLM busy airtime per dwell (`src/sensing/CLAUDE.md`).
 
-**The CCA gate cannot bias the reading here.** CLM counts CCA-busy, so a
-session with CCA disabled would under-report — but `SetCcaMode` throws "CCA
-disable is not implemented by this backend" on this die, so that state is
-unreachable rather than merely unlikely.
+**The CCA gate can bias the reading.** CLM counts CCA-busy, so a session that
+has disabled the gates (`SetCcaGates`, `DEVOURER_DIS_CCA`) may under-report
+busy airtime; whether it does on this die is unmeasured. Read the gate state
+with `GetCcaGates` beside a CLM figure.
 
 **`Stop()` forgets the window, and that is not obvious.** A stop is not a
 retune, so nothing would spoil an armed window — but clearing `_phy_ready`

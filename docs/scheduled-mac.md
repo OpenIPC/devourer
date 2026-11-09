@@ -226,10 +226,14 @@ scheduled MAC runs TX+RX anyway, so this is the relevant session shape.
 | Jaguar1 8812AU | 1.00 / 0.34 | 1.00 / 0.25 | yes (12) | 1.00 | n/a (8812 fmt) |
 | Jaguar2 8812BU | 0.91 / 2.1 (run-to-run 0.12–0.91) | 0.64 / 5.3 | yes (12) | 0.86 | 0 |
 | Jaguar3 8822CU | 1.00 / 0.24 | 1.00 / 0.13 | yes (12) | 0.96 | 0 |
+| RTL8733B 8733BU (8822BU responder) | 1.00 / 0.01 | 1.00 / 0.02 | yes (12, pin rate 1.00) | 0.98 | 0 |
 
-The RTL8733B is deliberately absent from this CCX table: no `tx.report` events
-arrive on that backend, so these columns cannot be filled for it. Independent
-airtime evidence does cover its soliciting side: a passive RTL8812CU witness
+The RTL8733B row is a later measurement (`CELLS="8733b:0x0bda:0xb733"
+RESP_PID=0xb812`, same ch36/MCS3/retry-12 shape, the RTL8822BU as responder
+because the 8814AU was not on that bench). Its reports exist only on a
+firmware the session loaded itself — bring-up reloads for that reason
+(`src/rtl8733b/CLAUDE.md`). Independent airtime evidence also covers its
+soliciting side, measured before the reports were reached: a passive RTL8812CU witness
 measured 1.032 copies/frame with an RTL8812AU responder armed versus 12.948
 with it off at MCS3; at 11M CCK the corresponding values were 1.002/11.908.
 Its dead-peer retry dose response was 0/3/12 -> 1.00/4.00/12.32–12.33 copies/frame.
@@ -374,10 +378,10 @@ carry this table per die.
    stalled spsc-fat pool drained ~3 k frames in one receipt interval; the
    8192 default clears that bench worst case ~2.7×).
 2. **Closed-loop hardware ACK + autonomous retry is GO on Jaguar1, Jaguar3 and
-   the RTL8733B** (the CCX delivery/retry figures apply to the Jaguars; the
-   one-sample 8733B closes the loop as responder at 1725/1725 and as soliciting
-   TX collapses from 12.948 to 1.032 witnessed copies/frame at MCS3, but has no
-   per-frame report of its own — `docs/rtl8733b.md`)
+   the RTL8733B** (the one-sample 8733B closes the loop as responder at
+   1725/1725, as soliciting TX collapses from 12.948 to 1.032 witnessed
+   copies/frame at MCS3, and its own CCX reports fill the table above —
+   `docs/rtl8733b.md`)
    including retargeting an
    arbitrary UE MAC mid-session (re-arm `SetAckResponder`, change the
    descriptor RA — both fully dynamic). Requires a nonzero

@@ -306,9 +306,10 @@ struct DeviceConfig {
      * `tx.report` events. The TX-side link sensor. On the HalMAC chips the
      * descriptor SW_DEFINE also carries a rotating 8-bit tag the report
      * echoes (per-frame correlation). Default off (descriptors
-     * byte-identical). Needs an RX loop to deliver the C2H reports. RTL8733B
-     * is an explicit exception: its backend has no H2C/MEDIA_STATUS_RPT path,
-     * warns that the request is unsupported, and emits no `tx.report` events.
+     * byte-identical). Needs an RX loop to deliver the C2H reports. On the
+     * RTL8733B the reports exist only on a firmware the session itself loaded
+     * — a running image reused across a card power cycle emits no C2H — so
+     * that backend reloads the firmware at every bring-up.
      *
      * Value = sampling divisor N: 1 requests a report on EVERY frame, N > 1
      * on every Nth (0..255). The CCX emission path saturates at ~1.3–1.4 k

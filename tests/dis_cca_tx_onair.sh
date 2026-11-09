@@ -28,6 +28,7 @@
 #
 # Usage: sudo -v && tests/dis_cca_tx_onair.sh            # all configs
 #        ONLY=eu5g REPS=3 sudo -v && tests/dis_cca_tx_onair.sh
+#        ONLY=b7335g FLOOD_PID=0xb812 sudo -v && tests/dis_cca_tx_onair.sh   # RTL8733B, 8822BU flooder
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${DISCCATX_OUT:-/tmp/devourer-dis-cca-tx}"
@@ -40,7 +41,8 @@ mkdir -p "$OUT"
 VID=0x0bda
 EU_PID=0xa81a                     # RTL8812EU/8822EU — Jaguar3, the community chip
 CU_PID=0xc812                     # RTL8812CU — Jaguar3 rtl8822c sibling
-FLOOD_PID=0x8812                  # RTL8812AU — universal co-channel flooder (dual-band)
+B733_PID=0xb733                   # RTL8733BU — HALMAC 87xx, same 0x520 gate map
+FLOOD_PID="${FLOOD_PID:-0x8812}"  # RTL8812AU — universal co-channel flooder (dual-band); any dual-band TX works
 
 flood_pid=""
 cleanup() { [ -n "$flood_pid" ] && { kill "$flood_pid" 2>/dev/null; wait "$flood_pid" 2>/dev/null; }; true; }
@@ -130,6 +132,7 @@ for cfg in $ONLY; do
         eu5g)  run_config "$EU_PID" 36 149 "EU5G"  ;;
         cu5g)  run_config "$CU_PID" 36 149 "CU5G"  ;;
         eu24g) run_config "$EU_PID" 6  149 "EU24G" ;;   # 2.4 GHz DUT, 5 GHz far-control
+        b7335g) run_config "$B733_PID" 36 149 "B733-5G" ;; # RTL8733B; INJ_PWR is inert there (flat index refused). NB the verdict line assumes an idle "alone" channel — on a ch36 with a resident network alone < co-chan and it prints inconclusive; read the raw dis1/dis0 recovery
         *) echo "unknown config: $cfg" ;;
     esac
 done

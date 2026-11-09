@@ -28,6 +28,12 @@ constexpr uint16_t kExpectedId = 0x8129;
 /* HALMAC 87xx / RTL8733B normal-mode register plane. Values are transcribed
  * from halmac_reg2.h and halmac_init_8733b.c at vendor commit 9e5f684. */
 constexpr uint16_t kRegCr = 0x0100;
+/* H2C mailbox (halmac_reg_8733b.h): REG_HMETFR busy bits, REG_HMEBOX0..3 the
+ * command dwords, REG_HMEBOX_E0..E3 the extension dwords. */
+constexpr uint16_t kRegHmetfr = 0x01cc;
+constexpr uint16_t kRegHmebox0 = 0x01d0;
+constexpr uint16_t kRegHmeboxExt0 = 0x01f0;
+constexpr unsigned kH2cBoxCount = 4;
 constexpr uint16_t kRegTxdmaPqMap = 0x010c;
 constexpr uint16_t kRegRxBoundary = 0x0116;
 constexpr uint16_t kRegRqpnHlpq = 0x0200;
@@ -178,7 +184,7 @@ bool MacState::matches_normal_usb3out() const {
          reserved_boundary == kReservedBoundary &&
          rx_boundary == kRxBoundary && cr == kMacTrxEnable &&
          (rxdma_mode & 0x0e) == 0x0e && rx_agg == kUsbRxAgg8733b &&
-         rcr == kRcrNormal && (ldpc_control & 0x0300u) == 0;
+         rcr == kRcrNormal && (ldpc_control & 0x0300u) == 0x0300u;
 }
 
 Halmac8733bMac::Halmac8733bMac(RtlAdapter device, Logger_t logger)
@@ -749,13 +755,16 @@ bool Halmac8733bMac::initialize(const EfuseInfo &efuse) {
   init_usb();
   program_mac(efuse.mac);
 
-  /* RTL8733B monitor injection is BCC-only. The vendor's two-MAC path also
-   * clears REG_BF_TIMEOUT_EN[9:8] (VHT/HT LDPC global enables); leaving those
-   * firmware-owned bits set can suppress raw HT injection even when the
-   * per-frame DATA_LDPC descriptor bit is zero. Keep both layers explicit. */
-  const uint16_t ldpc_before = _device.rtw_read16(kRegBfTimeout);
-  _device.rtw_write16(kRegBfTimeout,
-                      static_cast<uint16_t>(ldpc_before & 0xfcffu));
+  /* REG_BF_TIMEOUT_EN 0x1430[9:8] (VHT/HT LDPC global enables) stays at the
+   * MAC-init value 0x0300, as in the vendor's default build (its clear lives
+   * under CONFIG_TWO_MAC_DRIVER, never defined). Bit 8 gates the descriptor
+   * DATA_LDPC bit: measured on the b733 with an RTL8822BU witness, MCS7/20,
+   * ~2000 frames — bit set, LDPC-stamped frames decode with the witness's
+   * LDPC flag on at 98.0% and BCC frames still at 98.5%; bit clear, an
+   * LDPC-stamped frame airs as BCC (flag 0, 98.2%). An earlier port cleared
+   * both bits on the belief that raw HT only worked that way; it did not
+   * reproduce. */
+  const uint16_t ldpc_ctrl = _device.rtw_read16(kRegBfTimeout);
 
   const MacState state = read_mac_state();
   const bool mac_matches =
@@ -777,9 +786,9 @@ bool Halmac8733bMac::initialize(const EfuseInfo &efuse) {
   _logger->info(
       "RTL8733B MAC: initialized pq=0x{:04x} boundary={} public={} "
       "RXDMA=0x{:02x} RXAGG=0x{:04x} RCR=0x{:08x} "
-      "LDPC=0x{:04x}->0x{:04x}",
+      "LDPC_EN=0x{:04x}",
       state.pq_map, state.reserved_boundary, kPublicPages, state.rxdma_mode,
-      state.rx_agg, state.rcr, ldpc_before, state.ldpc_control);
+      state.rx_agg, state.rcr, ldpc_ctrl);
   return true;
 }
 
@@ -806,6 +815,81 @@ bool Halmac8733bMac::configure_monitor_rx(bool keep_corrupted) {
       _device.rtw_read8(kRegRxPacketLimit + 3) & 0x0f,
       _device.rtw_read16(kRegCr));
   return ok;
+}
+
+bool Halmac8733bMac::send_h2c(const std::array<uint8_t, 8> &cmd,
+                              uint32_t *waited_us) {
+  const uint8_t box = _h2c_box;
+  /* The vendor polls 100 x 1 ms. Poll finer here: a free slot is the normal
+   * case and the per-call cost is one register read. */
+  const auto start = std::chrono::steady_clock::now();
+  bool free_slot = false;
+  for (unsigned attempt = 0; attempt < 1000; ++attempt) {
+    if ((_device.rtw_read8(kRegHmetfr) & (1u << box)) == 0) {
+      free_slot = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  const auto waited = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - start);
+  if (waited_us != nullptr)
+    *waited_us = static_cast<uint32_t>(waited.count());
+  if (!free_slot) {
+    _logger->error("RTL8733B H2C: mailbox {} never freed (REG_HMETFR=0x{:02x}) "
+                   "— firmware is not consuming commands",
+                   box, _device.rtw_read8(kRegHmetfr));
+    return false;
+  }
+  const uint32_t ext = le32(cmd.data() + 4);
+  const uint32_t main = le32(cmd.data());
+  const bool ok =
+      _device.rtw_write32(static_cast<uint16_t>(kRegHmeboxExt0 + 4u * box),
+                          ext) &&
+      _device.rtw_write32(static_cast<uint16_t>(kRegHmebox0 + 4u * box),
+                          main);
+  /* Consumption check: the firmware clears the box bit when it has read the
+   * command. Observed on the bench to take well under a millisecond. The slot
+   * index advances only once the command is known consumed — a failed write
+   * or an unconsumed box leaves the firmware waiting on THIS slot, and moving
+   * on would put every later command one slot ahead of it. */
+  bool consumed = false;
+  if (ok) {
+    for (unsigned attempt = 0; attempt < 50; ++attempt) {
+      if ((_device.rtw_read8(kRegHmetfr) & (1u << box)) == 0) {
+        consumed = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+  }
+  if (consumed)
+    _h2c_box = static_cast<uint8_t>((box + 1) % kH2cBoxCount);
+  _logger->debug("RTL8733B H2C: id=0x{:02x} box={} slot_wait={}us write_ok={} "
+                 "consumed={} bytes={:02x} {:02x} {:02x} {:02x} {:02x} {:02x} "
+                 "{:02x} {:02x}",
+                 cmd[0], box, waited.count(), ok, consumed, cmd[0], cmd[1],
+                 cmd[2], cmd[3], cmd[4], cmd[5], cmd[6], cmd[7]);
+  if (ok && !consumed)
+    _logger->warn("RTL8733B H2C: firmware did not consume mailbox {} within "
+                  "5 ms (REG_HMETFR=0x{:02x})",
+                  box, _device.rtw_read8(kRegHmetfr));
+  return ok && consumed;
+}
+
+bool Halmac8733bMac::media_status_rpt(uint8_t macid, bool connected,
+                                      uint8_t role) {
+  /* hal_com_h2c.h _MEDIA_STATUS_RPT_PARM_CMD_0x01: byte0 OPMODE[0]
+   * MACID_IND[1] MIRACAST[2] MIRACAST_SINK[3] ROLE[7:4]; byte1 MACID; byte2
+   * MACID_END (unused with MACID_IND=0); byte3 PORT_NUM[2:0]. */
+  std::array<uint8_t, 8> cmd{};
+  cmd[0] = 0x01;
+  cmd[1] = static_cast<uint8_t>((connected ? 1u : 0u) |
+                                (static_cast<unsigned>(role & 0x0f) << 4));
+  cmd[2] = macid;
+  cmd[3] = 0;
+  cmd[4] = 0;
+  return send_h2c(cmd);
 }
 
 void Halmac8733bMac::stop() {

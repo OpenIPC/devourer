@@ -77,24 +77,23 @@ rule specifically needs `DEVOURER_SCOUT_FULLWIDTH_MS > 0` against a 40/80 MHz
 candidate, because a headless test can only prove the call sequence, never that
 the chip actually came back to 20 MHz.
 
-## Known gap: a backend with busy airtime and no phydm counters
+## A backend with busy airtime and no phydm counters
 
-`SenseWindow::read` chooses its source by whether the `IRtlRadio*` is
-non-null, not by `AdapterCaps::rx_energy_ok`. The RTL8733B derives from
-`IRtlRadio`, implements no `GetRxEnergy`, and answers `GetChannelBusy()` only
-through an armed CLM window — so on that die the window takes the phydm branch,
-gets the all-invalid base energy read, and never calls `GetChannelBusy()`.
-`examples/chanscout` constructs exactly that shape (a `dynamic_cast` that
-succeeds on the die) and reports neither CLM nor NHM there. Every other backend
-is unaffected: on the Jaguar families both flags are true, and on the MT7612U
-the cast fails and the neutral branch runs.
-
-Gating the branch on the capability is necessary but not sufficient. An unarmed
-`GetChannelBusy()` on that backend falls back to the energy read and yields
-nothing, and nothing in this subtree calls `ArmChannelBusy` — the arm needs an
-observation window sized to the dwell, which no layer between
-`ScanPlanConfig::dwell_ms` and `SenseWindow` carries (`DwellExecConfig` stamps a
-settle but no dwell). Arming also changes behaviour on the Jaguar families,
-where the NHM read spoils the same engine, which is what `dwell_executor`
-pins. So the fix is a capability gate plus a dwell-sized arm, with its own
-selftest arm — a design change here, not a rider on a backend port.
+`SenseWindow` chooses its source by capability, not by pointer type: a
+non-null `IRtlRadio*` only means Realtek, and whether phydm FA/CCA/NHM
+counters exist is `AdapterCaps::rx_energy_ok`, resolved once at construction
+(false on the RTL8733B and Kestrel, which derive from `IRtlRadio` and answer
+busy airtime through an armed window). On such a backend the window takes the
+busy path, and when the caller carries its dwell (`SenseOptions::busy_window_us`
+from `DwellExecConfig::dwell_ms`, which `chanscout` sets from the plan's
+`dwell_ms`) `barrier()` arms the hardware window to it and `read()` returns the
+figure over the whole dwell; a backend that cannot arm, or a caller carrying
+no dwell, gets the sampled read-and-clear path as before. The Jaguar families
+are untouched — their dwells still read phydm counters, and nothing arms the
+NHM engine they share. `tests/dwell_exec_selftest.cpp` pins both: the
+RTL8733B shape arms-then-reads (`fast:36,arm:100000,busy`, the armed figure
+lands in `clm_ratio_pct`, no energy, no read-failed flag) and the same shape
+with no dwell samples twice and records nothing. On hardware: `chanscout` on
+an RTL8733BU, plan `36,44,149`, 100 ms dwells, an RTL8822BU flooding ch36 —
+ch36 71.7% mean (68–75) over 64 dwells, ch44 2.3%, ch149 0.8%, `busy_src` 1
+(CLM) on all 191 dwells.

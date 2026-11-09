@@ -152,7 +152,10 @@ struct AdapterCaps {
    * on-air. The TX side lives in TxCaps.ldpc_ok. HT and VHT are separate
    * decoder paths in silicon, so the flags split: the RTL8821A field failure
    * ("PixelPilot can't RX LDPC from Eachine Sphere Link") is VHT-only. --- */
-  bool ldpc_rx_ht = false;  /* baseband decodes LDPC-coded HT PPDUs */
+  bool ldpc_rx_ht = false;  /* baseband decodes LDPC-coded HT PPDUs. RTL8733B:
+                             * measured false — 0/1542 LDPC MCS7 frames vs
+                             * 93% BCC from an 8822BU — while its TX-LDPC
+                             * (TxCaps.ldpc_ok) is measured true. */
   bool ldpc_rx_vht = false; /* baseband decodes LDPC-coded VHT PPDUs */
   /* Per-frame LDPC *reporting*: RxAtrib.ldpc is populated (RX-descriptor bit
    * on the 8812A die, PHY-status byte7[5] on Jaguar2/3). False on the 8814A —
@@ -249,8 +252,9 @@ struct AdapterCaps {
    * tx_retry_limit_ok: DEVOURER_TX_RETRY_LIMIT drives hardware autonomous
    * retransmission (measured 12/0/12 A/B: 8821AU, 8812BU, 8822CU; the 8733B
    * by airtime dose-response instead, 0/3/12 -> 1.00/4.00/12.32–12.33 airings per
-   * frame, because that die has no CCX path to judge its own frames
-   * (tests/rtl8733b_retry_limit_onair.sh); Kestrel
+   * frame — measured before that die's CCX reports were reached; its own
+   * tx.report off cell since pins 12.0 mean retries at 0.98 report coverage
+   * (tests/rtl8733b_retry_limit_onair.sh, tests/ack_txreport_matrix.sh); Kestrel
    * 8832CU witness-measured — the AX WD DATA_TXCNT_LMT field counts
    * ATTEMPTS, folded +1 to the N-retries contract, limits {0,2,8} -> modal
    * on-air copies {1,3,8-9}; the MT7612U by its own TX status FIFO -

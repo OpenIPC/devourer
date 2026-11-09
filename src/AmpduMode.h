@@ -19,6 +19,12 @@
  *      ~3 ms — 0x20 unlocks it to ~0.8 ms (the register is a CLIFF: values
  *      <= 0x08 disable aggregation entirely). Clearing 0x04BC BIT6 (halmac
  *      sets it) is worth ~+40% on the aggregated path (8822B-proven).
+ *      The RTL8733B needs two more things, neither a knob here: the MAC
+ *      aggregates only frames it numbers itself (EN_HWSEQ, which the backend
+ *      sets on every aggregated frame — the caller's sequence number is
+ *      replaced), and its data queues are paced by the EDCA TXOP limit
+ *      (~3 ms per launch on BE), which SetAmpduMode zeroes for the TID's AC
+ *      and restores on clear. src/rtl8733b/CLAUDE.md has the measurements.
  *
  * WHICH FRAMES the descriptor half applies to: DATA frames. On Jaguar3 that
  * is enforced - management and control frames keep their own queue (QSEL

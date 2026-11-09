@@ -42,7 +42,8 @@ Jaguar1 (shared `PhyTableLoader`).
   RTL8852CE on the same host over PCIe as the witness, 6M, 10,000
   frames/cell (`tests/pcie_8822ce_onair.sh --witness-bdf`): ch36 witness→BE
   94.0%, BE→witness 99.8%, hop 36/40/44 with the witness on each channel
-  33.4 / 33.4 / 32.9%; ch6 78.2% / 97.0%, hop 1/6/11 31.6 / 32.2 / 32.6%.
+  33.4 / 33.4 / 32.9%; ch6 78.2% / 97.0% (repeat 79.0% / 96.6%), hop
+  1/6/11 31.6 / 32.2 / 32.6% (repeat 31.8 / 32.4 / 32.6%).
   `tests/pcie_rx_smoke.py` 1395/938 ambient beacons on ch6/ch36, 0 CRC
   fails; 0 AER errors on this card. One module, one witness, one rate: the
   BE's own receive side is the weaker leg (94% on a quiet ch36 against the

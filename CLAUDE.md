@@ -83,23 +83,24 @@ the TP-Link TX50UH is RTL8832**C**U (8852C-family) despite lab lore calling it
 supported, RTL8733B**S** is the SDIO sibling and has no transport here. Full
 chip / bench-throughput table: README **Supported hardware**.
 
-**PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): three parts ride their
+**PCIe** (`DEVOURER_PCIE=ON`, Linux-only, default OFF): four parts ride their
 USB siblings' HALs unchanged through one vfio-pci transport
 (`src/PcieTransport.{h,cpp}`: BAR2 MMIO registers, the caller owns vfio like
-it owns libusb). The RTL8821CE (PCIe 8821CU) is the Jaguar2 HAL and the
-RTL8822CE (PCIe 8822CU, `10ec:c822`, chip-id `0x13`) the Jaguar3 HAL, both
-over the same 88xx buffer-descriptor DMA rings (`src/PcieDma88xx.cpp` — the
-two dies share the ring register map and BD geometry, so only the HAL-side
-`is_usb()` gates differ: power sequence, queue map, EFUSE MAC offset,
-`src/jaguar3/CLAUDE.md`); the RTL8852CE
+it owns libusb). The RTL8821CE (PCIe 8821CU) and RTL8822BE (PCIe 8822BU,
+`10ec:b822`, chip-id `0x0a`) are the Jaguar2 HAL and the RTL8822CE (PCIe
+8822CU, `10ec:c822`, chip-id `0x13`) the Jaguar3 HAL, all over the same 88xx
+buffer-descriptor DMA rings (`src/PcieDma88xx.cpp` — the three dies share
+the ring register map and BD geometry, so only the HAL-side `is_usb()` gates
+differ: power sequence, queue map, interface-PHY MDIO table, EFUSE MAC
+offset — `src/jaguar2/CLAUDE.md`, `src/jaguar3/CLAUDE.md`); the RTL8852CE
 (PCIe 8852CU, `10ec:c852`) is the Kestrel HAL over the AX HAXI plane
 (`src/PcieDmaAx.cpp`: 13 TXBD rings, WD pages + addr_info over a per-page
 payload bounce, CH12 fwcmd slots for FWDL/H2C, RXQ/RPQ rings with
 release-report page recycling — the rtw89 host contract, since the vendor
 USB drop ships no PCIe ring driver). `Open()` picks the plane from the PCI
 device id; the factory dispatches `c852` before reading the Jaguar chip-id
-(`0x09` → Jaguar2, `0x13` → Jaguar3), and refuses the RTL8852BE (`b852`,
-power sequence unported). USB and PCIe are
+(`0x09`/`0x0a` → Jaguar2, `0x13` → Jaguar3), and refuses the RTL8852BE
+(`b852`, power sequence unported). USB and PCIe are
 independent transports behind `devourer::ITransport` (`src/Transport.h`);
 the bus-neutral `RtlAdapter` forwards to whichever it was built with. The
 bus-specific bring-up steps gate on `is_usb()` or ride `hci_setup()` — the
@@ -140,7 +141,8 @@ JAGUAR1), `DEVOURER_JAGUAR2_8822B`, `DEVOURER_JAGUAR2_8821C`,
 `DEVOURER_JAGUAR3_8822C`, `DEVOURER_JAGUAR3_8822E`, `DEVOURER_8733B`,
 `DEVOURER_KESTREL_8852B`, `DEVOURER_KESTREL_8852C`.
 `DEVOURER_PCIE` (default OFF, Linux-only, requires at least one of
-JAGUAR2_8821C / JAGUAR3_8822C / KESTREL_8852C) adds the vfio-pci transport +
+JAGUAR2_8821C / JAGUAR2_8822B / JAGUAR3_8822C / KESTREL_8852C) adds the
+vfio-pci transport +
 `pcieprobe`; OFF builds are byte-identical to before it existed. Turning groups off drops their firmware
 blobs + PHY tables (an 8812AU-only `rxdemo` is ~1.6 MB vs ~6.3 MB all-on — the
 verbatim-vendored Kestrel halbb/halrf plane dominates the difference).

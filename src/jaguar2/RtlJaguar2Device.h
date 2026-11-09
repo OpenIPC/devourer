@@ -417,6 +417,13 @@ private:
   /* StartRxLoop stop request (StopRxLoop). volatile (not atomic) to match the
    * signal-flag pattern used across the library (g_devourer_should_stop). */
   volatile bool _rx_stop = false;
+  /* True while the RX reap loop runs; pcie_quiesce waits for it to return
+   * before the card-disable sequence stops the DMA under it. */
+  std::atomic<bool> _rx_running{false};
+  /* PCIe only: stop the chip's DMA before the transport unmaps the slab
+   * (Stop() and the destructor; idempotent). */
+  void pcie_quiesce();
+  bool _pcie_quiesced = false;
 
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
 

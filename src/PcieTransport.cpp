@@ -14,7 +14,8 @@
 #include <unistd.h>
 
 #include "Event.h"
-#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR3_8822C)
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR2_8822B) || \
+    defined(DEVOURER_HAVE_JAGUAR3_8822C)
 #include "PcieDma88xx.h"
 #endif
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
@@ -52,6 +53,7 @@ std::shared_ptr<PcieTransport> PcieTransport::Open(const std::string &bdf,
     return nullptr;
   if (!t->init_dma())
     return nullptr;
+  t->enable_bus_master();
   if (cfg.use_msi && t->_dma->uses_msi() && !t->setup_msi())
     logger->warn("PcieTransport: MSI setup failed — RX falls back to polling");
   logger->info("PcieTransport: {} ready ({} plane, BAR2 {} KiB, DMA slab {} "
@@ -60,6 +62,13 @@ std::shared_ptr<PcieTransport> PcieTransport::Open(const std::string &bdf,
                t->_cfg.iova_base,
                t->_msi_evt >= 0 ? "MSI+eventfd" : "polled");
   return t;
+}
+
+void PcieTransport::enable_bus_master() {
+  uint16_t cmd = 0;
+  cfg_read(0x04, &cmd, 2);
+  cmd |= 0x4 /* MASTER */;
+  cfg_write(0x04, &cmd, 2);
 }
 
 bool PcieTransport::select_dma_plane() {
@@ -81,16 +90,18 @@ bool PcieTransport::select_dma_plane() {
                    _pci_vid, _pci_did);
     return false;
   default:
-#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR3_8822C)
-    /* The HalMAC 88xx ring plane (RTL8821CE and RTL8822CE share its register
-     * map and BD geometry); the factory still checks the chip-id. */
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR2_8822B) || \
+    defined(DEVOURER_HAVE_JAGUAR3_8822C)
+    /* The HalMAC 88xx ring plane (RTL8821CE, RTL8822BE and RTL8822CE share
+     * its register map and BD geometry); the factory still checks the
+     * chip-id. */
     _dma = std::make_unique<PcieDma88xx>(*this, _logger, _cfg.rx_ring_len,
                                          _cfg.rx_buf_size, _cfg.rx_poll_us);
     return true;
 #else
     _logger->error("PcieTransport: PCI device {:04x}:{:04x} has no DMA plane "
-                   "in this build (DEVOURER_JAGUAR2_8821C=OFF and "
-                   "DEVOURER_JAGUAR3_8822C=OFF)",
+                   "in this build (DEVOURER_JAGUAR2_8821C, _8822B and "
+                   "DEVOURER_JAGUAR3_8822C all OFF)",
                    _pci_vid, _pci_did);
     return false;
 #endif
@@ -301,7 +312,12 @@ bool PcieTransport::setup_config_space() {
    * but no DMA moves — the classic silent-failure trap. */
   uint16_t cmd = 0;
   cfg_read(0x04, &cmd, 2);
-  cmd |= 0x2 /* MEMORY */ | 0x4 /* MASTER */;
+  /* MEMORY now; bus mastering only once init_dma has mapped the slab (see
+   * Open): a chip the previous session left armed — or one a kernel driver
+   * owned — fetches its ring descriptors the instant mastering turns on,
+   * and before the mapping exists that is an IOMMU fault at the stale IOVA
+   * (seen on an RTL8822BE whose prior session had not quiesced). */
+  cmd = static_cast<uint16_t>((cmd | 0x2 /* MEMORY */) & ~0x4 /* MASTER off */);
   cfg_write(0x04, &cmd, 2);
 
   /* Find the PCI Express capability (id 0x10) for LNKCTL / DEVCTL2. */

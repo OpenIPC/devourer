@@ -58,9 +58,11 @@ public:
    * the buffer-descriptor ring the transport programs pre-power-on. */
   void init_usb_cfg();
 
-  /* PCIe interface-PHY config (rtw_pci_phy_cfg's 8821C gen1 MDIO write).
-   * PCIe backend only; run once before the first power-on. */
-  void pcie_phy_cfg();
+  /* PCIe interface-PHY config (rtw_pci_phy_cfg): the die's gen1/gen2 MDIO
+   * tables, each row gated on the chip cut (0=A; SYS_CFG1 is readable on the
+   * unpowered MAC, so this runs before the first power-on). Returns false
+   * when any applicable row timed out. PCIe only. */
+  bool pcie_phy_cfg(uint8_t cut);
 
   /* halmac send_general_info_88xx: hand the booted firmware its PHY/RF
    * identity — two 32-byte H2C packets on the H2C queue (qsel 0x13):
@@ -90,6 +92,7 @@ public:
   uint16_t cfg_param_loc() const;
 
 private:
+  bool mdio_write(uint8_t addr, uint16_t data, bool g1); /* REG_MDIO_V1 window */
   bool priority_queue_cfg();
   void init_h2c();
   /* One 32-byte halmac H2C packet -> H2C queue (48-byte txdesc, qsel 0x13). */

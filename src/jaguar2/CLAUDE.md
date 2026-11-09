@@ -2,8 +2,8 @@
 
 Deep per-generation facts for this subtree, loaded alongside the root
 CLAUDE.md. Chips: RTL8822BU / RTL8812BU (chip-id `0x0a`) and RTL8811CU /
-RTL8821CU (chip 8821C, chip-id `0x09`); the RTL8821CE (PCIe) rides this same
-HAL through `PcieTransport`.
+RTL8821CU (chip 8821C, chip-id `0x09`); the RTL8821CE and RTL8822BE (PCIe)
+ride this same HAL through `PcieTransport` (see **PCIe** below).
 
 ## HAL layout
 
@@ -18,6 +18,39 @@ Jaguar1 (shared `PhyTableLoader`).
 
 ## Chip facts
 
+- **PCIe (RTL8821CE, RTL8822BE)**: both dies ride `PcieDma88xx` unchanged
+  (the 8822B's ring register map and BD geometry are the 8821C's); the port
+  is HAL gates on `is_usb()`, with rtw88 v6.12 `rtw8821c.c`/`rtw8822b.c`/
+  `pci.c` as the reference. Shared: `hci_setup()` per bring-up attempt before
+  `pre_init_system_cfg` (the power sequence clears `0x300/0x301`), `0x74[8]`
+  instead of the USB-page `0xFE5B` write, no `init_usb_cfg`, MGQ → EXQ with
+  the extra-queue pages the die's PCIe page table gives it (8821CE 14,
+  8822BE 64), the `PFM_WOWL` poll-retry, the EFUSE MAC at logical `0xD0`
+  (`rtw8821ce_efuse` == `rtw8822be_efuse`; USB keeps it at `0x107`).
+  Per-die: `kPwrOn/Off8821cPcie` vs `kPwrOn/Off8822bPcie` (the 8822B keeps
+  its cut-C `0x10A8..AA` and `0x29/0x24/0xAF` tail, drops the USB `0x20[0]`
+  + 1 ms, `0x00[5]`, `0xFF0A/B`, `0xFF1A`, `0x10C3` rows), and the
+  interface-PHY MDIO table (`pcie_phy_cfg(cut)`): the 8821C's one
+  cut-independent write, the 8822B's twenty cut-C rows (a cut-D unit, the
+  lab's HP module, writes none). The completion-timeout disable is
+  8821CE-only (rtw88), left on for the 8822BE.
+  Teardown on PCIe runs `pcie_quiesce` (`Stop()` and the destructor) —
+  the card-disable sequence is what stops the RX DMA engine; the why is at
+  the function. The 8822B's interface-PHY MDIO rows are cut-C-gated and run
+  before the first power-on (the cut reads on the unpowered MAC).
+  Measured 8822BE (one HP `103c:831b` module, cut D, j6412-1) vs an
+  RTL8852CE on the same host over PCIe as the witness, 6M, 10,000
+  frames/cell (`tests/pcie_8822ce_onair.sh --witness-bdf`): ch36 witness→BE
+  94.0%, BE→witness 99.8%, hop 36/40/44 with the witness on each channel
+  33.4 / 33.4 / 32.9%; ch6 78.2% / 97.0% (repeat 79.0% / 96.6%), hop
+  1/6/11 31.6 / 32.2 / 32.6% (repeat 31.8 / 32.4 / 32.6%).
+  `tests/pcie_rx_smoke.py` 1395/938 ambient beacons on ch6/ch36, 0 CRC
+  fails; 0 AER errors on this card. One module, one witness, one rate: the
+  BE's own receive side is the weaker leg (94% on a quiet ch36 against the
+  8822CE's 99% in the same harness shape, 78% on a busy ch6) — an antenna
+  or module figure as much as a chip one, unmeasured beyond this pair — and
+  the 8821CE was not re-run after the teardown change (its host was off the
+  network).
 - **5/10 MHz narrowband on both variants**: a baseband ADC/DAC re-clock
   packed into BB `0x8ac`; the RF stays in 20 MHz mode; applied as an
   end-of-bring-up retune. The 8822B RF synth only re-latches on an RF18

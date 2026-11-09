@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# On-air cells for the RTL8822CE (Jaguar3 HAL over the 88xx ring plane) on
-# vfio-PCIe, witnessed by a USB Realtek adapter on the same host (the lab
-# box z890p carries the 8822CE at 0000:85:00.0 and an RTL8812AU). Every
+# On-air cells for an 88xx-ring-plane card on vfio-PCIe — the RTL8822CE
+# (Jaguar3) it was written for, or the RTL8822BE / RTL8821CE (Jaguar2) via
+# --bdfs — witnessed by a USB Realtek adapter on the same host (the lab box
+# z890p carries the 8822CE at 0000:85:00.0 and an RTL8812AU) or, with
+# --witness-bdf, by a second devourer PCIe card (j6412-1: the 8822BE at
+# 0000:09:00.0 against its RTL8852CE at 0000:05:00.0). Every
 # cell counts `rx.txhit` events (frames carrying the canonical injection SA,
 # see examples/tx/main.cpp) against the frames the transmitter submitted, so
 # a number here is a delivery figure for ONE direction of ONE pair; the
@@ -9,7 +12,10 @@
 #
 #   sudo tests/pcie_8822ce_onair.sh                       # defaults below
 #   sudo tests/pcie_8822ce_onair.sh --channel 6 --frames 2000     # quick look
-#   sudo tests/pcie_8822ce_onair.sh --usb 0bda:c811       # another witness
+#   sudo tests/pcie_8822ce_onair.sh --usb 0bda:c811       # another USB witness
+#   sudo tests/pcie_8822ce_onair.sh --bdfs 0000:09:00.0 --witness-bdf 0000:05:00.0
+#       # any 88xx-plane card (here an RTL8822BE) with a PCIe witness (an
+#       # RTL8852CE on the same host) in place of the USB adapter
 #
 # Cells:  usb->pcie   pcie->usb   then the hop cell: the PCIe card injects
 # while FastRetune-hopping over $HOP_CHANNELS and the witness sits on each of
@@ -29,6 +35,7 @@ set -u
 BDFS="0000:85:00.0"
 USB_VID=0x0bda
 USB_PID=0x8812
+WITNESS_BDF=""        # set: the witness is a devourer PCIe card, not USB
 CHANNEL=36
 BAND=0
 FRAMES=10000
@@ -44,6 +51,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --bdfs) BDFS="$2"; shift 2 ;;
     --usb) USB_VID="0x${2%%:*}"; USB_PID="0x${2##*:}"; shift 2 ;;
+    --witness-bdf) WITNESS_BDF="$2"; shift 2 ;;
     --channel) CHANNEL="$2"; shift 2 ;;
     --band) BAND="$2"; shift 2 ;;
     --hop) HOP_CHANNELS="$2"; shift 2 ;;
@@ -85,8 +93,14 @@ for bdf in "${BDF_LIST[@]}"; do
   echo "  $bdf bound to vfio-pci"
 done
 aer_count() { journalctl -k -b 0 --no-pager 2>/dev/null | grep -c "${BDF_LIST[0]}: PCIe Bus Error" || true; }
-lsusb -d "${USB_VID#0x}:${USB_PID#0x}" >/dev/null || { echo "FAIL: USB DUT ${USB_VID}:${USB_PID} not present" >&2; exit 1; }
-echo "  USB DUT ${USB_VID}:${USB_PID} present"
+if [ -n "$WITNESS_BDF" ]; then
+  bash "$HERE/pcie_host_prep.sh" "$WITNESS_BDF" >/dev/null \
+    || { echo "FAIL: host prep / vfio bind of witness $WITNESS_BDF" >&2; exit 1; }
+  echo "  witness $WITNESS_BDF bound to vfio-pci"
+else
+  lsusb -d "${USB_VID#0x}:${USB_PID#0x}" >/dev/null || { echo "FAIL: USB DUT ${USB_VID}:${USB_PID} not present" >&2; exit 1; }
+  echo "  USB DUT ${USB_VID}:${USB_PID} present"
+fi
 
 # run_cell NAME RX_KIND RX_SEL TX_KIND TX_SEL [RX_CHANNEL] [TX_HOP_SPEC]
 #   KIND = pcie|usb; SEL = bdf for pcie, ignored for usb. RX_CHANNEL
@@ -107,9 +121,13 @@ run_cell() {
     tx_env+=(DEVOURER_HOP_CHANNELS="$hop" DEVOURER_HOP_DWELL_FRAMES="$HOP_DWELL_FRAMES"
              DEVOURER_HOP_FAST=1)
   fi
+  # "usb" is the witness role: a USB adapter by VID:PID, or the PCIe card
+  # named by --witness-bdf.
   if [ "$rxk" = pcie ]; then rx_env+=(DEVOURER_PCIE_BDF="$rxsel");
+  elif [ -n "$WITNESS_BDF" ]; then rx_env+=(DEVOURER_PCIE_BDF="$WITNESS_BDF");
   else rx_env+=(DEVOURER_VID="$USB_VID" DEVOURER_PID="$USB_PID"); fi
   if [ "$txk" = pcie ]; then tx_env+=(DEVOURER_PCIE_BDF="$txsel");
+  elif [ -n "$WITNESS_BDF" ]; then tx_env+=(DEVOURER_PCIE_BDF="$WITNESS_BDF");
   else tx_env+=(DEVOURER_VID="$USB_VID" DEVOURER_PID="$USB_PID"); fi
 
   env "${rx_env[@]}" timeout -s INT $((LIVENESS_S + RX_SETTLE_S + FRAMES * GAP_US / 1000000 + 40)) \

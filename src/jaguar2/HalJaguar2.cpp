@@ -138,8 +138,8 @@ const PwrCfg kPwrOff8821cUsb[] = {
 };
 
 #if defined(DEVOURER_HAVE_PCIE)
-/* PCIe (RTL8821CE) power sequences, transcribed from the in-tree rtw88
- * rtw8821c.c tables (v6.12 — the driver proven on this exact silicon), keeping
+/* PCIe power sequences, transcribed from the in-tree rtw88 tables (v6.12 —
+ * the driver proven on this exact silicon). RTL8821CE from rtw8821c.c, keeping
  * the PCI- and ALL-interface rows and dropping USB/SDIO-only steps. The
  * PCI-only enable rows gate the PCIe reference clock/power (0x75[0] toggle
  * around the 0x06[1] poll, 0x74[5], 0x22[1] clear, 0x62/0x61 bit dance) —
@@ -166,6 +166,58 @@ const PwrCfg kPwrOn8821cPcie[] = {
      static_cast<uint8_t>(B(7) | B(6) | B(5))},
     {0x0061, PC_WRITE, static_cast<uint8_t>(B(7) | B(6) | B(5)), 0},
     {0x007C, PC_WRITE, B(1), 0},
+    {0, PC_END, 0, 0},
+};
+
+/* RTL8822BE: rtw88 rtw8822b.c PCI + ALL rows. Beside the common PCIe gates
+ * (0x300/0x301 ring regs cleared pre-power, 0x75[0] toggled around the
+ * 0x06[1] poll, 0x74[5]) this die keeps the cut-C 0x10A8..AA writes and the
+ * 0x29/0x24/0xAF tail the USB table has; the USB-only 0x4A, 0x20[0]+1 ms,
+ * 0x00[5], 0xFF0A/B, 0xFF1A and 0x10C3 rows are absent. */
+const PwrCfg kPwrOn8822bPcie[] = {
+    /* --- card-disable -> card-emulation --- */
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4) | B(7)), 0},
+    {0x0300, PC_WRITE, 0xFF, 0},
+    {0x0301, PC_WRITE, 0xFF, 0},
+    /* --- card-emulation -> active --- */
+    {0x0012, PC_WRITE, B(1), 0},
+    {0x0012, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3) | B(2)), 0},
+    {0x0075, PC_WRITE, B(0), B(0)},
+    {0x0006, PC_POLL, B(1), B(1)},
+    {0x0075, PC_WRITE, B(0), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, B(7), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3)), 0},
+    {0x0005, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_POLL, B(0), 0},
+    {0x0020, PC_WRITE, B(3), B(3)},
+    {0x10A8, PC_WRITE, 0xFF, 0},
+    {0x10A9, PC_WRITE, 0xFF, 0xef},
+    {0x10AA, PC_WRITE, 0xFF, 0x0c},
+    {0x0029, PC_WRITE, 0xFF, 0xF9},
+    {0x0024, PC_WRITE, B(2), 0},
+    {0x0074, PC_WRITE, B(5), B(5)},
+    {0x00AF, PC_WRITE, B(5), B(5)},
+    {0, PC_END, 0, 0},
+};
+
+const PwrCfg kPwrOff8822bPcie[] = {
+    /* --- active -> card-emulation --- */
+    {0x0093, PC_WRITE, B(3), 0},
+    {0x001F, PC_WRITE, 0xFF, 0},
+    {0x00EF, PC_WRITE, 0xFF, 0},
+    {0x0049, PC_WRITE, B(1), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0002, PC_WRITE, B(1), 0},
+    {0x0005, PC_WRITE, B(1), B(1)},
+    {0x0005, PC_POLL, B(1), 0},
+    {0x0020, PC_WRITE, B(3), 0},
+    /* --- card-emulation -> card-disable --- */
+    {0x0067, PC_WRITE, B(5), 0},
+    {0x0005, PC_WRITE, B(2), B(2)},
+    {0x0081, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), 0},
+    {0x0090, PC_WRITE, B(1), 0},
     {0, PC_END, 0, 0},
 };
 
@@ -235,7 +287,8 @@ void HalJaguar2::power_off() {
       _variant == ChipVariant::C8821C ? kPwrOff8821cUsb : kPwrOff8822bUsb;
 #if defined(DEVOURER_HAVE_PCIE)
   if (!_device.is_usb())
-    seq = kPwrOff8821cPcie; /* only the 8821CE exists on PCIe */
+    seq = _variant == ChipVariant::C8821C ? kPwrOff8821cPcie
+                                          : kPwrOff8822bPcie;
 #endif
   run_pwr_seq(_device, seq, /*poll_max=*/2000, /*poll_fatal=*/false);
   _logger->info("Jaguar2: power-off (card-disable) sequence applied");
@@ -247,7 +300,8 @@ void HalJaguar2::power_on() {
       _variant == ChipVariant::C8821C ? kPwrOn8821cUsb : kPwrOn8822bUsb;
 #if defined(DEVOURER_HAVE_PCIE)
   if (!_device.is_usb())
-    seq = kPwrOn8821cPcie;
+    seq = _variant == ChipVariant::C8821C ? kPwrOn8821cPcie
+                                          : kPwrOn8822bPcie;
 #endif
   run_pwr_seq(_device, seq, /*poll_max=*/5000, /*poll_fatal=*/true);
   _logger->info("Jaguar2: power-on sequence complete (card active)");
@@ -350,7 +404,10 @@ uint8_t HalJaguar2::efuse_logical_byte(uint16_t off) {
 }
 
 bool HalJaguar2::perm_mac(uint8_t out[6]) {
-  constexpr uint16_t kMacOff = 0x107; /* EEPROM_MAC_ADDR_8822BU == _8821CU */
+  /* The EFUSE's per-interface section: USB keeps the MAC at logical 0x107
+   * (EEPROM_MAC_ADDR_8822BU == _8821CU), the PCIe layout at 0xD0
+   * (rtw8821ce_efuse == rtw8822be_efuse). */
+  const uint16_t kMacOff = _device.is_usb() ? 0x107 : 0x00D0;
   if (out == nullptr)
     return false;
   for (int i = 0; i < 6; ++i)

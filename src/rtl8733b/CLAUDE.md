@@ -202,9 +202,22 @@ things that header cannot tell you:
   `tx_rate_id_8733b` returns a `0xff` sentinel off 2.4 GHz/20 MHz, and that
   same range check refuses the sentinel rather than encoding it.
 
-The SGI refusal is the one worth re-opening: the descriptor bit was set and the
-frame submitted, but the witness decoded long GI. Descriptor and air disagree,
-and the reason is not yet understood.
+**SGI airs, and the old refusal measured the witness.** The record said a
+descriptor-SGI probe decoded as long GI at an RTL8812AU; the descriptor bit
+(dword5[4]) is exactly the vendor's injection placement and nothing in the
+vendor tree enables SGI anywhere else, so the air was measured decode-free
+instead: SDR burst-length histogram (`tests/sdr_burst_len.py`, ch36, 1500 B
+frames, 4 ms gap), b733 unit against an RTL8822BU control transmitter.
+MCS0/20: 1890 us bin long GI -> 1700 us short GI on both parts (computed
+1920/1732 for 471 data symbols at 4.0/3.6 us); MCS7/20: 220 -> 200 us on
+both. An RTL8822BU witness then decoded 8733B MCS7/20/SGI at 98.6% (1987/2015
+distinct payload counters) against 96.9% (1953/2015) long GI, every frame at
+rate index 19. SGI is therefore admitted for HT (`ht_request_supported_8733b`)
+and advertised (`TxCaps.sgi_ok`). What the witnesses here cannot do is
+*report* GI — only the Jaguar1 RX descriptor path exposes it, and no Jaguar1
+unit was on the bench — so the per-frame `rx.frame.sgi` cross-check remains
+unrun; the SDR shape is the primary evidence and does not depend on any
+parser. One unit, one control, one witness; 2.4 GHz SGI unmeasured.
 
 ## FastRetune
 

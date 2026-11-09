@@ -72,8 +72,8 @@ construction from the `SYS_CFG2` chip-id (Kestrel: PID-first):
   the flat-index and per-rate TX-power knobs) falls through to `IRadio`/`IRtlRadio`'s
   not-ported defaults rather than being faked, so read the base class before
   assuming a cross-generation feature below applies here. `FastRetune` IS
-  ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI, LDPC, STBC, VHT
-  and HE are refused outright. Scope, one-unit validation record and the
+  ported (intra-band, TSSI kept live — `src/rtl8733b/CLAUDE.md`). SGI is advertised
+  (SDR burst length + witness decode); LDPC, STBC, VHT and HE are refused outright. Scope, one-unit validation record and the
   deferred matrix: `docs/rtl8733b.md`.
 
 Naming traps: **RTL8821AU is Jaguar1** (not Jaguar2, despite the Jaguar2

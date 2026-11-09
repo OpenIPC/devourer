@@ -190,7 +190,7 @@ int main() {
 
   /* The modulation-admission contract shared by the SetTxMode and radiotap
    * branches of Rtl8733bDevice::build_tx_block. Asserting it here is what makes
-   * the SGI/LDPC/STBC and second-stream refusals a tested property rather than
+   * the LDPC/STBC and second-stream refusals a tested property rather than
    * a doc claim — the descriptor encoder has no STBC field to reject on. */
   expect("HT MCS0-7 BCC at 20/40 MHz admitted",
          rtl8733b::ht_request_supported_8733b(0, 20, false, false, false) &&
@@ -199,8 +199,9 @@ int main() {
          !rtl8733b::ht_request_supported_8733b(8, 20, false, false, false));
   expect("HT 80 MHz refused",
          !rtl8733b::ht_request_supported_8733b(7, 80, false, false, false));
-  expect("HT SGI refused",
-         !rtl8733b::ht_request_supported_8733b(7, 20, true, false, false));
+  expect("HT short GI admitted",
+         rtl8733b::ht_request_supported_8733b(7, 20, true, false, false) &&
+             rtl8733b::ht_request_supported_8733b(0, 40, true, false, false));
   expect("HT LDPC refused",
          !rtl8733b::ht_request_supported_8733b(7, 20, false, true, false));
   expect("HT STBC refused",

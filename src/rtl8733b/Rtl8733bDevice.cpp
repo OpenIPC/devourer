@@ -829,6 +829,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
 
   /* A per-packet radiotap rate below remains authoritative. Rate-less frames
    * use the same SetTxMode default as the established backends and txdemo. */
+  bool short_gi = false;
   if (_tx_mode_default) {
     const auto &mode = *_tx_mode_default;
     /* One predicate covers the family (VHT/HE refused outright) and its
@@ -842,6 +843,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
     } else {
       fixed_rate = static_cast<uint8_t>(MGN_MCS0 + mode.ht_mcs);
       frame_width = mode.bw_mhz == 40 ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_20;
+      short_gi = mode.sgi;
     }
   }
 
@@ -856,6 +858,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
     case IEEE80211_RADIOTAP_RATE:
       fixed_rate = *iterator.this_arg;
       frame_width = CHANNEL_WIDTH_20;
+      short_gi = false;
       break;
     case IEEE80211_RADIOTAP_CHANNEL:
       requested_channel =
@@ -872,6 +875,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
         return 0;
       fixed_rate = static_cast<uint8_t>(MGN_MCS0 + m.mcs);
       frame_width = m.bw40 ? CHANNEL_WIDTH_40 : CHANNEL_WIDTH_20;
+      short_gi = m.sgi != 0;
       break;
     }
     case IEEE80211_RADIOTAP_VHT:
@@ -922,7 +926,7 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
   cfg.agg_num = agg_num;
   cfg.retry_limit = static_cast<uint8_t>(
       std::clamp(_cfg.tx.retry_limit, 0, 63));
-  cfg.short_gi = false;
+  cfg.short_gi = short_gi;
   cfg.ldpc = false;
   cfg.bmc = bmc;
   if (_cfg.tx.report) {
@@ -1129,13 +1133,14 @@ void Rtl8733bDevice::Stop() {
 
 devourer::TxCaps Rtl8733bDevice::GetTxCaps() {
   /* Advertised surface: one spatial stream, 2.4-GHz long-preamble CCK, legacy
-   * OFDM, and HT MCS0-7 at 20/40 MHz. TxCaps has no separate CCK flag. Keep SGI
-   * false: an independent receiver decoded a descriptor-SGI probe as long GI.
-   * The vendor advertises TX-LDPC (but not RX-LDPC); this raw-injection backend
-   * keeps it false because only forced-global-BCC operation has passed
-   * independently witnessed injection. Experimental 5/10 MHz is likewise
-   * omitted until an occupied-bandwidth and cross-receiver gate passes. */
-  return devourer::tx_caps_for_chains(1, false, false, 40);
+   * OFDM, and HT MCS0-7 at 20/40 MHz with long or short GI (SGI measured on
+   * air by SDR burst length and witness decode — TxDescriptor8733b.h). TxCaps
+   * has no separate CCK flag. The vendor advertises TX-LDPC (but not
+   * RX-LDPC); this raw-injection backend keeps it false because only
+   * forced-global-BCC operation has passed independently witnessed
+   * injection. Experimental 5/10 MHz is likewise omitted until an
+   * occupied-bandwidth and cross-receiver gate passes. */
+  return devourer::tx_caps_for_chains(1, false, true, 40);
 }
 
 devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {

@@ -37,16 +37,22 @@ inline uint8_t tx_rate_id_8733b(uint8_t rate_hw, uint8_t bandwidth,
  * branch share one predicate and the refusals are testable without hardware.
  *
  * The advertised surface is 1SS BCC: legacy CCK/OFDM at 20 MHz and HT MCS0-7
- * at 20/40 MHz. SGI is refused because an independent RTL8812AU witness
- * decoded a descriptor-SGI probe as long GI; LDPC and STBC are refused because
- * only forced-global-BCC operation has passed witnessed injection, and the
+ * at 20/40 MHz, long or short GI. SGI is dword5[4], the vendor's own injection
+ * placement, and it airs: SDR burst length on the b733 unit, 1500 B frames,
+ * MCS0 1890 -> 1700 us and MCS7 220 -> 200 us bins (3.6 vs 4.0 us symbols),
+ * identical to an RTL8822BU control, and an RTL8822BU witness decoded
+ * MCS7/20/SGI at 98.6% (1987/2015) against 96.9% long GI. The earlier
+ * "decoded as long GI" reading came from a witness whose parser reports no
+ * SGI, not from the air. LDPC and STBC are refused because only
+ * forced-global-BCC operation has passed witnessed injection, and the
  * descriptor encoder writes no STBC field at all. VHT and HE are outside the
  * contract on every band — both vendor trees declare this silicon 802.11b/g/n,
  * 1SS, 20/40 MHz — so the device path refuses those radiotap fields outright.
  */
 inline bool ht_request_supported_8733b(unsigned mcs, unsigned bw_mhz, bool sgi,
                                        bool ldpc, bool stbc) {
-  return mcs <= 7 && (bw_mhz == 20 || bw_mhz == 40) && !sgi && !ldpc && !stbc;
+  (void)sgi;
+  return mcs <= 7 && (bw_mhz == 20 || bw_mhz == 40) && !ldpc && !stbc;
 }
 
 inline bool legacy_request_supported_8733b(unsigned bw_mhz, bool sgi, bool ldpc,

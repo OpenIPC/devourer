@@ -101,6 +101,13 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
                                    : InitTimer::XferCounter{},
                   [this] { _device.flush_writes(); });
 
+  /* rtw88 order: rtw_hci_setup precedes rtw_mac_power_on — on PCIe this
+   * programs the TRX buffer-descriptor ring registers (the DLFW rsvd-page
+   * path needs the BCN ring live), and the power sequence resets the TRX
+   * DMA, so it belongs right before it. No-op on USB. */
+  _device.hci_setup();
+  if (!_device.is_usb())
+    _macinit.pcie_link_cfg(); /* rtw_pci_link_cfg: before the first power-on */
   _macinit.pre_init_system_cfg();
   timer.stage("pre_init_system_cfg");
   power_on();                 /* mac_power_switch(on) — card_en_flow */
@@ -127,6 +134,8 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
     _phy_ctx.rfe_type = 21;
   _logger->info("Jaguar3: rfe_type=0x{:02x}", _phy_ctx.rfe_type);
   timer.stage("efuse_rfe");
+  if (!_device.is_usb())
+    _macinit.pcie_intf_cfg(_ver.cut, _phy_ctx.rfe_type);
   _macinit.init_system_cfg(bw, _ver.cut);
   timer.stage("init_system_cfg");
 
@@ -146,7 +155,9 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
    * was 0 during the pre-queue-init FW stage, so a beacon rsvd-page download
    * would otherwise target page 0 instead of the real boundary. */
   _fw.set_rsvd_boundary(_macinit.rsvd_boundary());
-  _macinit.init_usb_cfg();         /* USB RX-DMA mode — RX delivery to bulk-IN */
+  if (_device.is_usb())
+    _macinit.init_usb_cfg();       /* USB RX-DMA mode — RX delivery to bulk-IN;
+                                    * PCIe RX is the BD ring, no RX-DMA agg cfg */
   _macinit.enable_bb_rf(true);     /* set_hw_value(EN_BB_RF) */
   timer.stage("usb_cfg_bbrf");
   apply_bb_rf_agc_tables(&timer);  /* init_phy: BB + AGC + RF tables */
@@ -802,7 +813,7 @@ void HalJaguar3::cache_efuse_8822e() {
   read_efuse_logical_map(map, sizeof(map));
   std::memcpy(_efuse_cache, map, sizeof(_efuse_cache));
   _efuse_cache_valid = true;
-  std::memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
+  std::memcpy(_perm_mac, map + mac_logical_off(), sizeof(_perm_mac));
   _perm_mac_valid = mac_programmed(_perm_mac);
   _logger->info("Jaguar3(8822e): efuse decoded (0x22={:x} 0x4c={:x} 0xca={:x})",
                 _efuse_cache[0x22], _efuse_cache[0x4c], _efuse_cache[0xca]);
@@ -823,7 +834,7 @@ bool HalJaguar3::perm_mac(uint8_t out[6]) {
     _perm_mac_probed = true;
     uint8_t map[kMacLogicalOff + 0x10] = {};
     read_efuse_logical_map(map, sizeof(map));
-    std::memcpy(_perm_mac, map + kMacLogicalOff, sizeof(_perm_mac));
+    std::memcpy(_perm_mac, map + mac_logical_off(), sizeof(_perm_mac));
     _perm_mac_valid = mac_programmed(_perm_mac);
   }
   if (!_perm_mac_valid)
@@ -957,44 +968,121 @@ const PwrCfg kPwrOff8822cUsb[] = {
     {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4)), B(3)},
     {0, PC_END, 0, 0},
 };
+
+#if defined(DEVOURER_HAVE_PCIE)
+/* RTL8822CE power sequences: the same halmac card_en/card_dis flows keeping
+ * the PCI- and ALL-interface rows (rtw88 rtw8822c.c v6.12 agrees row for
+ * row). The PCI-only enable rows gate the PCIe reference clock / power
+ * domain (0x75[0] toggled around the 0x06[1] poll, 0x74[5], 0x71[4], the
+ * 0x62/0x61 bit dance); the USB-only 0x00[5], 0x4A and 0xFF1A rows are
+ * absent — 0xFExx is the USB register page and does not exist over MMIO. */
+const PwrCfg kPwrOn8822cPcie[] = {
+    /* --- card-disable -> card-emulation --- */
+    {0x002E, PC_WRITE, B(2), B(2)},
+    {0x002D, PC_WRITE, B(0), 0},
+    {0x007F, PC_WRITE, B(7), 0},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(3) | B(4) | B(7)), 0},
+    /* --- card-emulation -> active --- */
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3) | B(2)), 0},
+    {0x0075, PC_WRITE, B(0), B(0)},
+    {0x0006, PC_POLL, B(1), B(1)},
+    {0x0075, PC_WRITE, B(0), 0},
+    {0x002E, PC_WRITE, B(3), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_WRITE, static_cast<uint8_t>(B(4) | B(3)), 0},
+    {0x1018, PC_WRITE, B(2), B(2)},
+    {0x0005, PC_WRITE, B(0), B(0)},
+    {0x0005, PC_POLL, B(0), 0},
+    {0x0074, PC_WRITE, B(5), B(5)},
+    {0x0071, PC_WRITE, B(4), 0},
+    {0x0062, PC_WRITE, static_cast<uint8_t>(B(7) | B(6) | B(5)),
+     static_cast<uint8_t>(B(7) | B(6) | B(5))},
+    {0x0061, PC_WRITE, static_cast<uint8_t>(B(7) | B(6) | B(5)), 0},
+    {0x001F, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), B(7)},
+    {0x00EF, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), B(7)},
+    {0x1045, PC_WRITE, B(4), B(4)},
+    {0x0010, PC_WRITE, B(2), B(2)},
+    {0x1064, PC_WRITE, B(1), B(1)},
+    {0, PC_END, 0, 0},
+};
+
+const PwrCfg kPwrOff8822cPcie[] = {
+    /* --- active -> card-emulation --- */
+    {0x0093, PC_WRITE, B(3), 0},
+    {0x001F, PC_WRITE, 0xFF, 0},
+    {0x00EF, PC_WRITE, 0xFF, 0},
+    {0x1045, PC_WRITE, B(4), 0},
+    {0x0049, PC_WRITE, B(1), 0},
+    {0x0006, PC_WRITE, B(0), B(0)},
+    {0x0002, PC_WRITE, B(1), 0},
+    {0x0005, PC_WRITE, B(1), B(1)},
+    {0x0005, PC_POLL, B(1), 0},
+    /* --- card-emulation -> card-disable --- */
+    {0x0067, PC_WRITE, B(5), 0},
+    {0x0081, PC_WRITE, static_cast<uint8_t>(B(7) | B(6)), 0},
+    {0x0090, PC_WRITE, B(1), 0},
+    {0x0092, PC_WRITE, 0xFF, 0x20},
+    {0x0093, PC_WRITE, 0xFF, 0x04},
+    {0x0005, PC_WRITE, B(2), B(2)},
+    {0, PC_END, 0, 0},
+};
+#endif /* DEVOURER_HAVE_PCIE */
+
+/* Runs one PwrCfg table. A POLL step that times out on the PCIe backend is
+ * retried once after toggling BIT_PFM_WOWL (REG_SYS_PW_CTRL 0x04[3])
+ * set -> clear — rtw88's rtw_pwr_cmd_polling PCIe quirk. poll_fatal=false
+ * makes the polls best-effort (the power-off run on a possibly-cold chip). */
+void run_pwr_seq(RtlAdapter &dev, const PwrCfg *seq, uint32_t poll_max,
+                 bool poll_fatal) {
+  auto poll_once = [&](const PwrCfg *p) -> bool {
+    uint32_t cnt = poll_max;
+    while ((dev.rtw_read8(p->off) & p->msk) != (p->val & p->msk)) {
+      if (--cnt == 0)
+        return false;
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
+    return true;
+  };
+  for (const PwrCfg *p = seq; p->cmd != PC_END; ++p) {
+    if (p->cmd == PC_WRITE) {
+      uint8_t v = dev.rtw_read8(p->off);
+      v = static_cast<uint8_t>((v & ~p->msk) | (p->val & p->msk));
+      dev.rtw_write8(p->off, v);
+    } else { /* PC_POLL */
+      bool ok = poll_once(p);
+      if (!ok && !dev.is_usb()) {
+        uint8_t v = dev.rtw_read8(0x0004);
+        dev.rtw_write8(0x0004, static_cast<uint8_t>(v | (1u << 3)));
+        dev.rtw_write8(0x0004, static_cast<uint8_t>(v & ~(1u << 3)));
+        ok = poll_once(p);
+      }
+      if (!ok && poll_fatal)
+        throw std::runtime_error(
+            "Jaguar3: power-on poll timeout (chip not responding)");
+    }
+  }
+}
 } /* namespace */
 
 void HalJaguar3::power_off() {
-  for (const PwrCfg *p = kPwrOff8822cUsb; p->cmd != PC_END; ++p) {
-    if (p->cmd == PC_WRITE) {
-      uint8_t v = _device.rtw_read8(p->off);
-      v = static_cast<uint8_t>((v & ~p->msk) | (p->val & p->msk));
-      _device.rtw_write8(p->off, v);
-    } else { /* PC_POLL — best-effort, don't wedge a cold chip */
-      uint32_t cnt = 2000;
-      while ((_device.rtw_read8(p->off) & p->msk) != (p->val & p->msk)) {
-        if (--cnt == 0)
-          break;
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-      }
-    }
-  }
+  const PwrCfg *seq = kPwrOff8822cUsb;
+#if defined(DEVOURER_HAVE_PCIE)
+  if (!_device.is_usb())
+    seq = kPwrOff8822cPcie; /* only the 8822CE exists on PCIe */
+#endif
+  run_pwr_seq(_device, seq, /*poll_max=*/2000, /*poll_fatal=*/false);
   _logger->info("Jaguar3: power-off (card-disable) sequence applied");
 }
 
 void HalJaguar3::power_on() {
   /* Reset the MAC from any prior state (e.g. kernel-left active) first. */
   power_off();
-  for (const PwrCfg *p = kPwrOn8822cUsb; p->cmd != PC_END; ++p) {
-    if (p->cmd == PC_WRITE) {
-      uint8_t v = _device.rtw_read8(p->off);
-      v = static_cast<uint8_t>((v & ~p->msk) | (p->val & p->msk));
-      _device.rtw_write8(p->off, v);
-    } else { /* PC_POLL */
-      uint32_t cnt = 5000;
-      while ((_device.rtw_read8(p->off) & p->msk) != (p->val & p->msk)) {
-        if (--cnt == 0)
-          throw std::runtime_error(
-              "Jaguar3: power-on poll timeout (chip not responding)");
-        std::this_thread::sleep_for(std::chrono::microseconds(10));
-      }
-    }
-  }
+  const PwrCfg *seq = kPwrOn8822cUsb;
+#if defined(DEVOURER_HAVE_PCIE)
+  if (!_device.is_usb())
+    seq = kPwrOn8822cPcie;
+#endif
+  run_pwr_seq(_device, seq, /*poll_max=*/5000, /*poll_fatal=*/true);
   _logger->info("Jaguar3: power-on sequence complete (card active)");
 }
 

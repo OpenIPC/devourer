@@ -33,8 +33,25 @@ public:
   void enable_bb_rf(bool enable);
 
   /* init_usb_cfg_88xx: USB RX-DMA mode + burst (REG_RXDMA_MODE) + TX drop-data.
-   * Required for the chip to push RX frames to the bulk-IN endpoint. */
+   * Required for the chip to push RX frames to the bulk-IN endpoint. USB
+   * only — on PCIe the RX path is the buffer-descriptor ring and there is no
+   * RX-DMA aggregation to configure (the caller gates on is_usb()). */
   void init_usb_cfg();
+
+  /* PCIe link tuning for the RTL8822CE (rtw88 rtw_pci_link_cfg, run at
+   * probe before the first power-on). The 8822C has no MDIO gen1/gen2 PHY
+   * table (both are empty in rtw8822c.c); what it has instead is a DBI write
+   * clearing RTK_PCIE_CLKDLY_CTRL — the die runs REFCLK auto-calibration, so
+   * the clock-delay cover is removed. Needs nothing from the chip, so it
+   * runs once before power_on(); PCIe only. */
+  void pcie_link_cfg();
+
+  /* PCIe interface tuning that depends on chip identity (rtw88
+   * rtw_pci_interface_cfg + the rfe-5 pad in rtw_pci_phy_cfg): on cut >= D
+   * REG_HCI_MIX_CFG BIT_PCIE_EMAC_PDN_AUX_TO_FAST_CLK, and for RFE option 5
+   * REG_ANAPARSW_MAC_0 BIT_CF_L_V2. Called once after the chip version and
+   * RFE option are known; PCIe only. */
+  void pcie_intf_cfg(uint8_t cut, uint8_t rfe_type);
 
   /* init_mac_cfg_88xx: trx -> protocol -> edca -> wmac. Returns false on the
    * LLT auto-init timeout (the only failure path in the ported flow). */

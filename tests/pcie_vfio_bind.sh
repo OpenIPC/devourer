@@ -8,6 +8,10 @@
 # Uses driver_override (race-free vs. the in-tree rtw88 auto-probe: new_id
 # would still let rtw88 grab the device on a rescan; driver_override pins it).
 # --restore clears the override and reprobes, handing it back to rtw88.
+# Works for whichever rtw88/rtw89 module holds the device (rtw88_8821ce,
+# rtw88_8822ce, rtw89_8852ce); for a whole test session, including a USB
+# witness the same modules would grab on re-enumeration, use
+# tests/pcie_host_prep.sh, which wraps this with a temp blacklist.
 set -euo pipefail
 
 BDF="${1:?usage: $0 <bdf> [--restore]}"

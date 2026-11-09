@@ -96,6 +96,7 @@ bool is_8822b_chip_id(uint8_t id) {
  * with the Jaguar1 ids (0x04/05/08) it used to be lumped with, nor 8822B (0x0a)
  * or Jaguar3 (0x13/0x17). */
 constexpr uint8_t kChipId8821C = 0x09;
+constexpr uint8_t kChipId8822C = 0x13;
 
 } /* namespace */
 
@@ -397,8 +398,28 @@ std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
 #endif
   }
 
+  if (chip_id == kChipId8822C) {
+#if defined(DEVOURER_HAVE_JAGUAR3_8822C)
+    /* RTL8822CE: the Jaguar3 HAL over the same 88xx ring plane as the
+     * 8821CE — the HAL's PCIe gates (power sequence, queue map, EFUSE MAC
+     * offset) key off RtlAdapter::is_usb(). */
+    _logger->info("Creating RtlJaguar3Device C8822C over PCIe ({}; chip-id "
+                  "0x{:02x}, PCI {:04x}:{:04x})",
+                  transport->bdf(), chip_id, transport->pci_vendor_id(),
+                  transport->pci_device_id());
+    return std::make_unique<RtlJaguar3Device>(
+        RtlAdapter(std::move(transport), _logger, cfg), _logger,
+        jaguar3::ChipVariant::C8822C, cfg);
+#else
+    _logger->error("RTL8822C[E] (chip-id 0x13) detected but 8822C support not "
+                   "compiled in (DEVOURER_JAGUAR3_8822C=OFF)");
+    return nullptr;
+#endif
+  }
+
   _logger->error("PCIe chip-id 0x{:02x} at {} is not supported over PCIe "
-                 "(RTL8821C[E] chip-id 0x09, or RTL8852CE by PCI id 10ec:c852)",
+                 "(RTL8821C[E] chip-id 0x09, RTL8822C[E] chip-id 0x13, or "
+                 "RTL8852CE by PCI id 10ec:c852)",
                  chip_id, transport->bdf());
   return nullptr;
 }

@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #include "Event.h"
-#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR3_8822C)
 #include "PcieDma88xx.h"
 #endif
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
@@ -26,6 +26,10 @@ namespace devourer {
 namespace {
 constexpr uint16_t kPciDidRtl8852ce = 0xC852;
 constexpr uint16_t kPciDidRtl8852be = 0xB852;
+/* RTL8821CE (rtw8821ce.c) — the one part whose PCIe completion timeout rtw88
+ * disables (rtw_pci_phy_cfg). */
+constexpr uint16_t kPciDidRtl8821ce = 0xC821;
+constexpr uint16_t kPciDidRtl8821ceAlt = 0xB821;
 } /* namespace */
 
 std::shared_ptr<PcieTransport> PcieTransport::Open(const std::string &bdf,
@@ -77,14 +81,16 @@ bool PcieTransport::select_dma_plane() {
                    _pci_vid, _pci_did);
     return false;
   default:
-#if defined(DEVOURER_HAVE_JAGUAR2_8821C)
-    /* The HalMAC 88xx ring plane; the factory still checks the chip-id. */
+#if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR3_8822C)
+    /* The HalMAC 88xx ring plane (RTL8821CE and RTL8822CE share its register
+     * map and BD geometry); the factory still checks the chip-id. */
     _dma = std::make_unique<PcieDma88xx>(*this, _logger, _cfg.rx_ring_len,
                                          _cfg.rx_buf_size, _cfg.rx_poll_us);
     return true;
 #else
     _logger->error("PcieTransport: PCI device {:04x}:{:04x} has no DMA plane "
-                   "in this build (DEVOURER_JAGUAR2_8821C=OFF)",
+                   "in this build (DEVOURER_JAGUAR2_8821C=OFF and "
+                   "DEVOURER_JAGUAR3_8822C=OFF)",
                    _pci_vid, _pci_did);
     return false;
 #endif
@@ -326,9 +332,9 @@ bool PcieTransport::setup_config_space() {
     /* Disable completion timeout (DEVCTL2 bit4) — rtw88 does this specifically
      * for the 8821C (rtw_pci_phy_cfg). Only there: with the timeout off, a
      * read of a device that stops answering never completes and the CPU
-     * hangs in the MMIO load instead of seeing all-ones, so the AX parts
-     * (rtw89 leaves the timeout alone) keep it. */
-    if (_pci_did != kPciDidRtl8852ce) {
+     * hangs in the MMIO load instead of seeing all-ones, so every other part
+     * (the 8822CE under rtw88, the AX parts under rtw89) keeps it. */
+    if (_pci_did == kPciDidRtl8821ce || _pci_did == kPciDidRtl8821ceAlt) {
       uint16_t devctl2 = 0;
       cfg_read(pcie_cap + 0x28, &devctl2, 2);
       devctl2 |= 1u << 4;

@@ -12,7 +12,11 @@
 # Arms (listed by role, not run order):
 #   quiet      sensor alone       -- the floor. Must read ~0, not "no reading".
 #   window     armed, under load  -- the feature.
-#   sampled    unarmed, same load -- the spread comparison.
+#   sampled    unarmed, same load -- the spread comparison. Skipped where
+#              rx_energy_ok is false (RTL8733B: CLM only, no sampled path),
+#              and there a bursty claim needs a window longer than the burst
+#              period or a many-window mean -- five 240 ms windows against a
+#              500 ms burst period read 0-19% each (docs/rx-spectrum-sensing.md).
 #   interrupt  NHM read mid-window   -- must be INVALID, spoil=interrupted.
 #   quality    GetRxQuality() mid-window -- the same trap by the route a
 #              consumer actually takes. INVALID, spoil=interrupted.

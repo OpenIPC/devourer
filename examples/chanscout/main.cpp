@@ -335,6 +335,7 @@ int main() {
 
   devourer::sensing::DwellExecConfig ecfg;
   ecfg.settle_ms = cfg.settle_ms;
+  ecfg.dwell_ms = cfg.dwell_ms; /* sizes the armed busy window where one exists */
   ecfg.with_nhm = true;
   ecfg.plan_hash = plan_hash;
   ecfg.scout_id = scout_id;

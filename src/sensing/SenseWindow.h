@@ -46,6 +46,14 @@ int64_t steady_us();
 
 struct SenseOptions {
   bool with_nhm = true;
+  /* The observation window the caller will sleep between barrier() and
+   * read(), in microseconds. On a backend without phydm counters whose busy
+   * airtime comes from an armed hardware window (RTL8733B CLM; MT7612U) a
+   * non-zero value makes barrier() arm that window to the dwell, so read()
+   * returns a figure over the whole dwell instead of a ~2 ms sample. 0 keeps
+   * the sampled read-and-clear path. Ignored where phydm counters exist —
+   * arming would spoil the NHM engine those dwells read. */
+  uint32_t busy_window_us = 0;
   /* Skip every hardware touch but keep the phase structure and the caller's
    * time budget intact — the synthetic-evidence lever (examples/tx's injected
    * occupancy), and the honest shape on a part whose front end is blind on
@@ -130,20 +138,33 @@ public:
    * first-class case and not an error — it still gets the neutral busy-airtime
    * reading through `radio`, which is the whole point of that contract. Both
    * may be null only in a test. */
+  /* The source is chosen by CAPABILITY, not by pointer type. A non-null
+   * `rtl` only means "Realtek"; whether its phydm FA/CCA/NHM counters exist is
+   * AdapterCaps::rx_energy_ok (false on the RTL8733B and Kestrel, which derive
+   * from IRtlRadio and answer busy airtime through an armed window instead).
+   * Resolved once here: GetAdapterCaps is static and callable pre-Init. */
   SenseWindow(IRadio *radio, IRtlRadio *rtl, MonotonicUs clock = nullptr)
       : radio_(radio), rtl_(rtl),
+        energy_ok_(rtl != nullptr && rtl->GetAdapterCaps().rx_energy_ok),
         clock_(clock ? std::move(clock) : MonotonicUs(&steady_us)) {}
 
   void barrier(const SenseOptions &opt) {
+    armed_us_ = 0;
     if (!opt.skip_hardware) {
-      if (rtl_)
+      if (energy_ok_) {
         (void)rtl_->GetRxEnergy(/*with_nhm=*/false);
-      else if (radio_)
-        /* The neutral counters are read-and-clear too, so the same throwaway
-         * read scopes the window on a non-Realtek backend. Without it the
-         * first sample would carry whatever accumulated during the retune and
-         * settle. */
-        (void)radio_->GetChannelBusy();
+      } else if (radio_) {
+        /* Busy-airtime-only backend. With a dwell to size it, arm the
+         * hardware window so read() covers the whole dwell; a backend that
+         * cannot arm (returns 0) falls back to the sampled path, where the
+         * neutral counters are read-and-clear too, so the same throwaway read
+         * scopes the window. Without it the first sample would carry whatever
+         * accumulated during the retune and settle. */
+        if (opt.busy_window_us != 0)
+          armed_us_ = radio_->ArmChannelBusy(opt.busy_window_us);
+        if (armed_us_ == 0)
+          (void)radio_->GetChannelBusy();
+      }
     }
     barrier_us_ = clock_();
   }
@@ -151,7 +172,7 @@ public:
   SenseResult read(const SenseOptions &opt) {
     SenseResult r;
     if (!opt.skip_hardware) {
-      if (rtl_) {
+      if (energy_ok_) {
         r.energy = rtl_->GetRxEnergy(opt.with_nhm);
         /* Derived from the read just taken, NOT a second GetChannelBusy call —
          * on Realtek that would drain the same delta counters twice and halve
@@ -181,6 +202,8 @@ public:
 private:
   IRadio *radio_;
   IRtlRadio *rtl_;
+  bool energy_ok_ = false;
+  uint32_t armed_us_ = 0; /* window armed by the last barrier(), 0 = sampled */
   MonotonicUs clock_;
   int64_t barrier_us_ = 0;
   bool ever_valid_ = false;

@@ -60,6 +60,14 @@ struct FakeRtl final : IRtlRadio {
   bool send_packet(const uint8_t *, size_t) override { return false; }
   SelectedChannel GetSelectedChannel() override { return ch; }
   void SetCcaMode(bool) override {}
+  /* A Jaguar-shaped Realtek radio: phydm counters present. SenseWindow gates
+   * its source on this, not on the IRtlRadio type. */
+  devourer::AdapterCaps GetAdapterCaps() override {
+    devourer::AdapterCaps c;
+    c.rx_energy_ok = true;
+    c.busy_airtime_ok = true;
+    return c;
+  }
 
   void SetMonitorChannel(SelectedChannel c) override {
     if (throw_on_set)
@@ -83,6 +91,54 @@ struct FakeRtl final : IRtlRadio {
     RxEnergy e = energies.front();
     energies.pop_front();
     return e;
+  }
+};
+
+/* An RTL8733B-shaped Realtek radio: derives from IRtlRadio, no GetRxEnergy,
+ * busy airtime only through an armed window. The shape the pointer-type gate
+ * got wrong. */
+struct FakeBusyOnlyRtl final : IRtlRadio {
+  std::vector<std::string> log;
+  SelectedChannel ch{};
+  uint32_t armed_us = 0;
+  uint8_t window_busy = 0;
+  devourer::AdapterCaps GetAdapterCaps() override {
+    devourer::AdapterCaps c;
+    c.rx_energy_ok = false;
+    c.busy_airtime_ok = true;
+    return c;
+  }
+  uint32_t ArmChannelBusy(uint32_t window_us) override {
+    log.push_back("arm:" + std::to_string(window_us));
+    armed_us = window_us;
+    return window_us;
+  }
+  devourer::ChannelBusy GetChannelBusy() override {
+    log.push_back("busy");
+    devourer::ChannelBusy b;
+    if (armed_us != 0) {
+      b.valid = true;
+      b.valid_busy = true;
+      b.source = devourer::BusySource::Clm;
+      b.busy_pct = window_busy;
+      b.window_us = armed_us;
+      armed_us = 0;
+    }
+    return b;
+  }
+  void Init(Action_ParsedRadioPacket, SelectedChannel) override {}
+  void InitWrite(SelectedChannel) override {}
+  void StartRxLoop(Action_ParsedRadioPacket) override {}
+  bool send_packet(const uint8_t *, size_t) override { return false; }
+  SelectedChannel GetSelectedChannel() override { return ch; }
+  void SetCcaMode(bool) override {}
+  void SetMonitorChannel(SelectedChannel c) override {
+    ch = c;
+    log.push_back("set:" + std::to_string(c.Channel));
+  }
+  void FastRetune(uint8_t c, bool) override {
+    ch.Channel = c;
+    log.push_back("fast:" + std::to_string(c));
   }
 };
 
@@ -461,6 +517,57 @@ int main() {
     check("busy airtime passes through", d.clm_ratio_pct, 41);
     check("provenance recorded", d.busy_source,
           static_cast<long>(devourer::BusySource::ChTime));
+  }
+
+  {
+    /* The RTL8733B shape: IRtlRadio with no phydm counters. The window must
+     * take the busy path (gated on caps, not on the cast), arm it to the
+     * dwell, and read the armed figure — never the all-invalid energy read. */
+    FakeBusyOnlyRtl b;
+    b.window_busy = 69;
+    SurveyFrameAggregator agg;
+    DwellExecConfig cfg;
+    cfg.clock = scripted_clock();
+    cfg.dwell_ms = 100;
+    DwellExecutor exec(&b, &b, &agg, cfg);
+    ScanScheduler::DwellPlan p{};
+    p.valid = true;
+    p.bin_ch = 36;
+    p.def = bin20(36);
+    SurveyDwell d;
+    exec.begin(p, 0, d);
+    g_now_us += 30000;
+    exec.barrier(30);
+    g_now_us += 100000;
+    exec.finish(false, d);
+    check_str("busy-only Realtek arms the dwell window then reads it",
+              join(b.log), "fast:36,arm:100000,busy");
+    check("busy-only Realtek yields busy airtime", d.valid_clm, 1);
+    check("armed window figure passes through", d.clm_ratio_pct, 69);
+    check("busy-only Realtek reports no energy", d.valid_fa, 0);
+    check("absent phydm counters are not a read failure",
+          (d.flags & devourer::chanmig::kFlagReadFailed) != 0, 0);
+  }
+  {
+    /* Same shape with no dwell carried: the sampled path, as before. */
+    FakeBusyOnlyRtl b;
+    SurveyFrameAggregator agg;
+    DwellExecConfig cfg;
+    cfg.clock = scripted_clock();
+    DwellExecutor exec(&b, &b, &agg, cfg);
+    ScanScheduler::DwellPlan p{};
+    p.valid = true;
+    p.bin_ch = 36;
+    p.def = bin20(36);
+    SurveyDwell d;
+    exec.begin(p, 0, d);
+    g_now_us += 30000;
+    exec.barrier(30);
+    g_now_us += 100000;
+    exec.finish(false, d);
+    check_str("busy-only Realtek without a dwell samples twice", join(b.log),
+              "fast:36,busy,busy");
+    check("unarmed busy-only Realtek records no busy figure", d.valid_clm, 0);
   }
 
   /* --- round bookkeeping: composes with the real scheduler --- */

@@ -598,13 +598,10 @@ that same flooder at 69% as well, so the two device paths onto the JGR3 map
 agree on one load. The retune and premature-read spoilers each refused with
 their reason, and a re-armed window never returned the previous latched value.
 
-**`src/sensing/` cannot reach this reading.** `SenseWindow` picks its source
-by whether the `IRtlRadio*` is non-null rather than by `rx_energy_ok`, so on
-this die it takes the phydm branch and never arms or reads CLM —
-`examples/chanscout` on an RTL8733B reports neither. That is a sensing-layer
-bug this die is merely the first to expose; it is described, with what a fix
-needs, in `src/sensing/CLAUDE.md`. Until it lands, a caller on this die
-reaches `IRadio::ArmChannelBusy`/`GetChannelBusy` directly.
+**`src/sensing/` reaches this reading through the armed window.**
+`SenseWindow` gates its source on `AdapterCaps::rx_energy_ok` (false here) and
+arms `ArmChannelBusy` to the dwell the executor carries, so a `chanscout` on
+this die records CLM busy airtime per dwell (`src/sensing/CLAUDE.md`).
 
 **The CCA gate can bias the reading.** CLM counts CCA-busy, so a session that
 has disabled the gates (`SetCcaGates`, `DEVOURER_DIS_CCA`) may under-report

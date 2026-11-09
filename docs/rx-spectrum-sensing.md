@@ -382,6 +382,18 @@ never actually free — the sample simply missed the burst 78% of the time. For 
 ranker that reads "0% busy" as "emptiest", that is not lost information, it is
 a wrong answer.
 
+A window sized to the dwell is still a window. On the RTL8733B (CLM only, no
+sampled path to compare against — `tests/busy_window_probe.sh` skips that
+arm where `rx_energy_ok` is false) a 240 ms armed window against the same
+50/450 ms burst read 0–19% per window with a 19-point spread over five
+windows (mean 6–10%): a window shorter than the burst period lands in a gap
+or on a burst, so a bursty claim on that die needs a window longer than the
+period or a many-window mean, not five reads. `chanscout` on the RTL8733B now
+carries CLM per dwell through the capability-gated `SenseWindow`
+(`src/sensing/CLAUDE.md`): three-channel plan, 100 ms dwells, an RTL8822BU
+flooding ch36 — ch36 read 71.7% mean (68–75) over 64 dwells, ch44 2.3%,
+ch149 0.8%, all 191 dwells stamped with CLM provenance.
+
 `IRadio::ArmChannelBusy(window_us)` fixes the estimator rather than the
 aggregation: CLM's period is its own field (the low half of the period dword)
 and reaches 65535 ticks of 4 us, so the hardware can integrate the whole dwell.

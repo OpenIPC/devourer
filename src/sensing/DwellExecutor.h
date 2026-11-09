@@ -41,6 +41,12 @@ namespace sensing {
 
 struct DwellExecConfig {
   int settle_ms = 30; /* stamped into the record; the CALLER does the sleeping */
+  /* The observation window the caller sleeps after barrier(), in ms. Carried
+   * so a backend whose busy airtime is an armed hardware window (RTL8733B
+   * CLM; MT7612U) gets one sized to the dwell instead of a ~2 ms sample
+   * (SenseOptions::busy_window_us). 0 keeps the sampled read. Inert on the
+   * Jaguar families, whose dwells read phydm counters. */
+  int dwell_ms = 0;
   bool with_nhm = true;
   uint32_t counter_ceiling_per_ms = 1000;
   /* Stamped into every record — the demo maps its env onto these. */
@@ -119,6 +125,8 @@ public:
     SenseOptions opt;
     opt.with_nhm = cfg_.with_nhm;
     opt.counter_ceiling_per_ms = cfg_.counter_ceiling_per_ms;
+    opt.busy_window_us =
+        cfg_.dwell_ms > 0 ? static_cast<uint32_t>(cfg_.dwell_ms) * 1000u : 0u;
     sense_.barrier(opt);
     if (agg_)
       agg_->reset();

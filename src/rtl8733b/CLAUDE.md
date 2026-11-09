@@ -219,6 +219,41 @@ unit was on the bench — so the per-frame `rx.frame.sgi` cross-check remains
 unrun; the SDR shape is the primary evidence and does not depend on any
 parser. One unit, one control, one witness; 2.4 GHz SGI unmeasured.
 
+**LDPC TX airs; the global enable was the blocker, and RX-LDPC is absent.**
+The descriptor bit (dword5[7]) is the vendor's placement, and it is gated by
+`REG_BF_TIMEOUT_EN` 0x1430[8] (`BIT_EN_HT_LDPC_8733B`): MAC init leaves
+0x1430 = 0x0300, the vendor's default build never touches it (its clear sits
+under `CONFIG_TWO_MAC_DRIVER`), and the first port cleared both bits on the
+belief that raw HT only worked that way. Four cells, b733 → RTL8822BU
+witness (`rx.frame.ldpc` per frame), MCS7/20, 2015 frames each, ch36:
+
+| 0x1430[8] | descriptor LDPC | delivered | witness LDPC flag |
+|---|---|---|---|
+| cleared (old port) | 0 | 98.5% | 0 on all |
+| set (vendor) | 0 | 98.5% | 0 on all |
+| set (vendor) | 1 | 98.0% | **1 on all** |
+| cleared | 1 | 98.2% | 0 on all — the bit is silently ignored |
+
+So BCC is unaffected by the enable, the enable is what makes the descriptor
+bit real, and the register now stays at the vendor value (the MAC readback
+check requires it). The counterparts: the other direction is dead — the same
+b733 decoded **0 of 1542** MCS7/20/LDPC frames from the 8822BU against
+1435/1542 (93%) BCC in the same shape, so `ldpc_rx_*` stay false and the
+vendor's TX-only LDPC declaration is confirmed rather than inherited. And
+the coding gain is **not measured**: a three-point TX-power-offset probe
+(0 / −64 / −96 qdB, the loop's floor) kept both codings at 79–89% delivery
+near-field, with BCC-vs-LDPC differences of −7 and +3 points — inside the
+±3-point single-probe noise this repo warns about. `tests/ldpc_waterfall.sh`
+cannot run here as written (it steps the flat TXAGC index this family
+refuses), and a near-field bench has no waterfall to trace anyway; the
+"+3 dB at the 10% crossing" figure from the Jaguars is not claimed for this
+die.
+
+**STBC stays refused, with the vendor's reason.** `core/rtw_xmit.c` leaves
+`pattrib->stbc` unset on injected frames with the comment "873xb has only
+1tx; enable it will cause irregular TX spectrum"; a 1T1R part has nothing to
+space-time code across, and the encoder writes no STBC field.
+
 ## FastRetune
 
 Ported: intra-band, same-width hops (`Phy8733b::fast_retune`). The full

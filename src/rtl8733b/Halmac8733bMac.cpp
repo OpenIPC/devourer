@@ -184,7 +184,7 @@ bool MacState::matches_normal_usb3out() const {
          reserved_boundary == kReservedBoundary &&
          rx_boundary == kRxBoundary && cr == kMacTrxEnable &&
          (rxdma_mode & 0x0e) == 0x0e && rx_agg == kUsbRxAgg8733b &&
-         rcr == kRcrNormal && (ldpc_control & 0x0300u) == 0;
+         rcr == kRcrNormal && (ldpc_control & 0x0300u) == 0x0300u;
 }
 
 Halmac8733bMac::Halmac8733bMac(RtlAdapter device, Logger_t logger)
@@ -755,13 +755,16 @@ bool Halmac8733bMac::initialize(const EfuseInfo &efuse) {
   init_usb();
   program_mac(efuse.mac);
 
-  /* RTL8733B monitor injection is BCC-only. The vendor's two-MAC path also
-   * clears REG_BF_TIMEOUT_EN[9:8] (VHT/HT LDPC global enables); leaving those
-   * firmware-owned bits set can suppress raw HT injection even when the
-   * per-frame DATA_LDPC descriptor bit is zero. Keep both layers explicit. */
-  const uint16_t ldpc_before = _device.rtw_read16(kRegBfTimeout);
-  _device.rtw_write16(kRegBfTimeout,
-                      static_cast<uint16_t>(ldpc_before & 0xfcffu));
+  /* REG_BF_TIMEOUT_EN 0x1430[9:8] (VHT/HT LDPC global enables) stays at the
+   * MAC-init value 0x0300, as in the vendor's default build (its clear lives
+   * under CONFIG_TWO_MAC_DRIVER, never defined). Bit 8 gates the descriptor
+   * DATA_LDPC bit: measured on the b733 with an RTL8822BU witness, MCS7/20,
+   * ~2000 frames — bit set, LDPC-stamped frames decode with the witness's
+   * LDPC flag on at 98.0% and BCC frames still at 98.5%; bit clear, an
+   * LDPC-stamped frame airs as BCC (flag 0, 98.2%). An earlier port cleared
+   * both bits on the belief that raw HT only worked that way; it did not
+   * reproduce. */
+  const uint16_t ldpc_ctrl = _device.rtw_read16(kRegBfTimeout);
 
   const MacState state = read_mac_state();
   const bool mac_matches =
@@ -783,9 +786,9 @@ bool Halmac8733bMac::initialize(const EfuseInfo &efuse) {
   _logger->info(
       "RTL8733B MAC: initialized pq=0x{:04x} boundary={} public={} "
       "RXDMA=0x{:02x} RXAGG=0x{:04x} RCR=0x{:08x} "
-      "LDPC=0x{:04x}->0x{:04x}",
+      "LDPC_EN=0x{:04x}",
       state.pq_map, state.reserved_boundary, kPublicPages, state.rxdma_mode,
-      state.rx_agg, state.rcr, ldpc_before, state.ldpc_control);
+      state.rx_agg, state.rcr, ldpc_ctrl);
   return true;
 }
 

@@ -43,16 +43,22 @@ inline uint8_t tx_rate_id_8733b(uint8_t rate_hw, uint8_t bandwidth,
  * identical to an RTL8822BU control, and an RTL8822BU witness decoded
  * MCS7/20/SGI at 98.6% (1987/2015) against 96.9% long GI. The earlier
  * "decoded as long GI" reading came from a witness whose parser reports no
- * SGI, not from the air. LDPC and STBC are refused because only
- * forced-global-BCC operation has passed witnessed injection, and the
- * descriptor encoder writes no STBC field at all. VHT and HE are outside the
- * contract on every band — both vendor trees declare this silicon 802.11b/g/n,
- * 1SS, 20/40 MHz — so the device path refuses those radiotap fields outright.
+ * SGI, not from the air. LDPC is dword5[7] and airs once the MAC leaves
+ * REG_BF_TIMEOUT_EN[8] at its init value (Halmac8733bMac): an RTL8822BU
+ * witness decoded MCS7/20/LDPC frames with its LDPC flag set at 98.0% vs
+ * 98.5% BCC; TX only — the same unit decoded 0 of 1542 LDPC frames from that
+ * witness against 93% BCC, so RX-LDPC stays false as the vendor says. STBC
+ * is refused: the vendor itself never sets it on injected frames ("873xb has
+ * only 1tx; enable it will cause irregular TX spectrum", core/rtw_xmit.c),
+ * and the encoder writes no STBC field. VHT and HE are outside the contract
+ * on every band — both vendor trees declare this silicon 802.11b/g/n, 1SS,
+ * 20/40 MHz — so the device path refuses those radiotap fields outright.
  */
 inline bool ht_request_supported_8733b(unsigned mcs, unsigned bw_mhz, bool sgi,
                                        bool ldpc, bool stbc) {
   (void)sgi;
-  return mcs <= 7 && (bw_mhz == 20 || bw_mhz == 40) && !ldpc && !stbc;
+  (void)ldpc;
+  return mcs <= 7 && (bw_mhz == 20 || bw_mhz == 40) && !stbc;
 }
 
 inline bool legacy_request_supported_8733b(unsigned bw_mhz, bool sgi, bool ldpc,
@@ -156,7 +162,7 @@ inline bool valid_tx_desc_config(const TxDescConfig &cfg) {
          cfg.bandwidth <= 1 && cfg.data_sc <= 0x0f &&
          cfg.packet_offset <= 1 && cfg.agg_num <= 3 &&
          cfg.retry_limit <= 0x3f && cfg.sw_define <= 0x0fff &&
-         (!legacy_cck || cfg.bandwidth == 0) && !cfg.ldpc &&
+         (!legacy_cck || cfg.bandwidth == 0) && (!cfg.ldpc || ht_1ss) &&
          (!(legacy_cck || legacy_ofdm) || !cfg.short_gi);
 }
 

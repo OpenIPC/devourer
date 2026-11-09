@@ -93,6 +93,19 @@ int main() {
       0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xab, 0x00};
   expect("MCS7 descriptor golden bytes", desc == expected_ht);
 
+  TxDescConfig ldpc = ht;
+  ldpc.short_gi = false;
+  ldpc.ldpc = true;
+  expect("MCS7 LDPC descriptor builds",
+         rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), ldpc));
+  expect("LDPC lands in dword5 bit 7 and the checksum closes",
+         ((desc[0x14] >> 7) & 1) == 1 &&
+             rtl8733b::txdesc_checksum_valid_8733b(desc.data(), desc.size()));
+  TxDescConfig legacy_ldpc = ofdm;
+  legacy_ldpc.ldpc = true;
+  expect("legacy LDPC refused by the encoder",
+         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), legacy_ldpc));
+
   /* CCX request + tag: SPE_RPT dword2[19] and SW_DEFINE dword6[11:0], both
    * inside the checksummed span, so the fold must still close. */
   TxDescConfig rpt = ht;
@@ -158,10 +171,6 @@ int main() {
   invalid.short_gi = true;
   expect("legacy SGI rejected",
          !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
-  invalid = ht;
-  invalid.ldpc = true;
-  expect("RTL8733B LDPC rejected",
-         !rtl8733b::fill_tx_desc_8733b(desc.data(), desc.size(), invalid));
   invalid = ofdm;
   invalid.packet_offset = 2;
   expect("oversized USB boundary shim rejected",
@@ -190,7 +199,7 @@ int main() {
 
   /* The modulation-admission contract shared by the SetTxMode and radiotap
    * branches of Rtl8733bDevice::build_tx_block. Asserting it here is what makes
-   * the LDPC/STBC and second-stream refusals a tested property rather than
+   * the STBC and second-stream refusals a tested property rather than
    * a doc claim — the descriptor encoder has no STBC field to reject on. */
   expect("HT MCS0-7 BCC at 20/40 MHz admitted",
          rtl8733b::ht_request_supported_8733b(0, 20, false, false, false) &&
@@ -202,8 +211,9 @@ int main() {
   expect("HT short GI admitted",
          rtl8733b::ht_request_supported_8733b(7, 20, true, false, false) &&
              rtl8733b::ht_request_supported_8733b(0, 40, true, false, false));
-  expect("HT LDPC refused",
-         !rtl8733b::ht_request_supported_8733b(7, 20, false, true, false));
+  expect("HT LDPC admitted",
+         rtl8733b::ht_request_supported_8733b(7, 20, false, true, false) &&
+             rtl8733b::ht_request_supported_8733b(0, 40, false, true, false));
   expect("HT STBC refused",
          !rtl8733b::ht_request_supported_8733b(7, 20, false, false, true));
   expect("legacy 20 MHz BCC admitted",

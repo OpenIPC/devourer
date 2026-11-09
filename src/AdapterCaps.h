@@ -152,7 +152,10 @@ struct AdapterCaps {
    * on-air. The TX side lives in TxCaps.ldpc_ok. HT and VHT are separate
    * decoder paths in silicon, so the flags split: the RTL8821A field failure
    * ("PixelPilot can't RX LDPC from Eachine Sphere Link") is VHT-only. --- */
-  bool ldpc_rx_ht = false;  /* baseband decodes LDPC-coded HT PPDUs */
+  bool ldpc_rx_ht = false;  /* baseband decodes LDPC-coded HT PPDUs. RTL8733B:
+                             * measured false — 0/1542 LDPC MCS7 frames vs
+                             * 93% BCC from an 8822BU — while its TX-LDPC
+                             * (TxCaps.ldpc_ok) is measured true. */
   bool ldpc_rx_vht = false; /* baseband decodes LDPC-coded VHT PPDUs */
   /* Per-frame LDPC *reporting*: RxAtrib.ldpc is populated (RX-descriptor bit
    * on the 8812A die, PHY-status byte7[5] on Jaguar2/3). False on the 8814A —

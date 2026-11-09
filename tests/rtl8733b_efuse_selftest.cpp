@@ -173,8 +173,14 @@ int main() {
   mac_state.rxdma_mode = 0x1e;
   mac_state.rx_agg = 0x2003;
   mac_state.rcr = 0xe410220e;
+  mac_state.ldpc_control = 0x0300; // vendor MAC-init value, left in place
   expect("normal USB 3-out MAC state accepted",
          mac_state.matches_normal_usb3out());
+  mac_state.ldpc_control = 0x0000;
+  expect("cleared HT/VHT LDPC enables rejected (the descriptor LDPC bit "
+         "would be silently ignored)",
+         !mac_state.matches_normal_usb3out());
+  mac_state.ldpc_control = 0x0300;
   mac_state.rx_agg = 0x2005;
   expect("20 KiB RX aggregate rejected for 16 KiB URBs",
          !mac_state.matches_normal_usb3out());

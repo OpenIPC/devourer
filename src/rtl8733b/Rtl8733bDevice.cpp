@@ -996,8 +996,19 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
     return 0;
 
   if (frame_width == CHANNEL_WIDTH_40 &&
-      _channel.ChannelWidth != CHANNEL_WIDTH_40)
+      _channel.ChannelWidth != CHANNEL_WIDTH_40) {
+    /* Said once, by name: a silent refusal here surfaces in txdemo as "8
+     * consecutive bulk-OUT failures — chip NAKing", which sends the operator
+     * after the USB path when the frame simply asked for 40 MHz on a channel
+     * configured at 20 (txdemo: DEVOURER_HOP_BW=40). */
+    if (!_width_refusal_logged.exchange(true))
+      _logger->error(
+          "RTL8733B TX refused: a 40 MHz frame on a {}-configured channel — "
+          "bring the channel up at 40 MHz (txdemo: DEVOURER_HOP_BW=40) or send a 20 MHz frame",
+          _channel.ChannelWidth == CHANNEL_WIDTH_20 ? "20 MHz"
+                                                    : "narrowband");
     return 0;
+  }
   if (_channel.ChannelWidth != CHANNEL_WIDTH_20 &&
       _channel.ChannelWidth != CHANNEL_WIDTH_40 &&
       _channel.ChannelWidth != CHANNEL_WIDTH_5 &&

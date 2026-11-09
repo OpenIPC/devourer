@@ -90,7 +90,12 @@ run_config() { # $1=dut_pid $2=ch $3=farch $4=label
     plugged "$FLOOD_PID" || { echo "SKIP $label: flooder $FLOOD_PID not plugged"; return; }
     unbind_rtw88 "$dut"; unbind_rtw88 "$FLOOD_PID"
 
-    local A=() D0=() D1=() F0=()
+    # far-chan/dis1 is the USB-contention control that holds on a BUSY
+    # channel too: with the gate off the injector ignores ambient, so the
+    # only thing a far-channel flooder can still cost it is the host/USB
+    # path. far-chan/dis0 folds ambient deferral into that number and is
+    # kept for the idle-channel reading it was designed for.
+    local A=() D0=() D1=() F0=() F1=()
     for r in $(seq 1 "$REPS"); do
         A+=("$(inject "$dut" "$ch" 0 "$label-alone-$r")")
         flood_start "$ch"; sleep 4
@@ -99,20 +104,31 @@ run_config() { # $1=dut_pid $2=ch $3=farch $4=label
         flood_stop; sleep 1
         flood_start "$farch"; sleep 4
         F0+=("$(inject "$dut" "$ch" 0 "$label-far0-$r")")
+        F1+=("$(inject "$dut" "$ch" 1 "$label-far1-$r")")
         flood_stop; sleep 1
     done
-    local a d0 d1 f0; a=$(mean "${A[@]}"); d0=$(mean "${D0[@]}"); d1=$(mean "${D1[@]}"); f0=$(mean "${F0[@]}")
-    printf "  alone=%s  co-chan/dis0=%s  co-chan/dis1=%s  far-chan/dis0=%s\n" "$a" "$d0" "$d1" "$f0"
-    printf "%s\t%s\t%s\t%s\t%s\n" "$label" "$a" "$d0" "$d1" "$f0" >>"$OUT/summary.tsv"
-    python3 - "$a" "$d0" "$d1" "$f0" "$label" <<'PYEOF'
+    local a d0 d1 f0 f1; a=$(mean "${A[@]}"); d0=$(mean "${D0[@]}"); d1=$(mean "${D1[@]}"); f0=$(mean "${F0[@]}"); f1=$(mean "${F1[@]}")
+    printf "  alone=%s  co-chan/dis0=%s  co-chan/dis1=%s  far-chan/dis0=%s  far-chan/dis1=%s\n" "$a" "$d0" "$d1" "$f0" "$f1"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$label" "$a" "$d0" "$d1" "$f0" "$f1" >>"$OUT/summary.tsv"
+    python3 - "$a" "$d0" "$d1" "$f0" "$f1" "$label" <<'PYEOF'
 import sys
-a,d0,d1,f0,label=int(sys.argv[1]),int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),sys.argv[5]
+a,d0,d1,f0,f1,label=int(sys.argv[1]),int(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),sys.argv[6]
 if a==0: print("  (no baseline)"); sys.exit()
-defr=100*(1-d0/a); usb=100*(1-f0/a); rec=(d1/d0) if d0 else 0
-print(f"  co-chan deferral(dis0)={defr:+.0f}%  USB-only(far)={usb:+.0f}%  recovery dis1/dis0={rec:.2f}x  dis1 vs alone={100*(1-d1/a):+.0f}%")
+# "alone" is only a ceiling on an idle channel. On a channel with a resident
+# network the gated injector defers to ambient and alone reads BELOW the
+# gates-off co-channel cell; the gates-off rate is then the ceiling, and the
+# USB term comes from the gates-off far-channel cell, which ambient cannot
+# touch (measured: RTL8733B on a busy ch36, alone 3.0k vs dis1 7.2k fps,
+# far/dis1 7.1k).
+ceiling=a; usb_ref=f0
+if d1 > a*1.1:
+    ceiling=d1; usb_ref=f1
+    print(f"  note: alone={a} < co-chan/dis1={d1} — 'alone' is not an idle baseline here (resident traffic); ceiling=dis1, USB term from far-chan/dis1={f1}")
+defr=100*(1-d0/ceiling); usb=100*(1-usb_ref/ceiling); rec=(d1/d0) if d0 else 0
+print(f"  co-chan deferral(dis0)={defr:+.0f}%  USB-only(far)={usb:+.0f}%  recovery dis1/dis0={rec:.2f}x  dis1 vs ceiling={100*(1-d1/ceiling):+.0f}%")
 real = defr - usb   # deferral net of USB contention
-if real >= 15 and d1 >= a*0.85:
-    print(f"  => {label}: dis_cca HELPS — real co-channel CCA deferral {real:.0f}% removed, TX back to ~alone")
+if real >= 15 and d1 >= ceiling*0.85:
+    print(f"  => {label}: dis_cca HELPS — real co-channel CCA deferral {real:.0f}% removed, TX back to ~the ceiling")
 elif real >= 15 and rec >= 1.25:
     print(f"  => {label}: dis_cca HELPS (partial) — {real:.0f}% deferral, {rec:.2f}x recovery")
 elif real < 8:
@@ -132,7 +148,7 @@ for cfg in $ONLY; do
         eu5g)  run_config "$EU_PID" 36 149 "EU5G"  ;;
         cu5g)  run_config "$CU_PID" 36 149 "CU5G"  ;;
         eu24g) run_config "$EU_PID" 6  149 "EU24G" ;;   # 2.4 GHz DUT, 5 GHz far-control
-        b7335g) run_config "$B733_PID" 36 149 "B733-5G" ;; # RTL8733B; INJ_PWR is inert there (flat index refused). NB the verdict line assumes an idle "alone" channel — on a ch36 with a resident network alone < co-chan and it prints inconclusive; read the raw dis1/dis0 recovery
+        b7335g) run_config "$B733_PID" 36 149 "B733-5G" ;; # RTL8733B; INJ_PWR is inert there (flat index refused)
         *) echo "unknown config: $cfg" ;;
     esac
 done

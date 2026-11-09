@@ -2633,10 +2633,25 @@ int main(int argc, char **argv) {
     if (rc) {
       consec_fail = 0;
     } else if (++consec_fail >= kMaxConsecFail) {
-      logger->error("TX aborting: {} consecutive bulk-OUT failures — TX path "
-                    "not enabled (chip NAKing). Stopping to avoid wedging the "
-                    "adapter; clean card-disable follows.",
-                    consec_fail);
+      /* Two different failures share send_packet's `false`: the transport
+       * refusing the URB (a NAKing chip — the wedge risk this abort exists
+       * for) and the backend refusing the FRAME before any USB happens (a
+       * width or rate the channel cannot carry, logged by name by the
+       * backend). GetTxStats().failed counts only the former, so it tells
+       * them apart; blaming the USB path for a refused frame sent more than
+       * one operator after the wrong fault. */
+      const auto st = rtlDevice->GetTxStats();
+      if (st.failed > 0)
+        logger->error("TX aborting: {} consecutive bulk-OUT failures — TX "
+                      "path not enabled (chip NAKing). Stopping to avoid "
+                      "wedging the adapter; clean card-disable follows.",
+                      consec_fail);
+      else
+        logger->error("TX aborting: the backend refused {} consecutive frames "
+                      "before any USB transfer (no bulk-OUT failures) — a "
+                      "rate/width/encoding the channel cannot carry; its own "
+                      "error line above names it.",
+                      consec_fail);
       break;
     }
     bool burst_off_window = false;

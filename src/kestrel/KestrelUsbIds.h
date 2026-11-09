@@ -65,9 +65,7 @@ inline std::optional<ChipVariant> variant_for_usb_id(uint16_t vid,
 }
 
 /* PCIe siblings, dispatched by PCI device id (the AX 0x00FC byte is
- * R_AX_SYS_CHIPINFO, not a chip-id). The RTL8852BE (10ec:b852) is listed as
- * the C8852B die but its PCIe power sequence is unported — the factory refuses
- * it rather than run the USB one. */
+ * R_AX_SYS_CHIPINFO, not a chip-id). */
 struct KestrelPciId {
   uint16_t vid;
   uint16_t did;
@@ -76,7 +74,7 @@ struct KestrelPciId {
 
 inline constexpr KestrelPciId kKestrelPciIds[] = {
     {0x10ec, 0xc852, ChipVariant::C8852C}, /* RTL8852CE */
-    {0x10ec, 0xb852, ChipVariant::C8852B}, /* RTL8852BE (unported) */
+    {0x10ec, 0xb852, ChipVariant::C8852B}, /* RTL8852BE */
 };
 
 inline std::optional<ChipVariant> variant_for_pci_id(uint16_t vid,

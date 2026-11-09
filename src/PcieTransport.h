@@ -1,7 +1,8 @@
 #pragma once
 
 /* PcieTransport — vfio-pci userspace transport for the PCIe Realtek parts
- * (RTL8821CE on the Jaguar2 HAL; RTL8852CE on the Kestrel HAL).
+ * (RTL8821CE / RTL8822BE on the Jaguar2 HAL, RTL8822CE on the Jaguar3 HAL,
+ * RTL8852BE / RTL8852CE on the Kestrel HAL).
  *
  * The caller owns vfio, mirroring the USB doctrine ("the caller owns libusb"):
  * PcieTransport::Open(bdf) is the recommended open path — it walks

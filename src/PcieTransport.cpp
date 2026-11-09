@@ -18,7 +18,7 @@
     defined(DEVOURER_HAVE_JAGUAR3_8822C)
 #include "PcieDma88xx.h"
 #endif
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
+#if defined(DEVOURER_HAVE_KESTREL_8852C) || defined(DEVOURER_HAVE_KESTREL_8852B)
 #include "PcieDmaAx.h"
 #endif
 
@@ -75,7 +75,8 @@ bool PcieTransport::select_dma_plane() {
   switch (_pci_did) {
   case kPciDidRtl8852ce:
 #if defined(DEVOURER_HAVE_KESTREL_8852C)
-    _dma = std::make_unique<PcieDmaAx>(*this, _logger, _cfg.rx_poll_us);
+    _dma = std::make_unique<PcieDmaAx>(*this, _logger, _cfg.rx_poll_us,
+                                       AxDie::C8852C);
     return true;
 #else
     _logger->error("PcieTransport: RTL8852CE ({:04x}:{:04x}) needs "
@@ -84,11 +85,18 @@ bool PcieTransport::select_dma_plane() {
     return false;
 #endif
   case kPciDidRtl8852be:
-    _logger->error("PcieTransport: RTL8852BE ({:04x}:{:04x}) is not ported "
-                   "(its PCIe power sequence and single-BDRAM ring table are "
-                   "unported; the 8852CE is)",
+#if defined(DEVOURER_HAVE_KESTREL_8852B)
+    /* The 8852B die's older AX PCIe DMA engine: same plane class, its own
+     * channel set / register bank / WD layout. */
+    _dma = std::make_unique<PcieDmaAx>(*this, _logger, _cfg.rx_poll_us,
+                                       AxDie::C8852B);
+    return true;
+#else
+    _logger->error("PcieTransport: RTL8852BE ({:04x}:{:04x}) needs "
+                   "DEVOURER_KESTREL_8852B=ON",
                    _pci_vid, _pci_did);
     return false;
+#endif
   default:
 #if defined(DEVOURER_HAVE_JAGUAR2_8821C) || defined(DEVOURER_HAVE_JAGUAR2_8822B) || \
     defined(DEVOURER_HAVE_JAGUAR3_8822C)

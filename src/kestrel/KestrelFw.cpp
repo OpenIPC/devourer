@@ -186,9 +186,11 @@ bool KestrelFw::hfc_init_dlfw() {
   clr32(fc_ctrl, r::B_AX_HCI_FC_EN | r::B_AX_HCI_FC_CH12_EN);
   /* set_fc_h2c: CH_PAGE_CTRL = h2c_prec<<16; HCI_FC_CTRL CH12_FULL_COND=X2.
    * The 8852C PCIe DLFW pre-cost is 256 pages (hfc_preccfg_pcie_dlfw_8852c),
-   * the USB one 32. */
+   * the 8852B PCIe one 40 (hfc_preccfg_pcie), USB 32. */
   const uint16_t h2c_prec =
-      _pcie ? r::HFC_PCIE_DLFW_H2C_PREC_8852C : r::HFC_USB_H2C_PREC_8852B;
+      !_pcie ? r::HFC_USB_H2C_PREC_8852B
+      : c    ? r::HFC_PCIE_DLFW_H2C_PREC_8852C
+             : r::HFC_PCIE_DLFW_H2C_PREC_8852B;
   _device.rtw_write32(
       page_ctrl, (static_cast<uint32_t>(h2c_prec & r::B_AX_PREC_PAGE_CH12_MSK)
                   << r::B_AX_PREC_PAGE_CH12_SH));

@@ -355,25 +355,33 @@ std::unique_ptr<IRadio> WiFiDriver::CreateRadioPcie(
    * factory's PID-first Kestrel dispatch. */
   if (auto kvariant = kestrel::variant_for_pci_id(transport->pci_vendor_id(),
                                                   transport->pci_device_id())) {
-    if (*kvariant != kestrel::ChipVariant::C8852C) {
-      _logger->error("PCI {:04x}:{:04x} at {} is an RTL8852BE: its PCIe power "
-                     "sequence is unported — refusing rather than running the "
-                     "USB one",
-                     transport->pci_vendor_id(), transport->pci_device_id(),
-                     transport->bdf());
+    const bool is_c = *kvariant == kestrel::ChipVariant::C8852C;
+#if defined(DEVOURER_HAVE_KESTREL)
+#if !defined(DEVOURER_HAVE_KESTREL_8852C)
+    if (is_c) {
+      _logger->error("RTL8852CE detected but 8852C support not compiled in "
+                     "(DEVOURER_KESTREL_8852C=OFF)");
       return nullptr;
     }
-#if defined(DEVOURER_HAVE_KESTREL_8852C)
-    _logger->info("Creating RtlKestrelDevice C8852C over PCIe ({}; PCI "
+#endif
+#if !defined(DEVOURER_HAVE_KESTREL_8852B)
+    if (!is_c) {
+      _logger->error("RTL8852BE detected but 8852B support not compiled in "
+                     "(DEVOURER_KESTREL_8852B=OFF)");
+      return nullptr;
+    }
+#endif
+    _logger->info("Creating RtlKestrelDevice {} over PCIe ({}; PCI "
                   "{:04x}:{:04x})",
-                  transport->bdf(), transport->pci_vendor_id(),
-                  transport->pci_device_id());
+                  is_c ? "C8852C" : "C8852B", transport->bdf(),
+                  transport->pci_vendor_id(), transport->pci_device_id());
     return std::make_unique<RtlKestrelDevice>(
-        RtlAdapter(std::move(transport), _logger, cfg), _logger,
-        kestrel::ChipVariant::C8852C, cfg);
+        RtlAdapter(std::move(transport), _logger, cfg), _logger, *kvariant,
+        cfg);
 #else
-    _logger->error("RTL8852CE detected but 8852C support not compiled in "
-                   "(DEVOURER_KESTREL_8852C=OFF)");
+    _logger->error("{} detected but no Kestrel support is compiled in "
+                   "(DEVOURER_KESTREL_8852B/8852C both OFF)",
+                   is_c ? "RTL8852CE" : "RTL8852BE");
     return nullptr;
 #endif
   }

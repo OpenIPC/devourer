@@ -3833,23 +3833,49 @@ int run_ue(IRadio *dev, const Cfg &c) {
           /* Needed from now on (a list just heard): nothing before is missed. */
           if (!had_susp)
             last_susp_sf = std::max(last_susp_sf, *now_du / P - 1);
-          /* A suspend superframe gone by without its gap: said, never silent. */
-          for (int64_t S = std::max(last_susp_sf + 1, *now_du / P - gap_suspend_every); S < *now_du / P; ++S)
-            if (devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every) &&
-                S * P + ((susp[susp_rr % susp.size()].offset_us - gap_retune_us - gap_guard_us) % P + P) % P <=
-                    *now_du) {
-              last_susp_sf = S;
-              char l[140];
-              snprintf(l, sizeof l, "{\"ev\":\"cell.ue.suspend_missed\",\"ue\":%d,\"sf\":%lld}", me, (long long)S);
-              emit(l);
+          /* Suspend superframes gone by without their gap since the last one
+           * accounted for: said, never silent (each, or one aggregate after
+           * a long pause). */
+          {
+            const int64_t w0 =
+                ((susp[susp_rr % susp.size()].offset_us - gap_retune_us - gap_guard_us) % P + P) % P;
+            int64_t n_missed = 0, first_missed = -1, last_missed = -1;
+            for (int64_t S = last_susp_sf + 1; S <= *now_du / P; ++S)
+              if (devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every) &&
+                  S * P + w0 <= *now_du) {
+                if (n_missed++ == 0)
+                  first_missed = S;
+                last_missed = S;
+              }
+            if (n_missed > 0) {
+              last_susp_sf = last_missed;
+              char l[200];
+              if (n_missed <= 3)
+                for (int64_t S = first_missed; S <= last_missed; ++S) {
+                  if (!devourer::cell::suspend_sf(S, static_cast<uint16_t>(me), gap_suspend_every))
+                    continue;
+                  snprintf(l, sizeof l, "{\"ev\":\"cell.ue.suspend_missed\",\"ue\":%d,\"sf\":%lld}", me,
+                           (long long)S);
+                  emit(l);
+                }
+              else {
+                snprintf(l, sizeof l,
+                         "{\"ev\":\"cell.ue.suspend_missed\",\"ue\":%d,\"sf\":%lld,\"to_sf\":%lld,\"n\":%lld}",
+                         me, (long long)first_missed, (long long)last_missed, (long long)n_missed);
+                emit(l);
+              }
             }
+          }
           /* Taken if it starts within this pass's reach (< 2 P ahead). */
           if (const auto ns = next_susp(*now_du); ns && ns->second - *now_du < 2 * P) {
             const auto n = susp[susp_rr % susp.size()];
-            last_susp_sf = ns->first;
-            ++susp_rr;
-            run_gap(n, ns->second, susp_len, true);
-            susp_ran = true;
+            /* Only a gap that ran consumes its superframe; a failed one (late,
+             * the beacon would not stop) is left to the missed-scan above. */
+            if (run_gap(n, ns->second, susp_len, true)) {
+              last_susp_sf = ns->first;
+              ++susp_rr;
+              susp_ran = true;
+            }
           }
         }
       }

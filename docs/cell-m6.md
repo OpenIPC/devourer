@@ -1144,7 +1144,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   - a pass that ran a suspend gap skips the idle block;
   - an idle gap whose start went by is retried;
   - a suspend superframe gone by without its gap is logged
-    (`cell.ue.suspend_missed`).
+    (`cell.ue.suspend_missed`): every one since the last accounted for, or
+    one aggregate after a long pause;
+  - only a gap that ran consumes its suspend superframe; a failed one (late,
+    the beacon would not stop) is left to that log.
 
 **First attempts at execution, in order:**
 1. The source's stale reports re-triggered the A3 for the UE that had just

@@ -288,7 +288,7 @@ untouched) and fall back to the full path.
 
 ## Not ported
 
-`ReadTsf`/beacons, A-MPDU TX, `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
+`ReadTsf`/beacons, `FastSetBandwidth`, the flat-index / per-rate-diff TX-power knobs
 (`SetTxPowerIndexOverride`, `SetTxPowerRateDiffs`, `ReApplyTxPower` — only the
 relative `SetTxPowerOffsetQdb` is ported) and `rx.path` per-chain telemetry.
 These inherit `IRadio`'s not-ported defaults (`false`, `0`, or a full-path
@@ -426,8 +426,7 @@ produced 128,702 at 1.001 plus 14,402 addressed `0x94` BlockAcks, every one
 carrying a nonzero bitmap. Both arms were real A-MPDUs (`paggr` 0.665/1.000,
 max burst 9). The control-frame event checks RA=the Jaguar2 TA and TA=the
 configured RTL8733B MAC, so ambient BlockAcks do not count. This establishes
-the RTL8733B responder on that measured combination only. RTL8733B A-MPDU
-**TX** remains unported and unmeasured.
+the RTL8733B responder on that measured combination only.
 
 **`tx.retry_limit` drives real autonomous retransmission** — `tx_retry_limit_ok`
 is true. `tests/rtl8733b_retry_limit_onair.sh` judges from the air because this
@@ -494,6 +493,53 @@ hardware-ARQ endpoint — responder, autonomous retry, and the per-frame deliver
 report, so `TxReport.state == 1` (the peer stopped ACKing) is available here
 like on the Jaguars. The reports need an RX loop (`DEVOURER_TX_WITH_RX=thread`
 in txdemo), the same as Jaguar1/2.
+
+## A-MPDU TX
+
+`SetAmpduMode` is ported, and the two things that make it work here are
+measured rather than copied from Jaguar2. The descriptor half is the generic
+halmac placement (data QSEL dword1[12:8], `AGG_EN` dword2[12], density
+dword2[22:20], `MAX_AGG_NUM` dword3[21:17]); the QSEL also picks the bulk-OUT
+endpoint through `TXDMA_PQ_MAP` (BE/BK → LOW, VI/VO → NORMAL, MGMT → HIGH,
+`ep_for_qsel`), as the vendor's `rtw_get_ff_hwaddr` does. On its own that
+half does nothing on this die: with `AGG_EN`, a data QSEL, 0x0456 at 0x20,
+0x04BC[6] cleared and three frames per URB, the b733 aired every frame as a
+single (RTL8812EU witness `paggr` 0.00, control: an RTL8822BU through the
+same witness reads `paggr` 1.00), at ~305 fps.
+
+- **The MAC aggregates only frames it numbers itself.** `EN_HWSEQ`
+  (dword8[15]), which the vendor sets on every data frame and the inject path
+  does not, flipped `paggr` from 0.00 to 1.00 with nothing else changed. So an
+  aggregated frame's sequence number is the MAC's SSN counter, not the
+  caller's; a consumer that keys on its own sequence numbers must not run
+  this mode (the payload counter, `DEVOURER_TX_QOS_DATA` + `DEVOURER_RX_PCTR`,
+  is the right ledger for it).
+- **Data queues are paced by the EDCA TXOP limit, not by 0x0456/0x04BC.**
+  Isolated by QSEL alone (same endpoint, no `AGG_EN`): BE ~310 fps, VO
+  ~600 fps, MGMT ~2600 fps — the vendor init's BE parameter 0x005ea42b holds
+  each launch for 0x5e × 32 µs ≈ 3.0 ms and VO's 0x2f for 1.5 ms; MACID 0 vs
+  1, MEDIA_STATUS_RPT and the endpoint changed nothing. Zeroing the TXOP limit
+  took the BE queue to 1446 fps alone and, with `EN_HWSEQ`, to the aggregated
+  figures below. `SetAmpduMode` zeroes the TID's AC register (0x0500/04/08/0c)
+  and restores it on clear; 0x0456 and 0x04BC are programmed too, measured
+  inert here.
+
+Delivered distinct payload counters per second at the RTL8812EU witness,
+ch36, 1000 B QoS-Data, no-ack (`0/16/7/1/0x20`), ~9 s cells:
+
+| | singles (MGMT queue) | A-MPDU, 3 frames/URB (`send_packets`) | A-MPDU, depth-1 `send_packet` |
+|---|---|---|---|
+| MCS7/20 | 2050/s | **3829/s** (+87%, `paggr` 1.00) | 3671/s (+79%) |
+| MCS3/20 | 1360/s | **1758/s** (+29%) | — |
+
+Counterparts: one unit, one witness, a busy ch36 (the singles baseline moved
+between 2050 and 2700/s across the session, so the gain is the within-run
+ratio, not the absolute); the witness reports `paggr` but not burst
+boundaries (every MPDU carries its own `tsfl` on the 8812EU), so the
+aggregate size is unmeasured; the unicast-ARQ shape (BlockAck responder,
+`no_ack=0`) that cost Jaguar2 −8% at MCS3 was not run here; and the depth-1
+result means this die aggregates from a sync single-frame feed too, unlike
+the Jaguar2 recipe's batched-feed requirement.
 
 ## Validation status
 

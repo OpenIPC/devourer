@@ -147,8 +147,9 @@ is a frozen 2021 drop.
 
 The RTL8733B backend covers the 1T1R 802.11n RTL8731BU/RTL8733BU family with
 20/40 MHz monitor RX and raw CCK/OFDM/HT injection (CCK is 2.4 GHz, 20 MHz,
-long preamble only). It intentionally does not advertise VHT, LDPC, SGI, STBC,
-or experimental 5/10 MHz operation; see
+long preamble only), short GI and LDPC on TX, A-MPDU TX, per-frame CCX TX
+reports and the MAC carrier-sense gates. It intentionally does not advertise
+VHT, STBC, RX-LDPC (measured absent) or 5 MHz; see
 [the validation record](docs/rtl8733b.md) for the tested and deferred matrix.
 
 The **MT7612U** backend (`src/mt7612u/`) is the one non-Realtek family, behind

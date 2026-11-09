@@ -242,8 +242,11 @@ constexpr FifoParams fifo_params(ChipVariant v, bool is_usb = true) {
   if (v == ChipVariant::C8821C)
     return is_usb ? FifoParams{65536, 16384, 0, 16, 16, 16, 0, 1}
                   : FifoParams{65536, 16384, 0, 16, 16, 16, 14, 1};
+  /* 8822B PCIe (RTL8822BE): rtw88 page_table_8822b[1] = 64/64/64/64/1 — the
+   * extra queue the PCIe queue map puts MGQ on gets 64 pages, vs 0 on the
+   * 3-bulkout USB table. */
   return FifoParams{TX_FIFO_SIZE, RX_FIFO_SIZE, RSVD_PG_CSIBUF_NUM,
-                    PG_HQ, PG_NQ, PG_LQ, PG_EXQ, PG_GAP};
+                    PG_HQ, PG_NQ, PG_LQ, is_usb ? PG_EXQ : 64, PG_GAP};
 }
 
 } /* namespace */
@@ -724,30 +727,69 @@ void HalmacJaguar2MacInit::init_usb_cfg() {
   _logger->info("Jaguar2: init_usb_cfg (RXDMA_MODE=0x{:02x}, RX-agg EN)", v);
 }
 
-/* PCIe interface-PHY config (rtw_pci_phy_cfg): the 8821C gen1 intf table is a
- * single MDIO write {addr 0x09, val 0x6380} (gen2 is empty), issued through
- * the REG_MDIO_V1 (0x3F4) / REG_PCIE_MIX_CFG (0x3F8) window — normal MAC
- * registers, so plain rtw_read/write works. ASPM/CLKREQ tuning is skipped for
- * bring-up (power saving only; the transport already clears ASPM in LNKCTL). */
-void HalmacJaguar2MacInit::pcie_phy_cfg() {
+/* PCIe interface-PHY config (rtw_pci_phy_cfg): per-die MDIO tables issued
+ * through the REG_MDIO_V1 (0x3F4) / REG_PCIE_MIX_CFG (0x3F8) window — normal
+ * MAC registers, so plain rtw_read/write works. The 8821C gen1 table is one
+ * cut-independent write {0x09, 0x6380} (gen2 empty); the 8822B carries ten
+ * gen1 + ten gen2 writes, all gated to cut C (rtw8822b.c
+ * pcie_gen1/gen2_param_8822b), so on any other cut nothing is written.
+ * ASPM/CLKREQ tuning is skipped for bring-up (power saving only; the
+ * transport already clears ASPM in LNKCTL). */
+namespace {
+struct MdioPara { uint8_t addr; uint16_t val; uint8_t cut_mask; };
+constexpr uint8_t kCutAll = 0xFF;
+constexpr uint8_t kCutC = 1u << 2;
+constexpr MdioPara kMdioGen1_8821c[] = {{0x09, 0x6380, kCutAll}};
+constexpr MdioPara kMdioGen1_8822b[] = {
+    {0x01, 0xA841, kCutC}, {0x02, 0x60C6, kCutC}, {0x08, 0x3596, kCutC},
+    {0x09, 0x321C, kCutC}, {0x0A, 0x9623, kCutC}, {0x20, 0x94FF, kCutC},
+    {0x21, 0xFFCF, kCutC}, {0x26, 0xC006, kCutC}, {0x29, 0xFF0E, kCutC},
+    {0x2A, 0x1840, kCutC}};
+constexpr MdioPara kMdioGen2_8822b[] = {
+    {0x01, 0xA841, kCutC}, {0x02, 0x60C6, kCutC}, {0x08, 0x3597, kCutC},
+    {0x09, 0x321C, kCutC}, {0x0A, 0x9623, kCutC}, {0x20, 0x94FF, kCutC},
+    {0x21, 0xFFCF, kCutC}, {0x26, 0xC006, kCutC}, {0x29, 0xFF0E, kCutC},
+    {0x2A, 0x3040, kCutC}};
+} /* namespace */
+
+bool HalmacJaguar2MacInit::mdio_write(uint8_t addr, uint16_t data, bool g1) {
   constexpr uint16_t REG_MDIO_V1 = 0x03F4;
   constexpr uint16_t REG_PCIE_MIX_CFG = 0x03F8;
-  const uint8_t addr = 0x09;
-  const uint16_t data = 0x6380;
   _device.rtw_write16(REG_MDIO_V1, data);
-  /* page = (addr < 32 ? 0 : 1) + G1 page offset (0). */
+  /* page = (addr < 32 ? 0 : 1) + the generation's page offset (G1 0, G2 2). */
+  uint8_t page = static_cast<uint8_t>((addr < 32 ? 0 : 1) + (g1 ? 0 : 2));
   _device.rtw_write8(REG_PCIE_MIX_CFG, addr & 0x1F);
-  _device.rtw_write8(REG_PCIE_MIX_CFG + 3, 0);
+  _device.rtw_write8(REG_PCIE_MIX_CFG + 3, page);
   _device.rtw_write32(REG_PCIE_MIX_CFG,
                       _device.rtw_read32(REG_PCIE_MIX_CFG) | (1u << 5));
   for (int i = 0; i < 20; i++) {
-    if ((_device.rtw_read32(REG_PCIE_MIX_CFG) & (1u << 5)) == 0) {
-      _logger->info("Jaguar2: PCIe MDIO gen1 cfg applied (0x09=0x6380)");
-      return;
-    }
+    if ((_device.rtw_read32(REG_PCIE_MIX_CFG) & (1u << 5)) == 0)
+      return true;
     std::this_thread::sleep_for(std::chrono::microseconds(10));
   }
-  _logger->warn("Jaguar2: PCIe MDIO write did not complete (non-fatal)");
+  _logger->warn("Jaguar2: PCIe MDIO write 0x{:02x} did not complete (non-fatal)",
+                addr);
+  return false;
+}
+
+void HalmacJaguar2MacInit::pcie_phy_cfg(uint8_t cut) {
+  const uint8_t cut_bit = static_cast<uint8_t>(1u << (cut & 7));
+  auto walk = [&](const MdioPara *t, size_t n, bool g1) {
+    int done = 0;
+    for (size_t i = 0; i < n; i++)
+      if ((t[i].cut_mask & cut_bit) && mdio_write(t[i].addr, t[i].val, g1))
+        ++done;
+    return done;
+  };
+  int n1 = 0, n2 = 0;
+  if (_variant == ChipVariant::C8821C) {
+    n1 = walk(kMdioGen1_8821c, 1, true);
+  } else {
+    n1 = walk(kMdioGen1_8822b, sizeof(kMdioGen1_8822b) / sizeof(MdioPara), true);
+    n2 = walk(kMdioGen2_8822b, sizeof(kMdioGen2_8822b) / sizeof(MdioPara), false);
+  }
+  _logger->info("Jaguar2: PCIe MDIO cfg applied (cut={}, gen1 {} + gen2 {} writes)",
+                static_cast<int>(cut), n1, n2);
 }
 
 } /* namespace jaguar2 */

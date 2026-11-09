@@ -176,6 +176,7 @@ private:
   bool open_vfio(const std::string &bdf);
   bool map_bar2();
   bool setup_config_space();
+  void enable_bus_master(); /* after init_dma: the slab must exist first */
   bool select_dma_plane();
   bool init_dma();
   bool setup_msi();

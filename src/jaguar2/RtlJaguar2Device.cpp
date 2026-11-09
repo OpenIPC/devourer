@@ -51,6 +51,7 @@ RtlJaguar2Device::~RtlJaguar2Device() {
   StopCwTone();
   stop_pwrtrack();
   stop_dig();
+  pcie_quiesce();
   /* Safety net: a station arm the caller did not clear ends with the
    * device, not with whatever state the chip is left in. */
   try {
@@ -88,9 +89,14 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
    * pre-init -> power-on -> system-cfg -> DLFW, giving the chip a clean slate. */
   bool fw_ok = false;
   constexpr int kBringupTries = 4;
-  /* rtw88 applies the PCIe interface-PHY MDIO config once at probe. */
-  if (!_device.is_usb())
-    _macinit.pcie_phy_cfg();
+  /* rtw88 applies the PCIe interface-PHY MDIO config once at probe, after
+   * rtw_chip_info_setup's power cycle has read the cut. The 8821C table is
+   * cut-independent and has run pre-power since the 8821CE port (kept); the
+   * 8822B tables are cut-C-gated, so they run once the first attempt has the
+   * chip version. */
+  if (!_device.is_usb() && _variant == jaguar2::ChipVariant::C8821C)
+    _macinit.pcie_phy_cfg(0);
+  bool phy_cfg_done = _device.is_usb() || _variant == jaguar2::ChipVariant::C8821C;
   for (int attempt = 0; attempt < kBringupTries && !fw_ok; attempt++) {
     if (attempt > 0)
       _logger->error("RtlJaguar2Device: DLFW failed — full power-cycle retry "
@@ -104,6 +110,10 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
     _macinit.pre_init_system_cfg();
     _hal.power_on();
     _hal.read_chip_version();
+    if (!phy_cfg_done) {
+      _macinit.pcie_phy_cfg(_hal.chip_version().cut);
+      phy_cfg_done = true;
+    }
     _macinit.init_system_cfg(channel.ChannelWidth, _hal.chip_version().cut);
     fw_ok = _fw.download_default_firmware();
   }
@@ -783,12 +793,44 @@ void RtlJaguar2Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
   int rx_urb_bytes = _cfg.rx.urb_bytes.value_or(16 * 1024);
   if (rx_urb_bytes < 4096)
     rx_urb_bytes = 4096;
+  _rx_running = true;
   _device.bulk_read_async_loop(rx_urb_bytes, 8, on_data, [this]() -> bool {
     return _rx_stop || g_devourer_should_stop;
   });
+  _rx_running = false;
   stop_dig();
   _logger->info("RtlJaguar2Device: RX loop exited ({} frames, {} reads)", frames,
                 reads);
+}
+
+/* PCIe teardown. This generation leaves the chip powered after Stop() on
+ * USB (the beacon keeps airing until re-enumeration), but over PCIe the
+ * chip's RX DMA keeps fetching buffer descriptors from the slab the
+ * transport is about to unmap: the 8822BE logged an IOMMU read fault at the
+ * RXBD ring IOVA on every session exit until this ran. rtw88's order:
+ * rtw_pci_stop (interrupts off, rings reset) then rtw_mac_power_off — the
+ * card-disable sequence is what stops the DMA engine, so it runs here after
+ * the RX reap loop has returned. Idempotent; USB is untouched. */
+void RtlJaguar2Device::pcie_quiesce() {
+  if (_device.is_usb() || _pcie_quiesced || !_brought_up)
+    return;
+  _rx_stop = true;
+  for (int i = 0; i < 200 && _rx_running.load(); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  if (_rx_running.load())
+    _logger->warn("Jaguar2 PCIe: RX loop still running after 2 s — stopping "
+                  "DMA under it");
+  _pcie_quiesced = true;
+  try {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    _device.rtw_write32(0x0608, 0);    /* RCR: accept nothing more */
+    _device.rtw_write16(0x0100, 0);    /* CR: MACRXEN/MACTXEN off */
+    _hal.power_off();                  /* card-disable: TRX DMA stops */
+    _device.rtw_write32(0x00B0, 0);    /* HIMR0: no further RX interrupts */
+  } catch (const std::exception &e) {
+    _logger->warn("Jaguar2 PCIe: quiesce incomplete: {}", e.what());
+  }
+  _logger->info("Jaguar2 PCIe: DMA quiesced (card-disable) before transport teardown");
 }
 
 void RtlJaguar2Device::stop_dig() {
@@ -1412,7 +1454,8 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
     c.variant = "C8821C";
   } else {
     c.chip_name = "RTL8822B";
-    c.marketing_names = "RTL8822BU/RTL8812BU";
+    c.marketing_names = c.transport[0] == 'p' ? "RTL8822BE"
+                                              : "RTL8822BU/RTL8812BU";
     c.chip_id = 0x0a;
     c.variant = "C8822B";
     /* 8822BU on air: VHT 1SS MCS0 and 2SS MCS0 on 2.4 GHz, every sampled frame
@@ -2360,6 +2403,7 @@ void RtlJaguar2Device::Stop() {
     if (_station.armed())
       (void)_station.clear(_device, _logger, "Jaguar2");
   }
+  pcie_quiesce();
 }
 
 void RtlJaguar2Device::SetTxMode(const devourer::TxMode &mode) {

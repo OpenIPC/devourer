@@ -250,6 +250,8 @@ SUPPORTED_DUTS = {
     "2357:012d": "RTL8822BU (TP-Link T3U, Jaguar2)",
     "0bda:b82c": "RTL8822BU (Jaguar2)",
     "0bda:b812": "RTL8822BU (CF-924AC V2, Jaguar2)",
+    "0bda:b733": "RTL8733BU (LB-LINK BL-M8733BU2-L, HALMAC 87xx)",
+    "0bda:f72b": "RTL8731BU (HALMAC 87xx)",
     "0bda:c811": "RTL8821CU (Jaguar2)",
     "0bda:c812": "RTL8812CU (Jaguar3)",
     "0bda:c82c": "RTL8822CU (Jaguar3)",
@@ -691,7 +693,20 @@ class Dut:
 
     @property
     def iface_id(self) -> str:
-        """Interface address sysfs expects for bind/unbind."""
+        """Interface address sysfs expects for bind/unbind: the Wi-Fi
+        function. On a single-function dongle that is interface 0; on a
+        Wi-Fi + Bluetooth combo (RTL8733BU: interfaces 0/1 are class e0,
+        Bluetooth, held by btusb) it is the first vendor-specific (class ff)
+        interface — binding or watching :1.0 there drives btusb and never
+        sees the wlan netdev."""
+        base = f"/sys/bus/usb/devices/{self.sysfs_id}"
+        for n in range(8):
+            try:
+                with open(f"{base}/{self.sysfs_id}:1.{n}/bInterfaceClass") as f:
+                    if f.read().strip().lower() == "ff":
+                        return f"{self.sysfs_id}:1.{n}"
+            except OSError:
+                continue
         return f"{self.sysfs_id}:1.0"
 
     @property

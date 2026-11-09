@@ -478,7 +478,7 @@ void HalmacJaguar3MacInit::init_usb_cfg() {
                 v);
 }
 
-void HalmacJaguar3MacInit::pcie_intf_cfg(uint8_t cut, uint8_t rfe_type) {
+void HalmacJaguar3MacInit::pcie_link_cfg() {
   if (_device.is_usb())
     return;
   /* DBI write (rtw_dbi_write8): REG_DBI_WDATA_V1 0x3E8 holds the byte at its
@@ -504,7 +504,13 @@ void HalmacJaguar3MacInit::pcie_intf_cfg(uint8_t cut, uint8_t rfe_type) {
   if (!done)
     _logger->warn("Jaguar3: PCIe DBI write (CLKDLY_CTRL=0) did not complete "
                   "(non-fatal)");
+  else
+    _logger->info("Jaguar3: PCIe link cfg applied (DBI CLKDLY_CTRL=0)");
+}
 
+void HalmacJaguar3MacInit::pcie_intf_cfg(uint8_t cut, uint8_t rfe_type) {
+  if (_device.is_usb())
+    return;
   /* rtw_pci_interface_cfg: cut >= D (3 = D with A = 0) */
   constexpr uint16_t REG_HCI_MIX_CFG = 0x03FC;
   if (cut >= 3)
@@ -517,7 +523,7 @@ void HalmacJaguar3MacInit::pcie_intf_cfg(uint8_t cut, uint8_t rfe_type) {
     uint32_t v = _device.rtw_read32(REG_ANAPARSW_MAC_0) & ~(3u << 28);
     _device.rtw_write32(REG_ANAPARSW_MAC_0, v | (1u << 28));
   }
-  _logger->info("Jaguar3: PCIe interface cfg applied (CLKDLY=0, cut={}, rfe={})",
+  _logger->info("Jaguar3: PCIe interface cfg applied (cut={}, rfe={})",
                 static_cast<int>(cut), static_cast<int>(rfe_type));
 }
 

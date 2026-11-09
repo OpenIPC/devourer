@@ -180,8 +180,10 @@ static int probe_8852c(RtlAdapter &adapter, Logger_t logger, int want) {
 
 #if defined(DEVOURER_HAVE_JAGUAR3_8822C)
 /* RTL8822CE (Jaguar3): M1 = rings -> pre-init -> PCIe power-on -> chip
- * version -> EFUSE logical map (MAC at 0x120, rtw8822ce_efuse); M2 = PCIe
- * interface cfg + init_system_cfg + DLFW over the BCN ring. The same calls
+ * version -> EFUSE logical map (MAC at 0x120, rtw8822ce_efuse), with the
+ * PCIe link cfg (DBI CLKDLY) ahead of power-on as rtw88 orders it; M2 = the
+ * identity-dependent PCIe interface cfg + init_system_cfg + DLFW over the
+ * BCN ring. The same calls
  * HalJaguar3::rtw_hal_init makes, exposed one layer at a time. */
 static int probe_8822c(RtlAdapter &adapter, Logger_t logger, int want) {
   jaguar3::HalJaguar3 hal(adapter, logger, jaguar3::ChipVariant::C8822C, {});
@@ -190,6 +192,7 @@ static int probe_8822c(RtlAdapter &adapter, Logger_t logger, int want) {
   std::vector<uint8_t> efuse(0x200, 0x00);
   try {
     adapter.hci_setup();
+    macinit.pcie_link_cfg(); /* rtw88 order: link cfg precedes power-on */
     macinit.pre_init_system_cfg();
     hal.probe_power_on();
     hal.read_chip_version();

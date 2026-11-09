@@ -8,7 +8,7 @@
 # reverse direction is always run beside it.
 #
 #   sudo tests/pcie_8822ce_onair.sh                       # defaults below
-#   sudo tests/pcie_8822ce_onair.sh --channel 6 --frames 1000
+#   sudo tests/pcie_8822ce_onair.sh --channel 6 --frames 2000     # quick look
 #   sudo tests/pcie_8822ce_onair.sh --usb 0bda:c811       # another witness
 #
 # Cells:  usb->pcie   pcie->usb   then the hop cell: the PCIe card injects
@@ -31,7 +31,7 @@ USB_VID=0x0bda
 USB_PID=0x8812
 CHANNEL=36
 BAND=0
-FRAMES=2000
+FRAMES=10000
 GAP_US=5000
 HOP_CHANNELS="36,40,44"
 HOP_DWELL_FRAMES=50
@@ -117,7 +117,10 @@ run_cell() {
   local rxpid=$!
   RXPID=$rxpid
   local t=0
-  while ! grep -q "RX loop started\|starting RX loop\|async ring of" "$rxerr" 2>/dev/null; do
+  # Every backend's RX worker announces itself once: the PCIe planes ("RX
+  # loop started"), Kestrel ("starting RX loop"), Jaguar1 ("async ring of"),
+  # Jaguar2/Jaguar3 ("entering RX loop").
+  while ! grep -q "RX loop started\|starting RX loop\|async ring of\|entering RX loop" "$rxerr" 2>/dev/null; do
     sleep 1; t=$((t + 1))
     if ! kill -0 "$rxpid" 2>/dev/null || [ "$t" -ge "$LIVENESS_S" ]; then
       echo "FAIL: receiver not live after ${t}s:"; tail -8 "$rxerr" | sed 's/^/    /'

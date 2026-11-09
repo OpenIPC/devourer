@@ -38,8 +38,9 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   `0x05[2]`) with the `PFM_WOWL` poll-retry; `0x74[8]` + `0x75[0]` pre-set
   instead of the USB-page `0xFE5B` write; no `init_usb_cfg`, no
   `BLK_DESC_NUM`; MGQ → EXQ with 64 extra-queue pages (64/64/64/64/1);
-  `pcie_intf_cfg` = DBI `CLKDLY_CTRL(0x725)=0` + cut≥D `HCI_MIX_CFG[26]`
-  (the 8822C has no MDIO PHY table); EFUSE MAC at logical `0x120`
+  `pcie_link_cfg` = DBI `CLKDLY_CTRL(0x725)=0` before the first power-on
+  (rtw88's probe-time link cfg; the 8822C has no MDIO PHY table) and
+  `pcie_intf_cfg` = cut≥D `HCI_MIX_CFG[26]` once the chip version is read; EFUSE MAC at logical `0x120`
   (`rtw8822ce_efuse`) vs `0x157` on USB. The data send path is unchanged:
   QSEL 0x12 routes to the MGMT ring. Completion timeout stays enabled (rtw88
   disables it on the 8821C only). Measured on one z890p unit (cut D, RFE 1)

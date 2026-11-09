@@ -106,6 +106,8 @@ void HalJaguar3::rtw_hal_init(SelectedChannel channel) {
    * path needs the BCN ring live), and the power sequence resets the TRX
    * DMA, so it belongs right before it. No-op on USB. */
   _device.hci_setup();
+  if (!_device.is_usb())
+    _macinit.pcie_link_cfg(); /* rtw_pci_link_cfg: before the first power-on */
   _macinit.pre_init_system_cfg();
   timer.stage("pre_init_system_cfg");
   power_on();                 /* mac_power_switch(on) — card_en_flow */

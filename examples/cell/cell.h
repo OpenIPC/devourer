@@ -40,6 +40,7 @@
 #define DEVOURER_EXAMPLES_CELL_H
 
 #include <algorithm>
+#include <deque>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -391,6 +392,60 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
     return std::nullopt;
   for (size_t i = 0; i < np; ++i)
     d.pdus.push_back(static_cast<uint32_t>(detail::get(b + 32 + 4 * i, 4)));
+  return d;
+}
+
+// The PDUs one DL frame carries from a UE's queue (taken out of it, in
+// order): those no DAPS-visit answer has offered yet first (the UE most
+// likely has the offered ones), but an offered PDU goes first once it would
+// fall more than `lag` sns behind the fresh one next in line, so that a lost
+// answer's PDU still reaches the UE inside its reorder window (a late copy,
+// never a confirmed gap). Without an offered mark: plain queue order.
+inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::optional<uint32_t> &offered,
+                                          size_t max, uint32_t lag = 24) {
+  std::deque<uint32_t> fresh, old;
+  for (uint32_t sn : q)
+    (offered && !devourer::cell::seq_lt(*offered, sn) ? old : fresh).push_back(sn);
+  std::vector<uint32_t> out;
+  while (out.size() < max && (!fresh.empty() || !old.empty())) {
+    const bool take_old = fresh.empty() || (!old.empty() && fresh.front() - old.front() > lag);
+    auto &from = take_old ? old : fresh;
+    out.push_back(from.front());
+    from.pop_front();
+  }
+  for (auto it = q.begin(); it != q.end();)
+    it = std::find(out.begin(), out.end(), *it) != out.end() ? q.erase(it) : std::next(it);
+  return out;
+}
+
+// A DAPS-visit DL frame (sequential DAPS across channels): the handover
+// TARGET answers a UE's visit copy with the DL PDUs it holds for it, while
+// the UE is still on its channel. Broadcast RA (nothing ACKs it: no
+// contention-window escalation on Kestrel, which has no no-ACK unicast), TA =
+// BSSID = the target DU; the body is the DL body for the UE's TARGET identity
+// (`ue`), HARQ fields zero, tagged with the target cell's key.
+inline std::vector<uint8_t> build_visit_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf,
+                                                 const std::vector<uint32_t> &pdus, uint64_t epoch,
+                                                 const CellMac &mac = {}) {
+  auto f = build_dl_frame(cell, ue, sf, 0, 0, DlHarq{0, 0, 0}, mac, pdus, epoch);
+  std::fill(f.begin() + 4, f.begin() + 10, 0xff); /* RA: broadcast */
+  return f;
+}
+inline std::optional<DlFrame> parse_visit_dl_frame(const uint8_t *p, size_t len, uint16_t cell,
+                                                   const CellMac &mac = {}) {
+  if (p == nullptr || len < 26 + kDlBodyLen || p[0] != 0x88)
+    return std::nullopt;
+  for (int i = 4; i < 10; ++i)
+    if (p[i] != 0xff)
+      return std::nullopt;
+  std::vector<uint8_t> f(p, p + len);
+  const uint8_t *b = p + 26;
+  if (b[0] != 'C' || b[1] != 'D')
+    return std::nullopt;
+  cell_mac(f.data() + 4, cell, static_cast<uint8_t>(detail::get(b + 3, 2))); /* as addressed to it */
+  auto d = parse_dl_frame(f.data(), f.size(), cell, mac);
+  if (!d || d->harq.attempt != 0)
+    return std::nullopt; /* a visit answer, not a HARQ frame */
   return d;
 }
 

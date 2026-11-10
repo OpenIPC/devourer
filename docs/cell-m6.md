@@ -1257,6 +1257,77 @@ stream on.
   DAPS, the plain and fault handovers, the two-cell crossing with a source
   failure, and the three-cell crossing with one all pass.
 
+### The downlink across channels: the target answers each visit
+
+Before the switch the UE takes DL only from its serving cell. A dead source
+therefore left it without DL from the kill to the switch, though the
+target had been holding every PDU since the command (DAPS DL).
+
+**Each visit is answered** (`examples/cell`):
+- **When:** the target DU hears a visit copy from a UE it has staged for an
+  inter-frequency arrival, before the switch.
+- **What:** it answers at once with the queued DL PDUs no answer has offered
+  yet, up to 8. The frame (`build_visit_dl_frame`) is broadcast-addressed,
+  so nothing waits for an ACK and there is no contention-window escalation.
+  It is tagged with the target cell's key, and the body names the UE's
+  target identity.
+- **The UE** (still holding the target's channel for 4 ms) takes the PDUs
+  into its DL stream (`cell.ue.visit_dl`).
+- **The queue keeps everything:** nothing ACKs an answer, so after the
+  switch the target still airs the offered PDUs. It now sends the
+  not-yet-offered ones first, and the UE takes a late copy within its
+  reorder window. Without that ordering, the newest PDU waited behind ~5
+  frames of PDUs the UE already had: 0.53–0.63 s of DL silence at the
+  switch.
+- **Only across channels:** the target answers only when its neighbour list
+  puts the source on another channel. On one channel it hears every uplink
+  of the UE, and an answer there would land in the source cell's schedule.
+- **Sending:** the answer is aired by its own thread, never from the radio's
+  RX callback. On the rig, sending from inside it froze the DU (the RX loop
+  is what recycles the TX pages).
+
+**Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case, all pass.
+- **The trigger:** the handover is triggered by the CU's A3 at its defaults
+  on the UEs' own measurements, with the UEs static: cell 2 is simply the
+  stronger at UE1's radio. It is not the emulated crossing (see "An
+  emulated crossing").
+- **The layout:** the same as the uplink runs (cell 1 on ch149, cell 2 on
+  ch157), with the CU's DL stream on.
+
+| per run (min / median / max over 4) | DL gap across the switch | longest DL silence | uplinks lost before the switch |
+|---|---|---|---|
+| source killed at the accept, visits answered | 225 / 225 / 226 ms | 225 / 225 / 226 ms | 0 / 0 / 0 |
+| source killed at the accept, no visits | 1497 / 1549 / 1805 ms | the same | 10 / 10.5 / 14 |
+| no fault, visits answered | 225 / 225 / 226 ms | 225 / 225.5 / 307 ms | 0 / 0 / 0 |
+
+The DL gap across the switch runs from the last new PDU before the switch
+to the first after it.
+- **Answers:** 18–20 per handover, none expired; DL DAPS lost no PDU in
+  any run.
+- **The bookkeeping** (from the review):
+  - An answer that is not queued, expires (3 ms after the copy that
+    prompted it) or fails gives its PDUs back: the offered mark rolls back.
+  - After the switch, `pick_dl_pdus` sends not-yet-offered PDUs first, but
+    an offered PDU before it would fall 24 sns behind them. A lost answer's
+    PDU then reaches the UE inside its reorder window (selftest: a lost
+    answer behind a 60-PDU backlog).
+- **What is left** is the switch's own pause: ~2 superframes (225 ms). The
+  UE leaves at the instant, retunes, and the target's grant takes effect
+  from its next superframe.
+- **Same channel:** the target sent no answers, and same-channel DL DAPS
+  kept its silence (526 ms plain, 1754 ms with the source killed).
+- **The first runs found:**
+  - The DU froze when it sent from inside the RX callback; the answer
+    thread fixed that.
+  - The target replayed its whole buffer after the switch: 0.53–0.63 s of
+    silence. Fixed by sending not-yet-offered PDUs first.
+  - The first answers included same-channel handovers, where an answer would
+    land in the source's schedule; they are now restricted to inter-frequency
+    arrivals.
+- **Regression:** the uplink results are unchanged (0 lost before the
+  switch with visits). Same-channel DL DAPS, the three-cell crossing with a
+  source failure, and the plain and fault handovers all pass.
+
 ## Replay of a signed neighbour list
 
 A signature proves who wrote a beacon, not when it was aired, so the
@@ -1395,9 +1466,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
 
 ## Not covered yet
 
-- **DAPS across channels, receiving:** the uplink is duplicated
-  sequentially (visits) and the downlink through the target's buffer. The
-  UE never receives the target's DL before the switch.
+- **DAPS across channels, beyond one visit per superframe:** the uplink and
+  the downlink are duplicated through the visits, one per superframe from
+  the accept to the switch. A UE whose source fades before the command still
+  loses what it misses before the visits begin.
 - **More than three cells, and a full tour:** the rig runs three cells,
   with handovers among them and a UE crossing 1 → 2 → 3. The way back into
   cell 1 is out of reach of the DUs' 20 dB TX range on this rig. Re-phasing

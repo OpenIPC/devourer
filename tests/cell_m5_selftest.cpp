@@ -192,6 +192,7 @@ int main() {
     r.channel = 149;
     r.phase_us = 1500;
     r.period_us = 102400;
+    r.gap_suspend_sf = 20; /* v13 */
     r.net_sf = 0x1234567890ull;
     r.net_off = -17518356000ll;
     r.seq = 0x0102030405060708ull;

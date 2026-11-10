@@ -1549,6 +1549,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.channel = c.ch;
             r.phase_us = static_cast<int64_t>(dc.phase_us);
             r.period_us = P;
+            r.gap_suspend_sf = static_cast<uint16_t>(std::min<int64_t>(gap_suspend_every, 65535));
             r.net_sf = f1_view.net_sf >= 0 ? static_cast<uint64_t>(f1_view.net_sf) : 0;
             r.net_off = f1_view.net_sf >= 0 ? net_off.load() : 0;
             const uint64_t rt = static_cast<uint64_t>(

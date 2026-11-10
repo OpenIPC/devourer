@@ -534,7 +534,27 @@ int main() {
             known = known || ul.stream_id({u->cell, u->ue}).has_value();
           }
           if (known) {
+            /* A copy heard by ANOTHER cell's DU (DAPS: the target hearing the
+             * source identity) may be a sequential-DAPS visit, sent after the
+             * UE's own uplink slot on the target's channel: its seq is that of
+             * the slot (Handover.h ul_seq_for_copy), from the serving cell's
+             * phase and the UE's uplink position in its last report. */
+            if (u->du != u->cell)
+              if (auto sd = dus.find(u->cell); sd != dus.end() && sd->second.rep.period_us > 0)
+                for (const auto &a : sd->second.rep.ues)
+                  if (a.ue == u->ue && a.pos >= 1 && a.pos <= sd->second.rep.positions.size()) {
+                    u->seq = devourer::cell::ul_seq_for_copy(
+                        u->net_us, sd->second.rep.phase_us, sd->second.rep.positions[a.pos - 1].ul.start_us,
+                        sd->second.rep.period_us);
+                    break;
+                  }
+            const uint32_t raw_seq = static_cast<uint32_t>(u->net_us / std::max<int64_t>(1, dus.count(u->du) ? dus.at(u->du).rep.period_us : 102400));
             const auto r = ul.deliver({u->cell, u->ue}, u->seq, u->du);
+            if (u->du != u->cell)
+              emit("{\"ev\":\"ran.ul_copy\",\"du\":" + std::to_string(u->du) + ",\"cell\":" +
+                   std::to_string(u->cell) + ",\"ue\":" + std::to_string(u->ue) + ",\"raw\":" +
+                   std::to_string(raw_seq) + ",\"seq\":" + std::to_string(u->seq) + ",\"fresh\":" +
+                   (r.fresh ? "1" : "0") + "}");
             ul_seen[r.stream] = std::chrono::steady_clock::now();
             ul_name[r.stream] = {u->cell, u->ue};
             if (r.fresh) {

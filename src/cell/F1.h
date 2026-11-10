@@ -79,7 +79,8 @@ namespace devourer::cell::f1 {
  * Report with phase_us < 0 asks for one. */
 /* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). 13:
  * Report carries the DU's suspend-gap period. */
-constexpr uint8_t kVersion = 13; /* v13: Report.gap_suspend_sf */
+/* 14: Uplink carries its reception instant (net_us). */
+constexpr uint8_t kVersion = 14; /* v14: Uplink.net_us */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -624,6 +625,10 @@ struct UplinkFwd {
   uint16_t du = 0;
   uint16_t cell = 0, ue = 0;
   uint32_t seq = 0;
+  /* The reception instant on the network timebase (us): the CU maps a copy
+   * heard by another cell's DU to the UE's own uplink slot (Handover.h
+   * ul_seq_for_copy) — a sequential-DAPS visit sends it later. */
+  int64_t net_us = 0;
   int8_t rssi_dbm = 0;
   bool operator==(const UplinkFwd &) const = default;
 };
@@ -635,6 +640,7 @@ inline std::vector<uint8_t> encode_uplink(const UplinkFwd &u, const Mac &mac) {
   put(m, u.cell, 2);
   put(m, u.ue, 2);
   put(m, u.seq, 4);
+  put(m, static_cast<uint64_t>(u.net_us), 8);
   m.push_back(static_cast<uint8_t>(u.rssi_dbm));
   return seal(std::move(m), mac);
 }
@@ -650,6 +656,7 @@ inline std::optional<UplinkFwd> decode_uplink(const uint8_t *p, size_t n, const 
   u.cell = static_cast<uint16_t>(r.get(2));
   u.ue = static_cast<uint16_t>(r.get(2));
   u.seq = static_cast<uint32_t>(r.get(4));
+  u.net_us = static_cast<int64_t>(r.get(8));
   u.rssi_dbm = static_cast<int8_t>(r.get(1));
   if (!r.ok || r.i != r.n)
     return std::nullopt;

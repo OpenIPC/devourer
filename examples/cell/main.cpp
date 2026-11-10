@@ -107,6 +107,12 @@
 //                             the superframe after. Decided at the UEs'
 //                             floor gap bound CELL_UE_GAP_RETUNE_US [26000] /
 //                             CELL_UE_GAP_GUARD_US [2000], read by the DU too.
+//   CELL_UE_DAPS_VISIT [1]    UE: between accepting an INTER-FREQUENCY handover
+//                             and its switch, visit the target's channel once a
+//                             superframe (after its uplink slot, in its idle
+//                             time) to air a copy of its uplink there: the
+//                             target DU forwards it to the CU (sequential DAPS;
+//                             cell.ue.daps_visit)
 //   CELL_SECS [60]            run time
 // DU service mode (M4, #258) — set CELL_REF_PTP to hold this DU's beacon grid
 // to a PTP hardware clock (src/cell/TsfDiscipline.h; needs a Tight sync tier,
@@ -1312,8 +1318,8 @@ int run_du(IRadio *dev, const Cfg &c) {
     u.du = c.cell;
     u.cell = cell;
     u.ue = ue;
-    u.seq = devourer::cell::ul_seq_from_network_time(
-        *at + static_cast<int64_t>(dc.phase_us) + net_off.load() * P, P);
+    u.net_us = *at + static_cast<int64_t>(dc.phase_us) + net_off.load() * P;
+    u.seq = devourer::cell::ul_seq_from_network_time(u.net_us, P);
     u.rssi_dbm = static_cast<int8_t>(static_cast<int>(p.RxAtrib.rssi[0]) - 110);
     send_f1(devourer::cell::f1::encode_uplink(u, f1_mac));
   };
@@ -1406,8 +1412,13 @@ int run_du(IRadio *dev, const Cfg &c) {
                             static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
             fwd = daps_on && daps_ids.count({oc, ou}) > 0;
           }
-          if (fwd)
+          if (fwd) {
             forward_ul(oc, ou, p);
+            char l[140];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.daps.fwd\",\"cell\":%u,\"ue\":%u,\"rssi\":%d}", oc, ou,
+                     static_cast<int>(p.RxAtrib.rssi[0]) - 110);
+            emit(l);
+          }
           return;
         }
       }
@@ -2806,6 +2817,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
   /* Suspend gaps (MeasGap.h): one in this many superframes (0 = off); the DU
    * must run the same value (it skips this UE's DL then). */
   const int64_t gap_suspend_every = envl("CELL_GAP_SUSPEND_SF", 0, 0, 100000);
+  /* DAPS across channels (sequential): between accepting an inter-frequency
+   * handover and its switch, visit the target's channel once a superframe to
+   * air a copy of the uplink there (the target DU forwards it to the CU). */
+  const bool daps_visit = envl("CELL_UE_DAPS_VISIT", 1, 0, 1) != 0;
   const int64_t mr_every_ms = envl("CELL_UE_MR_MS", 1000, 100, 60000);
   auto ue_ms = [] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3123,9 +3138,15 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int64_t last_susp_sf = -1;
   bool susp_infeasible = false;
   bool had_susp_prev = false; /* last pass had neighbours only a suspend gap reaches */
+  std::vector<uint8_t> last_bcn; /* the uplink beacon frame on air (for DAPS visits) */
+  int64_t last_visit_sf = -1;
+  uint64_t visits = 0, visits_ok = 0;
   uint64_t susp_gaps = 0, susp_heard = 0, susp_fail = 0;
   while (std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    /* A DAPS-visit window: passes 30 ms apart, so the next superframe's
+     * visit is in reach after one ends ~75 ms into its superframe. */
+    const bool visiting = daps_visit && ho_pending && ho_pending->channel != 0 && ho_pending->channel != cur_ch;
+    std::this_thread::sleep_for(std::chrono::milliseconds(visiting ? 30 : 100));
     uint64_t t = 0, f = 0;
     if (!dev->ReadTsfAndFreeRun(t, f))
       continue;
@@ -3236,6 +3257,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
         nbrs.clear(); /* the new serving cell airs its own list */
         have_serv_phase = false; /* another serving grid */
         serv_switched = true;
+        /* A hold set before the switch (after a gap or a DAPS visit) is on
+         * the source's superframe count: never carried into the target's —
+         * the switch must place the uplink at once (a held step left it
+         * 40 ms off for 9 superframes, and the target's TA loop took that
+         * for delay). */
+        no_step_until_sf = -1;
         serv_off_run = 0;
         have_nbrs_gen = false;
         gap_parked.clear();
@@ -3604,6 +3631,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
       }
       const bool ok = beaconing ? dev->UpdateBeaconPayload(b.data(), b.size())
                                 : dev->StartBeacon(b.data(), b.size(), c.tu);
+      if (ok)
+        last_bcn = b;
       if (!ok) {
         fprintf(stderr, "UE beacon %s failed\n", beaconing ? "update" : "start");
         continue;
@@ -3772,6 +3801,89 @@ int run_ue(IRadio *dev, const Cfg &c) {
       }
       return true;
     };
+    /* A sequential-DAPS visit (inter-frequency handover staged, before its
+     * switch): in superframe S, after this UE's uplink slot, retune to the
+     * target's channel, air a copy of the uplink beacon at an instant clear of
+     * the target cell's active span, and retune back before the serving
+     * beacon. Its own beacon fires at its uplink slot, outside the window. */
+    if (daps_visit && ho_pending && ho_pending->channel != 0 && ho_pending->channel != cur_ch &&
+        beaconing && !last_bcn.empty() && grid && g) {
+      const int64_t sfn = du_now / P;
+      const auto &sl = grid->slots();
+      const int64_t ul_end = sl[g->ul_slot].start_us + sl[g->ul_slot].len_us;
+      int64_t span = 0; /* the grid's active span (the target runs the same grid) */
+      for (const auto &x : sl)
+        span = std::max<int64_t>(span, x.start_us + x.len_us);
+      const int64_t o_t = ((-ho_pending->tsf_delta_us) % P + P) % P; /* the target's TBTT here */
+      /* send_packet only queues: the copy is given kVisitHoldUs on the target's
+       * channel to leave (no per-frame TX report on Kestrel) before the
+       * retune back — else it is flushed, or aired late on the wrong one. */
+      constexpr int64_t kVisitHoldUs = 4000;
+      const int64_t lo = ul_end + gap_guard_us + gap_retune_us,
+                    hi = P - gap_guard_us - gap_retune_us - kVisitHoldUs - 1000;
+      auto in_target = [&](int64_t v) {
+        const int64_t d = ((v - o_t) % P + P) % P;
+        return d < span + 1000 || d > P - 1000;
+      };
+      std::optional<int64_t> v;
+      for (int64_t x = lo; x <= hi && !v; x += 500)
+        if (!in_target(x))
+          v = x;
+      const auto now_du = serving_now();
+      for (const int64_t S : {sfn, sfn + 1}) {
+        if (!v || !now_du || S <= last_visit_sf ||
+            static_cast<uint64_t>(S) >= ho_pending->effective_sf) /* through the one before the switch */
+          continue;
+        const int64_t go = S * P + *v - gap_retune_us - gap_guard_us; /* leave the serving channel */
+        if (go - *now_du <= 1000 || go - *now_du >= 2 * P)
+          continue;
+        last_visit_sf = S;
+        std::this_thread::sleep_for(std::chrono::microseconds(go - *now_du));
+        const auto g0 = std::chrono::steady_clock::now();
+        bool out_ok = true, sent = false;
+        try {
+          dev->FastRetune(ho_pending->channel);
+        } catch (const std::exception &) {
+          out_ok = false;
+        }
+        const auto g1 = std::chrono::steady_clock::now();
+        if (out_ok) {
+          if (const auto t_now = serving_now(); t_now && *t_now < S * P + *v)
+            std::this_thread::sleep_for(std::chrono::microseconds(S * P + *v - *t_now));
+          auto pkt = build_dl_radiotap(6);
+          pkt.insert(pkt.end(), last_bcn.begin(), last_bcn.end());
+          sent = dev->send_packet(pkt.data(), pkt.size());
+          std::this_thread::sleep_for(std::chrono::microseconds(kVisitHoldUs));
+        }
+        bool back_ok = false;
+        for (int k = 0; k < 3 && !back_ok; ++k) {
+          try {
+            dev->FastRetune(cur_ch);
+            back_ok = true;
+          } catch (const std::exception &) {
+          }
+        }
+        const auto g2 = std::chrono::steady_clock::now();
+        if (!back_ok) {
+          if (beaconing && dev->StopBeacon())
+            beaconing = false;
+          retune_to = cur_ch;
+        }
+        no_step_until_sf = S + 4; /* as after a gap */
+        ++visits;
+        visits_ok += out_ok && back_ok && sent ? 1 : 0;
+        char l[260];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue.daps_visit\",\"ue\":%d,\"sf\":%lld,\"at_us\":%lld,\"ch\":%u,"
+                 "\"sent\":%d,\"out_us\":%lld,\"deaf_us\":%lld,\"ok\":%d}",
+                 me, (long long)S, (long long)*v, ho_pending->channel, sent ? 1 : 0,
+                 (long long)std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count(),
+                 (long long)std::chrono::duration_cast<std::chrono::microseconds>(g2 - g0).count(),
+                 out_ok && back_ok ? 1 : 0);
+        emit(l);
+        break;
+      }
+    }
     if ((gap_every_sf > 0 || gap_suspend_every > 0) && !ho_pending && !ho_back) {
       std::vector<devourer::cell::Neighbour> other, susp;
       const int64_t sfn = du_now / P;
@@ -3925,14 +4037,14 @@ int run_ue(IRadio *dev, const Cfg &c) {
   dev->StopRxLoop();
   rx.join();
   dev->ClearAckResponder();
-  char l[640];
+  char l[700];
   snprintf(l, sizeof l,
            "{\"ev\":\"cell.ue.done\",\"ue\":%u,\"steps\":%ld,\"step_fails\":%ld,"
            "\"listen_from_sf\":%lld,\"listen_to_sf\":%lld,\"dl_new\":%llu,\"dl_dup\":%llu,"
            "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu,\"nbr_refused\":{\"stale\":%llu,"
            "\"unlisted\":%llu,\"phase\":%llu},\"dl_pdus\":{\"delivered\":%llu,\"duplicates\":%llu,"
            "\"missing\":%llu,\"stale\":%llu,\"top\":%lld},\"suspend_gaps\":{\"n\":%llu,\"heard\":%llu,"
-           "\"fail\":%llu}}",
+           "\"fail\":%llu},\"daps_visits\":{\"n\":%llu,\"ok\":%llu}}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
            (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
            (unsigned long long)gm_ok, (unsigned long long)gm_refused,
@@ -3941,7 +4053,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
            (unsigned long long)dl_stream.duplicates(), (unsigned long long)dl_stream.missing_total(),
            (unsigned long long)dl_stream.stale(),
            dl_stream.top() ? (long long)*dl_stream.top() : -1LL, (unsigned long long)susp_gaps,
-           (unsigned long long)susp_heard, (unsigned long long)susp_fail);
+           (unsigned long long)susp_heard, (unsigned long long)susp_fail, (unsigned long long)visits,
+           (unsigned long long)visits_ok);
   emit(l);
   return 0;
 }

@@ -455,6 +455,21 @@ inline uint32_t ul_seq_from_network_time(int64_t t_net_us, int64_t period_us) {
   return static_cast<uint32_t>(t_net_us / period_us);
 }
 
+/* DAPS across channels: a copy of a UE's uplink heard by ANOTHER cell's DU
+ * may have been sent later in the superframe (a sequential-DAPS visit to the
+ * target's channel, after the UE's own uplink slot), not at its slot. Its seq
+ * is that of the UE's last uplink-slot instant at or before the reception:
+ * the slot is at `phase_us + ul_start_us` of every superframe of its serving
+ * cell (network time). `early_us` absorbs a copy heard slightly BEFORE the
+ * slot instant (timing advance), so a copy at the slot itself maps there too. */
+inline uint32_t ul_seq_for_copy(int64_t t_net_us, int64_t phase_us, int64_t ul_start_us, int64_t period_us,
+                                int64_t early_us = 5000) {
+  const int64_t off = phase_us + ul_start_us;
+  const int64_t x = t_net_us + early_us - off;
+  const int64_t k = (x >= 0 ? x : x - period_us + 1) / period_us; /* floor */
+  return ul_seq_from_network_time(k * period_us + off, period_us);
+}
+
 } /* namespace devourer::cell */
 
 #endif /* DEVOURER_CELL_HANDOVER_H */

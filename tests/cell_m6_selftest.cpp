@@ -443,9 +443,25 @@ int main() {
     CHECK(ul_seq_from_network_time(1000 * P + 50000 + 3, P) ==
           ul_seq_from_network_time(1000 * P + 50000 - 4, P));
     CHECK(ul_seq_from_network_time(1001 * P + 7, P) == ul_seq_from_network_time(1000 * P + 7, P) + 1);
+    /* DAPS across channels: a copy heard later in the superframe (a visit to
+     * the target's channel) maps to the UE's own uplink slot; one at the slot
+     * (incl. a timing advance) maps there too; the next slot is the next seq. */
+    {
+      const int64_t ph = 51200, ul = 16500; /* slot instant at 67700 in each superframe */
+      const int64_t S = 1000 * P;
+      const uint32_t at_slot = ul_seq_for_copy(S + 67700, ph, ul, P);
+      CHECK(at_slot == ul_seq_from_network_time(S + 67700, P));
+      CHECK(ul_seq_for_copy(S + 67700 - 400, ph, ul, P) == at_slot);       /* TA: heard 0.4 ms early */
+      CHECK(ul_seq_for_copy(S + 67700 + 40000, ph, ul, P) == at_slot);     /* a visit 40 ms later: next */
+      CHECK(ul_seq_from_network_time(S + 67700 + 40000, P) == at_slot + 1); /* ... the raw seq would differ */
+      CHECK(ul_seq_for_copy(S + 67700 + P, ph, ul, P) == at_slot + 1);     /* the next slot */
+      CHECK(ul_seq_for_copy(S + 67700 + P - 6000, ph, ul, P) == at_slot);  /* still before it */
+      /* phase 0: slot at 16500 of the same network superframe */
+      CHECK(ul_seq_for_copy(S + 16500 + 50000, 0, ul, P) == ul_seq_from_network_time(S, P));
+    }
     /* F1 v5 Uplink round trip. */
     const Mac k = fake_mac(3);
-    f1::UplinkFwd u{2, 1, 1, 123456, -61};
+    f1::UplinkFwd u{2, 1, 1, 123456, 17521968566LL * 102400 + 51200, -61};
     const auto w = f1::encode_uplink(u, k);
     CHECK(f1::peek_type(w.data(), w.size()) == f1::Type::Uplink);
     auto du = f1::decode_uplink(w.data(), w.size(), k);

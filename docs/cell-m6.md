@@ -1175,6 +1175,74 @@ ramps, the A3 at its defaults, there and back: two handovers per run).
 - **Not duplicated:** the source does not keep airing to the UE after the
   switch, and the UE takes DL frames only from its serving cell.
 
+## DAPS across channels (sequential, uplink)
+
+Uplink DAPS needs the target DU to hear the UE's uplink under its source
+identity. Across channels it cannot: the UE has one radio, tuned to the
+source. With the source killed mid-handover, every uplink from the kill to
+the switch was lost (the three-cell crossing: 12–14).
+
+**The visit** (`examples/cell`, `CELL_UE_DAPS_VISIT` [1]):
+- **When:** between accepting an inter-frequency handover and its switch,
+  the UE visits the target's channel once a superframe, through the one
+  before the switch.
+- **What it does:** after its own uplink slot, it retunes to the target's
+  channel and airs a copy of its uplink beacon there, at an instant clear of
+  the target cell's active span. It then retunes back before its serving
+  beacon.
+- **The window:** it is the idle part of the UE's own grid, so the source
+  link loses nothing. Its own hardware beacon fires at its uplink slot,
+  outside the window.
+- **Holding the channel:** `send_packet` only queues the frame, so the UE
+  holds the target channel 4 ms after queuing it. There is no per-frame TX
+  report on Kestrel; without the hold, 9 of 10 copies were lost.
+- **Loop cadence:** during the window the UE loop runs every 30 ms, not
+  100 ms, so the next superframe's visit is in reach after one ends
+  ~75 ms into its superframe.
+
+**Its sequence number at the CU** (F1 v14):
+- The target DU forwards the copy as before (`daps_ids`, area tag), now with
+  its reception instant on the network timebase (`Uplink.net_us`).
+- A copy heard by another cell's DU is mapped by the CU to the UE's last
+  own uplink slot at or before it (`Handover.h` `ul_seq_for_copy`), using
+  the source cell's phase and the UE's uplink position from the source's
+  report.
+- The visit, sent ~30 ms after the slot and possibly in the next network
+  superframe, therefore dedups with the source's copy of the same uplink.
+  The UE needs no global clock.
+
+**The switch clears the TSF step hold.** A hold set after a gap or a visit
+counts in the source's superframes. A visit just before the switch carried
+it ~9 superframes into the target's count, so the UE's uplink stayed 40 ms
+off. The target's TA loop took that for propagation delay, and it took
+~12 s to settle.
+
+**Rig result** (testrig `scripts/m6_daps_xch.sh`): 2 runs per case, all pass. Cell 1 is on ch149 and cell 2 on ch157 (phase
+60000); the A3 at its defaults hands UE1 over 1 → 2, with the CU's DL
+stream on.
+
+| uplinks missing at the CU around the switch | before the switch | at the switch |
+|---|---|---|
+| source killed at the accept, visits | **0, 0** | 2, 2 |
+| source killed at the accept, no visits | 13, 13 | 2, 2 |
+| no fault, visits | 0, 0 | 1, 1 |
+
+- **20–21 visits per handover**, every one sent and back; deaf time
+  55.6–57.2 ms each.
+- **They cost the source nothing:** without a fault, DU1 heard UE1's uplink
+  in every superframe from the accept to the switch, in slot 100 %.
+- **The switch's own cost:** the switch superframe (with the source dead,
+  nobody hears it) and the next. The first uplink after the UE's beacon
+  restart on the target is lost, as after a suspend gap; why is not
+  established.
+- **Every run:** the target heard the UE in slot 99.9 %, and DL DAPS lost no
+  PDU.
+- **What the first runs found:** besides the TX hold, the loop cadence and
+  the step hold (above), visits stopping two superframes before the switch
+  left those two uncovered.
+- **Regression:** the inter-frequency measurement-gap handover, same-channel
+  DAPS, the plain and fault handovers and the three-cell crossing pass.
+
 ## Replay of a signed neighbour list
 
 A signature proves who wrote a beacon, not when it was aired, so the
@@ -1313,10 +1381,9 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
 
 ## Not covered yet
 
-- **DAPS beyond same channel:** the different-channel (sequential)
-  variant, with its retune and deaf-time budget. The downlink is duplicated
-  through the target's buffer, but not received from both DUs at once (see
-  the downlink duplication section).
+- **DAPS across channels, receiving:** the uplink is duplicated
+  sequentially (visits) and the downlink through the target's buffer. The
+  UE never receives the target's DL before the switch.
 - **More than three cells, and a full tour:** the rig runs three cells,
   with handovers among them and a UE crossing 1 → 2 → 3. The way back into
   cell 1 is out of reach of the DUs' 20 dB TX range on this rig. Re-phasing

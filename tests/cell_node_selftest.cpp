@@ -161,6 +161,38 @@ int main() {
     auto dlt = dl;
     dlt[26 + 13] ^= 1; /* seq */
     CHECK(!parse_dl_frame(dlt.data(), dlt.size(), 5, k1));
+    /* What a DL frame takes from the queue after a switch: not-yet-offered
+     * first; an offered one before it falls 24 sns behind (a lost answer's
+     * PDU stays inside the UE's reorder window); plain order without a mark. */
+    {
+      std::deque<uint32_t> q;
+      for (uint32_t s = 100; s < 110; ++s)
+        q.push_back(s);
+      auto a = pick_dl_pdus(q, std::nullopt, 8);
+      CHECK(a == std::vector<uint32_t>({100, 101, 102, 103, 104, 105, 106, 107}) && q.size() == 2);
+      std::deque<uint32_t> r;
+      for (uint32_t s = 100; s < 110; ++s)
+        r.push_back(s);
+      auto b = pick_dl_pdus(r, 105u, 8); /* 100..105 offered: 106..109 first, then the offered */
+      CHECK(b == std::vector<uint32_t>({106, 107, 108, 109, 100, 101, 102, 103}));
+      CHECK(r == std::deque<uint32_t>({104, 105}));
+      /* A lost answer with a large backlog: 100..109 offered, 110..169 fresh —
+       * the offered ones go before the fresh run gets 24 ahead of them. */
+      std::deque<uint32_t> w;
+      for (uint32_t s = 100; s < 170; ++s)
+        w.push_back(s);
+      uint32_t newest_sent = 0;
+      bool ok = true;
+      while (!w.empty()) {
+        for (uint32_t sn : pick_dl_pdus(w, 109u, 8)) {
+          if (sn >= 110)
+            newest_sent = std::max(newest_sent, sn);
+          else if (newest_sent && newest_sent - sn > 32) /* the UE's reorder window */
+            ok = false;
+        }
+      }
+      CHECK(ok);
+    }
     /* A DAPS-visit DL answer: broadcast RA, the target identity in the body,
      * tagged with the target cell's key; not a unicast DL frame. */
     {

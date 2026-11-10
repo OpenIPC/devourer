@@ -1317,6 +1317,16 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint16_t ue = 0;
     size_t pdus = 0;
     uint32_t first = 0;
+    std::optional<uint32_t> prev_offered; /* the queue's offered mark before this answer */
+    uint32_t offered = 0;                 /* ... and with it */
+    std::chrono::steady_clock::time_point deadline; /* the UE leaves the channel after */
+  };
+  /* An answer not aired (queue full, expired, failed) gives its PDUs back:
+   * the offered mark returns to where it was, unless a later answer moved it. */
+  auto unoffer = [&](uint16_t ue, const std::optional<uint32_t> &prev, uint32_t was) {
+    std::lock_guard<std::mutex> lk(mu);
+    if (auto qi = dlq.find(ue); qi != dlq.end() && qi->second.offered && *qi->second.offered == was)
+      qi->second.offered = prev;
   };
   std::mutex ans_mu;
   std::condition_variable ans_cv;
@@ -1333,11 +1343,16 @@ int run_du(IRadio *dev, const Cfg &c) {
         a = std::move(ans_q.front());
         ans_q.pop_front();
       }
-      const bool sent = dev->send_packet(a.pkt.data(), a.pkt.size());
-      char l[180];
+      /* The UE holds the target's channel only a few ms after its visit copy:
+       * an answer later than that is wasted — dropped, its PDUs given back. */
+      const bool expired = std::chrono::steady_clock::now() > a.deadline;
+      const bool sent = !expired && dev->send_packet(a.pkt.data(), a.pkt.size());
+      if (!sent)
+        unoffer(a.ue, a.prev_offered, a.offered);
+      char l[200];
       snprintf(l, sizeof l,
-               "{\"ev\":\"cell.daps.visit_dl\",\"ue\":%u,\"pdus\":%zu,\"first\":%u,\"sent\":%d}", a.ue,
-               a.pdus, a.first, sent ? 1 : 0);
+               "{\"ev\":\"cell.daps.visit_dl\",\"ue\":%u,\"pdus\":%zu,\"first\":%u,\"sent\":%d,\"expired\":%d}",
+               a.ue, a.pdus, a.first, sent ? 1 : 0, expired ? 1 : 0);
       emit(l);
     }
   });
@@ -1484,11 +1499,13 @@ int run_du(IRadio *dev, const Cfg &c) {
             if (va) {
               std::vector<uint32_t> offer;
               uint64_t ep = 0;
+              std::optional<uint32_t> prev;
               {
                 std::lock_guard<std::mutex> lk(mu);
                 if (auto qi = dlq.find(va->target_ue); qi != dlq.end()) {
                   DlQueue &q = qi->second;
                   ep = q.epoch;
+                  prev = q.offered;
                   for (uint32_t sn : q.sns)
                     if ((!q.offered || devourer::cell::seq_lt(*q.offered, sn)) && offer.size() < kDlMaxPdus)
                       offer.push_back(sn);
@@ -1503,12 +1520,19 @@ int run_du(IRadio *dev, const Cfg &c) {
                 auto vf = build_visit_dl_frame(c.cell, static_cast<uint8_t>(va->target_ue), 0, offer, ep, auth);
                 auto pkt = build_dl_radiotap(6);
                 pkt.insert(pkt.end(), vf.begin(), vf.end());
+                bool queued = false;
                 {
                   std::lock_guard<std::mutex> lk(ans_mu);
-                  if (ans_q.size() < 8)
-                    ans_q.push_back({std::move(pkt), va->target_ue, offer.size(), offer.front()});
+                  if (ans_q.size() < 8) {
+                    ans_q.push_back({std::move(pkt), va->target_ue, offer.size(), offer.front(), prev, offer.back(),
+                                     std::chrono::steady_clock::now() + std::chrono::milliseconds(3)});
+                    queued = true;
+                  }
                 }
-                ans_cv.notify_one();
+                if (queued)
+                  ans_cv.notify_one();
+                else
+                  unoffer(va->target_ue, prev, offer.back());
               }
             }
             char l[140];
@@ -2062,18 +2086,7 @@ int run_du(IRadio *dev, const Cfg &c) {
              * rest, still sent in case an answer was lost — the UE takes a
              * late copy within its reorder window. Without answers this is
              * plain queue order. */
-            auto &dq = qi->second.sns;
-            const auto &off = qi->second.offered;
-            for (int pass = 0; pass < 2 && pdus.size() < kDlMaxPdus; ++pass)
-              for (auto it = dq.begin(); it != dq.end() && pdus.size() < kDlMaxPdus;) {
-                const bool offered = off && !devourer::cell::seq_lt(*off, *it);
-                if (offered == (pass == 1)) {
-                  pdus.push_back(*it);
-                  it = dq.erase(it);
-                } else {
-                  ++it;
-                }
-              }
+            pdus = pick_dl_pdus(qi->second.sns, qi->second.offered, kDlMaxPdus);
             if (harq_on && !pdus.empty())
               d.pdus[tx->seq] = {pdu_epoch, pdus};
           }

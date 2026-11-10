@@ -1257,6 +1257,64 @@ stream on.
   DAPS, the plain and fault handovers, the two-cell crossing with a source
   failure, and the three-cell crossing with one all pass.
 
+### The downlink across channels: the target answers each visit
+
+Before the switch the UE takes DL only from its serving cell. A dead source
+therefore left it without DL from the kill to the switch, though the
+target had been holding every PDU since the command (DAPS DL).
+
+**Each visit is answered** (`examples/cell`):
+- **When:** the target DU hears a visit copy from a UE it has staged for an
+  inter-frequency arrival, before the switch.
+- **What:** it answers at once with the queued DL PDUs no answer has offered
+  yet, up to 8. The frame (`build_visit_dl_frame`) is broadcast-addressed,
+  so nothing waits for an ACK and there is no contention-window escalation.
+  It is tagged with the target cell's key, and the body names the UE's
+  target identity.
+- **The UE** (still holding the target's channel for 4 ms) takes the PDUs
+  into its DL stream (`cell.ue.visit_dl`).
+- **The queue keeps everything:** nothing ACKs an answer, so after the
+  switch the target still airs the offered PDUs. It now sends the
+  not-yet-offered ones first, and the UE takes a late copy within its
+  reorder window. Without that ordering, the newest PDU waited behind ~5
+  frames of PDUs the UE already had: 0.53–0.63 s of DL silence at the
+  switch.
+- **Only across channels:** the target answers only when its neighbour list
+  puts the source on another channel. On one channel it hears every uplink
+  of the UE, and an answer there would land in the source cell's schedule.
+- **Sending:** the answer is aired by its own thread, never from the radio's
+  RX callback. On the rig, sending from inside it froze the DU (the RX loop
+  is what recycles the TX pages).
+
+**Rig result** (testrig `scripts/m6_daps_xch.sh`): 2 runs per case, all pass. The same layout as the uplink runs: cell 1 on
+ch149, cell 2 on ch157, the A3 handing UE1 over 1 → 2, and the CU's DL
+stream on.
+
+| longest DL silence at UE1 (ms between deliveries of a new PDU) | runs |
+|---|---|
+| source killed at the accept, visits answered | 205, 205 |
+| source killed at the accept, no visits | 1395, 1498 |
+| no fault, visits answered | 308, 205 |
+
+- **Answers:** 19–21 per handover; every new PDU in the window reached the
+  UE in one, and DL DAPS lost no PDU in any run.
+- **What is left** is the switch's own pause: ~2 superframes. The UE leaves
+  at the instant, retunes, and the target's grant takes effect from its next
+  superframe.
+- **Same channel:** the target sent no answers, and same-channel DL DAPS
+  kept its silence (526 ms plain, 1754 ms with the source killed).
+- **The first runs found:**
+  - The DU froze when it sent from inside the RX callback; the answer
+    thread fixed that.
+  - The target replayed its whole buffer after the switch: 0.53–0.63 s of
+    silence. Fixed by sending not-yet-offered PDUs first.
+  - The first answers included same-channel handovers, where an answer would
+    land in the source's schedule; they are now restricted to inter-frequency
+    arrivals.
+- **Regression:** the uplink results are unchanged (0 lost before the
+  switch with visits). Same-channel DL DAPS, the three-cell crossing with a
+  source failure, and the plain and fault handovers all pass.
+
 ## Replay of a signed neighbour list
 
 A signature proves who wrote a beacon, not when it was aired, so the
@@ -1395,9 +1453,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
 
 ## Not covered yet
 
-- **DAPS across channels, receiving:** the uplink is duplicated
-  sequentially (visits) and the downlink through the target's buffer. The
-  UE never receives the target's DL before the switch.
+- **DAPS across channels, beyond one visit per superframe:** the uplink and
+  the downlink are duplicated through the visits, one per superframe from
+  the accept to the switch. A UE whose source fades before the command still
+  loses what it misses before the visits begin.
 - **More than three cells, and a full tour:** the rig runs three cells,
   with handovers among them and a UE crossing 1 → 2 → 3. The way back into
   cell 1 is out of reach of the DUs' 20 dB TX range on this rig. Re-phasing

@@ -161,6 +161,22 @@ int main() {
     auto dlt = dl;
     dlt[26 + 13] ^= 1; /* seq */
     CHECK(!parse_dl_frame(dlt.data(), dlt.size(), 5, k1));
+    /* A DAPS-visit DL answer: broadcast RA, the target identity in the body,
+     * tagged with the target cell's key; not a unicast DL frame. */
+    {
+      auto v = build_visit_dl_frame(5, 2, 33, {700, 701, 702}, 9, k1);
+      CHECK(v[4] == 0xff && v[9] == 0xff);
+      auto dv = parse_visit_dl_frame(v.data(), v.size(), 5, k1);
+      CHECK(dv && dv->ue == 2 && dv->pdus == std::vector<uint32_t>({700, 701, 702}) && dv->epoch == 9);
+      CHECK(!parse_visit_dl_frame(v.data(), v.size(), 5, k2)); /* another key */
+      CHECK(!parse_visit_dl_frame(v.data(), v.size(), 4, k1)); /* another cell */
+      CHECK(!parse_dl_frame(v.data(), v.size(), 5, k1));       /* not a unicast DL frame */
+      auto u = build_dl_frame(5, 2, 33, 1, 0, DlHarq{0, 1, 1}, k1);
+      CHECK(!parse_visit_dl_frame(u.data(), u.size(), 5, k1)); /* a unicast one is not an answer */
+      auto vt = v;
+      vt[26 + 32] ^= 1; /* a PDU sn */
+      CHECK(!parse_visit_dl_frame(vt.data(), vt.size(), 5, k1));
+    }
     auto dls = build_dl_frame(5, 2, 10, 21, 0, DlHarq{18, 5, 1}, k1, {500, 501}, 9);
     CHECK(parse_dl_frame(dls.data(), dls.size(), 5, k1).has_value());
     auto dls2 = dls;

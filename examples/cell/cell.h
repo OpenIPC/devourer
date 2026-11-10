@@ -394,6 +394,37 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
   return d;
 }
 
+// A DAPS-visit DL frame (sequential DAPS across channels): the handover
+// TARGET answers a UE's visit copy with the DL PDUs it holds for it, while
+// the UE is still on its channel. Broadcast RA (nothing ACKs it: no
+// contention-window escalation on Kestrel, which has no no-ACK unicast), TA =
+// BSSID = the target DU; the body is the DL body for the UE's TARGET identity
+// (`ue`), HARQ fields zero, tagged with the target cell's key.
+inline std::vector<uint8_t> build_visit_dl_frame(uint16_t cell, uint8_t ue, uint64_t sf,
+                                                 const std::vector<uint32_t> &pdus, uint64_t epoch,
+                                                 const CellMac &mac = {}) {
+  auto f = build_dl_frame(cell, ue, sf, 0, 0, DlHarq{0, 0, 0}, mac, pdus, epoch);
+  std::fill(f.begin() + 4, f.begin() + 10, 0xff); /* RA: broadcast */
+  return f;
+}
+inline std::optional<DlFrame> parse_visit_dl_frame(const uint8_t *p, size_t len, uint16_t cell,
+                                                   const CellMac &mac = {}) {
+  if (p == nullptr || len < 26 + kDlBodyLen || p[0] != 0x88)
+    return std::nullopt;
+  for (int i = 4; i < 10; ++i)
+    if (p[i] != 0xff)
+      return std::nullopt;
+  std::vector<uint8_t> f(p, p + len);
+  const uint8_t *b = p + 26;
+  if (b[0] != 'C' || b[1] != 'D')
+    return std::nullopt;
+  cell_mac(f.data() + 4, cell, static_cast<uint8_t>(detail::get(b + 3, 2))); /* as addressed to it */
+  auto d = parse_dl_frame(f.data(), f.size(), cell, mac);
+  if (!d || d->harq.attempt != 0)
+    return std::nullopt; /* a visit answer, not a HARQ frame */
+  return d;
+}
+
 // Radiotap for one DL frame: the legacy rate (Mb/s), and — only when
 // `pwr_db` is set — a DBM_TX_POWER field. On Kestrel that field is an
 // ABSOLUTE per-frame level against the calibrated base (it bypasses the

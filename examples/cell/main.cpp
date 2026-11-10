@@ -218,6 +218,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <condition_variable>
 #include <thread>
 #include <vector>
 
@@ -1208,6 +1209,9 @@ int run_du(IRadio *dev, const Cfg &c) {
    * oldest first, kDlMaxPdus per frame. Bounded: the oldest go first. */
   struct DlQueue {
     std::deque<uint32_t> sns;
+    /* The newest sn a DAPS-visit answer has offered (the queue keeps them all:
+     * nothing ACKs an answer; the UE dedups after the switch). */
+    std::optional<uint32_t> offered;
     uint64_t epoch = 0;   /* the stream queued (F1.h DownlinkPdu) */
     uint32_t last_sn = 0; /* the newest sn taken in it */
     std::chrono::steady_clock::time_point last_push;
@@ -1298,6 +1302,60 @@ int run_du(IRadio *dev, const Cfg &c) {
   /* DAPS: the other identities to forward, until a local superframe (f1_mu). */
   const bool daps_on = envl("CELL_DAPS", 1, 0, 1) != 0;
   std::map<std::pair<uint16_t, uint16_t>, int64_t> daps_ids;
+  /* Sequential DAPS, DL (f1_mu): an INTER-FREQUENCY staged arrival's SOURCE
+   * identity -> its id here and its switch instant (this DU's count): a visit
+   * copy heard under that identity before the switch is answered with its
+   * queued DL PDUs. */
+  struct VisitAns {
+    uint16_t target_ue = 0;
+    int64_t eff_sf = 0;
+  };
+  std::map<std::pair<uint16_t, uint16_t>, VisitAns> visit_src;
+  /* The answers, aired by their own thread (started with the RX loop). */
+  struct AnsFrame {
+    std::vector<uint8_t> pkt;
+    uint16_t ue = 0;
+    size_t pdus = 0;
+    uint32_t first = 0;
+  };
+  std::mutex ans_mu;
+  std::condition_variable ans_cv;
+  std::deque<AnsFrame> ans_q;
+  bool ans_stop = false;
+  std::thread ans_thr([&] {
+    for (;;) {
+      AnsFrame a;
+      {
+        std::unique_lock<std::mutex> lk(ans_mu);
+        ans_cv.wait(lk, [&] { return ans_stop || !ans_q.empty(); });
+        if (ans_stop)
+          return;
+        a = std::move(ans_q.front());
+        ans_q.pop_front();
+      }
+      const bool sent = dev->send_packet(a.pkt.data(), a.pkt.size());
+      char l[180];
+      snprintf(l, sizeof l,
+               "{\"ev\":\"cell.daps.visit_dl\",\"ue\":%u,\"pdus\":%zu,\"first\":%u,\"sent\":%d}", a.ue,
+               a.pdus, a.first, sent ? 1 : 0);
+      emit(l);
+    }
+  });
+  struct AnsJoin {
+    std::mutex &m;
+    std::condition_variable &cv;
+    bool &stop;
+    std::thread &t;
+    ~AnsJoin() {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        stop = true;
+      }
+      cv.notify_all();
+      if (t.joinable())
+        t.join();
+    }
+  } ans_join{ans_mu, ans_cv, ans_stop, ans_thr};
   std::atomic<uint64_t> f1_send_drops{0};
   auto send_f1 = [&](const std::vector<uint8_t> &m) { /* any thread: a non-blocking sendto */
     if (!f1_on || m.empty())
@@ -1414,6 +1472,45 @@ int run_du(IRadio *dev, const Cfg &c) {
           }
           if (fwd) {
             forward_ul(oc, ou, p);
+            /* A visit copy from a staged arrival, before its switch: answer at
+             * once (the UE holds this channel a few ms) with the DL PDUs not
+             * yet offered to it — broadcast, so nothing waits for an ACK. */
+            std::optional<VisitAns> va;
+            if (const auto at = rx_tsf(p.RxAtrib.tsfl)) {
+              std::lock_guard<std::mutex> lk(f1_mu);
+              if (auto it = visit_src.find({oc, ou}); it != visit_src.end() && *at / P < it->second.eff_sf)
+                va = it->second;
+            }
+            if (va) {
+              std::vector<uint32_t> offer;
+              uint64_t ep = 0;
+              {
+                std::lock_guard<std::mutex> lk(mu);
+                if (auto qi = dlq.find(va->target_ue); qi != dlq.end()) {
+                  DlQueue &q = qi->second;
+                  ep = q.epoch;
+                  for (uint32_t sn : q.sns)
+                    if ((!q.offered || devourer::cell::seq_lt(*q.offered, sn)) && offer.size() < kDlMaxPdus)
+                      offer.push_back(sn);
+                  if (!offer.empty())
+                    q.offered = offer.back();
+                }
+              }
+              if (!offer.empty()) {
+                /* Aired by the answer thread: never send from this RX callback
+                 * (the RX loop recycles the TX pages; a send from inside it
+                 * froze the DU on the rig). */
+                auto vf = build_visit_dl_frame(c.cell, static_cast<uint8_t>(va->target_ue), 0, offer, ep, auth);
+                auto pkt = build_dl_radiotap(6);
+                pkt.insert(pkt.end(), vf.begin(), vf.end());
+                {
+                  std::lock_guard<std::mutex> lk(ans_mu);
+                  if (ans_q.size() < 8)
+                    ans_q.push_back({std::move(pkt), va->target_ue, offer.size(), offer.front()});
+                }
+                ans_cv.notify_one();
+              }
+            }
             char l[140];
             snprintf(l, sizeof l, "{\"ev\":\"cell.daps.fwd\",\"cell\":%u,\"ue\":%u,\"rssi\":%d}", oc, ou,
                      static_cast<int>(p.RxAtrib.rssi[0]) - 110);
@@ -1637,6 +1734,7 @@ int run_du(IRadio *dev, const Cfg &c) {
           if (fresh_q || dp->epoch > q.epoch) { /* a new stream: the old one's PDUs go */
             q.dropped += q.sns.size();
             q.sns.clear();
+            q.offered.reset();
             q.epoch = dp->epoch;
           } else if (dp->epoch < q.epoch || !devourer::cell::seq_lt(q.last_sn, dp->sn)) {
             ++q.refused; /* an older stream, or not newer than one taken: a replay */
@@ -1780,6 +1878,13 @@ int run_du(IRadio *dev, const Cfg &c) {
                 /* DAPS: the UE's source identity, heard here until the switch
                  * (+ the release window, for its last old-identity beacons). */
                 daps_ids[{cmd.source, cmd.ue}] = static_cast<int64_t>(eff) + ho_release_sf;
+                /* Answered only across channels (the source's channel, from
+                 * this DU's neighbour list): on one channel the target hears
+                 * every uplink of the UE, and an answer there would land in
+                 * the source cell's schedule. */
+                for (const auto &nb : nb_list)
+                  if (nb.cell == cmd.source && nb.channel != 0 && nb.channel != c.ch)
+                    visit_src[{cmd.source, cmd.ue}] = {cmd.target_ue, static_cast<int64_t>(eff)};
                 ue_home[cmd.target_ue] = cmd.home; /* reported on, for its next handover */
               } else {
                 std::lock_guard<std::mutex> lk(f1_mu);
@@ -1952,10 +2057,23 @@ int run_du(IRadio *dev, const Cfg &c) {
             }
           } else if (auto qi = dlq.find(ue); qi != dlq.end()) {
             pdu_epoch = qi->second.epoch;
-            while (!qi->second.sns.empty() && pdus.size() < kDlMaxPdus) {
-              pdus.push_back(qi->second.sns.front());
-              qi->second.sns.pop_front();
-            }
+            /* PDUs a DAPS-visit answer has not offered go first; the offered
+             * ones (the UE most likely took them before the switch) fill the
+             * rest, still sent in case an answer was lost — the UE takes a
+             * late copy within its reorder window. Without answers this is
+             * plain queue order. */
+            auto &dq = qi->second.sns;
+            const auto &off = qi->second.offered;
+            for (int pass = 0; pass < 2 && pdus.size() < kDlMaxPdus; ++pass)
+              for (auto it = dq.begin(); it != dq.end() && pdus.size() < kDlMaxPdus;) {
+                const bool offered = off && !devourer::cell::seq_lt(*off, *it);
+                if (offered == (pass == 1)) {
+                  pdus.push_back(*it);
+                  it = dq.erase(it);
+                } else {
+                  ++it;
+                }
+              }
             if (harq_on && !pdus.empty())
               d.pdus[tx->seq] = {pdu_epoch, pdus};
           }
@@ -2110,6 +2228,8 @@ int run_du(IRadio *dev, const Cfg &c) {
       f1_view.coordinated = coordinated;
       for (auto it = daps_ids.begin(); it != daps_ids.end();)
         it = it->second < sf ? daps_ids.erase(it) : std::next(it);
+      for (auto it = visit_src.begin(); it != visit_src.end();)
+        it = it->second.eff_sf < sf ? visit_src.erase(it) : std::next(it);
       nb_snap = nb_list;
       nl_gen_snap = nl_gen;
       ho_in_snap = ho_in;
@@ -2791,6 +2911,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
   devourer::cell::HoReceiver horx;
   std::optional<GrantMapReceiver> rxr_target;
   uint8_t tgt_du_mac[6] = {0};
+  uint16_t visit_tgt_cell = 0, visit_tgt_ue = 0; /* (mu) the pending handover's target identity */
+  uint64_t visit_dl_rx = 0;                      /* DAPS-visit DL answers taken (mu) */
   bool force_beacon = false;
   /* After a switch, until the target grants us: the way back (mu). */
   /* M6 measurement gaps (src/cell/MeasGap.h), under mu: the neighbour list
@@ -3059,6 +3181,32 @@ int run_ue(IRadio *dev, const Cfg &c) {
         return;
       }
       const int me = me_a.load();
+      /* A DAPS-visit answer from the handover target (broadcast RA, its DU
+       * as TA, our target identity): its DL PDUs, before the switch. */
+      if (p.Data.size() >= 10 && p.Data[4] == 0xff) {
+        std::lock_guard<std::mutex> lk(mu);
+        if (rxr_target && visit_tgt_cell != 0 && std::memcmp(p.Data.data() + 10, tgt_du_mac, 6) == 0)
+          if (auto vd = parse_visit_dl_frame(p.Data.data(), p.Data.size(), visit_tgt_cell, target_auth);
+              vd && vd->ue == visit_tgt_ue) {
+            int fresh_n = 0;
+            for (uint32_t sn : vd->pdus)
+              fresh_n += dl_stream.accept(vd->epoch, sn) ? 1 : 0;
+            for (const auto &gp : dl_stream.take_gaps()) {
+              char l[160];
+              snprintf(l, sizeof l,
+                       "{\"ev\":\"cell.ue.dl_gap\",\"ue\":%d,\"cell\":%u,\"after_sn\":%u,\"missing\":%u}",
+                       me, cell_a.load(), gp.after_sn, gp.missing);
+              emit(l);
+            }
+            ++visit_dl_rx;
+            char l[200];
+            snprintf(l, sizeof l,
+                     "{\"ev\":\"cell.ue.visit_dl\",\"ue\":%d,\"pdus\":%zu,\"pdu_new\":%d,\"t_ms\":%llu}", me,
+                     vd->pdus.size(), fresh_n, (unsigned long long)ue_ms());
+            emit(l);
+          }
+        return;
+      }
       const auto d = parse_dl_frame(p.Data.data(), p.Data.size(), cell_a.load(), auth);
       if (!d || me == 0 || d->ue != me)
         return;
@@ -3230,6 +3378,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
           target_auth = hmac_sha1(ho_target_key);
           rxr_target.emplace(ho_pending->target);
           cell_mac(tgt_du_mac, ho_pending->target, 0);
+          visit_tgt_cell = ho_pending->target;
+          visit_tgt_ue = ho_pending->target_ue;
           char l[220];
           snprintf(l, sizeof l,
                    "{\"ev\":\"cell.ue.ho_staged\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
@@ -3254,6 +3404,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
         rxr_source = rxr;
         rxr = *rxr_target;
         rxr_target.reset();
+        visit_tgt_cell = 0;
         nbrs.clear(); /* the new serving cell airs its own list */
         have_serv_phase = false; /* another serving grid */
         serv_switched = true;
@@ -4079,7 +4230,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
            "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu,\"nbr_refused\":{\"stale\":%llu,"
            "\"unlisted\":%llu,\"phase\":%llu},\"dl_pdus\":{\"delivered\":%llu,\"duplicates\":%llu,"
            "\"missing\":%llu,\"stale\":%llu,\"top\":%lld},\"suspend_gaps\":{\"n\":%llu,\"heard\":%llu,"
-           "\"fail\":%llu},\"daps_visits\":{\"n\":%llu,\"ok\":%llu},\"steps_held\":%llu}",
+           "\"fail\":%llu},\"daps_visits\":{\"n\":%llu,\"ok\":%llu,\"dl_answers\":%llu},\"steps_held\":%llu}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
            (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
            (unsigned long long)gm_ok, (unsigned long long)gm_refused,
@@ -4089,7 +4240,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
            (unsigned long long)dl_stream.stale(),
            dl_stream.top() ? (long long)*dl_stream.top() : -1LL, (unsigned long long)susp_gaps,
            (unsigned long long)susp_heard, (unsigned long long)susp_fail, (unsigned long long)visits,
-           (unsigned long long)visits_ok, (unsigned long long)steps_held);
+           (unsigned long long)visits_ok, (unsigned long long)visit_dl_rx, (unsigned long long)steps_held);
   emit(l);
   return 0;
 }

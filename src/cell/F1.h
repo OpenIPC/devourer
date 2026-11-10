@@ -77,8 +77,9 @@ namespace devourer::cell::f1 {
  * 6: Handover carries the target's channel (inter-frequency). */
 /* 8: Phase (CU -> DU: a joining DU's TBTT phase, src/cell/PhasePlan.h); a
  * Report with phase_us < 0 asks for one. */
-/* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). */
-constexpr uint8_t kVersion = 12; /* v12: Downlink */
+/* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). 13:
+ * Report carries the DU's suspend-gap period. */
+constexpr uint8_t kVersion = 13; /* v13: Report.gap_suspend_sf */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -86,7 +87,7 @@ constexpr size_t kMaxUes = kMaxUesPerCell;
 constexpr size_t kMaxHeard = 64;
 /* Every UE of a full cell with a full MR (serving + kMaxNeighbours). */
 constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 256 */
-/* Every F1 message fits this (a report at every list bound is 3673 bytes;
+/* Every F1 message fits this (a report at every list bound is 3675 bytes;
  * the cell_m6 ctest encodes one): the receive buffer on both sides. */
 constexpr size_t kMaxDatagram = 8192;
 
@@ -150,6 +151,9 @@ struct Report {
   uint8_t channel = 0;
   int64_t phase_us = 0;
   int64_t period_us = 0;
+  /* Its suspend-gap pattern (MeasGap.h): one superframe in this many, 0 =
+   * none — how seldom a neighbour only a suspend gap reaches is measured. */
+  uint16_t gap_suspend_sf = 0;
   uint64_t net_sf = 0;
   /* Network superframe - local superframe (valid with net_sf != 0): with
    * the phase, what fixes this DU's TSF against every other's. */
@@ -366,6 +370,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
   m.push_back(r.channel);
   put(m, static_cast<uint64_t>(r.phase_us), 8);
   put(m, static_cast<uint64_t>(r.period_us), 8);
+  put(m, r.gap_suspend_sf, 2);
   put(m, r.net_sf, 8);
   put(m, static_cast<uint64_t>(r.net_off), 8);
   put(m, r.seq, 8);
@@ -431,6 +436,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
   x.channel = static_cast<uint8_t>(r.get(1));
   x.phase_us = static_cast<int64_t>(r.get(8));
   x.period_us = static_cast<int64_t>(r.get(8));
+  x.gap_suspend_sf = static_cast<uint16_t>(r.get(2));
   x.net_sf = r.get(8);
   x.net_off = static_cast<int64_t>(r.get(8));
   x.seq = r.get(8);

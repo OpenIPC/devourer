@@ -544,24 +544,40 @@ the three-cell layout, with one UE.
 
 The CU's DL stream and both DAPS directions are on.
 
-**Rig result** (testrig `scripts/m6_crossing3.sh`): 3 runs, all pass.
+**Rig result** (testrig `scripts/m6_crossing3.sh`, 3 crossings and 2 with
+a source failure, all pass).
 
 | per run | 1 → 2 (idle-gap measurements) | 2 → 3 (suspend-gap measurements only) |
 |---|---|---|
-| trigger margin (A3 defaults) | 6–7 dB | 7–10 dB |
-| crossing → switch | 48–64 sf | 42–48 sf |
-| measurements of the target before the switch | 16–27 idle gaps | 16–17 suspend gaps, no idle one |
+| trigger margin (A3 defaults) | 5–8 dB | 5–9 dB |
+| crossing → switch | 49–69 sf | 39–52 sf |
+| measurements of the target before the switch | 13–23 idle gaps | 16–17 suspend gaps, no idle one |
 
-- **Every switch:** TSF continuity (18–75 ms after the network instant),
+- **Every switch:** TSF continuity (22–82 ms after the network instant),
   the target heard the UE in slot ≥ 99 % until the next switch, and the
   source released it.
 - **No DL in a deaf window:** no DU aired the UE a DL frame inside a suspend
   gap, in any serving segment.
-- **DL stream:** 0 PDUs missing in the handover windows; the longest DL
-  silence was 465–614 ms.
-- **Uplinks** at the CU: 82–86 missing per run, all but 2 of them the
-  suspend gaps' own cost. That cost is each gap's superframe and the two
-  after it, while the UE served in cells 2 and 3.
+- **DL stream:** 0 PDUs missing in the handover windows. The longest DL
+  silence was 0.6–1.0 s, at a cost of 156–191 duplicates per run.
+- **Uplinks** at the CU: 90–100 missing per run, nearly all of them
+  expected.
+  - The suspend gaps' own cost: each gap's superframe and the two after it,
+    while the UE served in cells 2 and 3.
+  - Each switch's own superframe and the next: an inter-frequency switch
+    retunes the UE.
+  - Beyond those, 0–4 per run.
+
+**A source failure mid-crossing** (DU1 killed the moment the UE accepts
+1 → 2, ~2 s before the switch):
+- Both switches still happened.
+- **DL:** DAPS lost 0 PDUs, though the DL silence grew to 1.3–1.5 s.
+- **UL:** 12–14 uplinks were lost in the 1 → 2 window, everything from the
+  kill to the switch.
+  - Cells 1 and 2 are on different channels, so the target never hears the
+    UE's source identity, and uplink DAPS needs one channel.
+  - This is the open different-channel DAPS variant, measured here, not
+    asserted.
 
 **What the first runs found: a neighbour measured only in suspend gaps
 flickered stale at the CU.**
@@ -571,12 +587,15 @@ flickered stale at the CU.**
   the A3 restarted its time-to-trigger each time.
 - The 2 → 3 handover fired 112 and 120 superframes after the crossing (one
   run 41), at a 19 dB margin.
-- With suspend gaps on, a UE-reported measurement now counts for one
-  suspend period plus 1.5 s (`RAN_GAP_SUSPEND_SF`, the cells' value),
-  when that is longer.
-- A UE with two neighbours reachable only through suspend gaps measures
-  each one every two periods, past the UE's own 3 s table staleness. That
-  case has not run.
+- **The fix, scoped per UE:** the CU now works out, per UE, which
+  neighbours it reaches only in suspend gaps. It uses the reports: phases,
+  channels, the UE's slots, and the suspend period each DU reports (F1 v13,
+  `Report.gap_suspend_sf`, so the CU cannot drift from the cells).
+- A UE's report of such a neighbour counts for k suspend periods plus 1.5 s,
+  where k is how many such neighbours it measures in turn. Every other
+  report keeps `RAN_MEAS_STALE_MS`.
+- **Not run:** with k ≥ 2 the UE's own measurement table must also keep a
+  sample that long (`CELL_MEAS_STALE_MS`, default 3 s).
 
 ## The UE's clock fit across a jump of its DU's TSF
 
@@ -787,7 +806,7 @@ radio).
 - **A false MAC gains nothing:** a UE that joins claiming another's MAC
   only gets contexts it cannot unwrap.
 - **The datagram bound:** both F1 receive buffers are `kMaxDatagram`
-  (8192). A report at every list bound is 3673 bytes, which the 2048-byte
+  (8192). A report at every list bound is 3675 bytes, which the 2048-byte
   buffers before this could already not hold.
 
 Without `CELL_AREA_KEY` all of this collapses to the one shared key, as

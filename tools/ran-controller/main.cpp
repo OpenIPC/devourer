@@ -97,11 +97,12 @@
 //                             suspend gap reaches counts 0.25 per position
 //                             instead of 0, so the plan still prefers idle
 //                             windows and covers every pair
-//   RAN_GAP_SUSPEND_SF [20]   (= the cells' CELL_GAP_SUSPEND_SF) with
-//                             RAN_GAP_SUSPEND: a UE-reported measurement counts
-//                             for this many superframes + 1.5 s, if longer than
-//                             RAN_MEAS_STALE_MS (a neighbour only a suspend gap
-//                             reaches is measured that seldom)
+//                             A UE's report of a neighbour only a suspend gap
+//                             reaches (from the reports: phases, channels, its
+//                             slots, its DU's gap_suspend_sf) counts for k of
+//                             the DU's suspend periods + 1.5 s (k such
+//                             neighbours, measured in turn), if longer than
+//                             RAN_MEAS_STALE_MS; every other one keeps that
 //   RAN_SECS [120]            run time
 // Output: JSONL on stdout ("ev":"ran.*").
 #include <arpa/inet.h>
@@ -421,10 +422,7 @@ int main() {
   const bool gap_suspend = envl("RAN_GAP_SUSPEND", 0, 0, 1) != 0;
   if (gap_suspend)
     phase_pp.suspend_weight = 0.25;
-  /* ... in one superframe in this many (= the cells' CELL_GAP_SUSPEND_SF): a
-   * neighbour only a suspend gap reaches is measured that seldom, so a UE's
-   * report of it stays evidence that long (+ the report path). */
-  const int64_t gap_suspend_sf = envl("RAN_GAP_SUSPEND_SF", 20, 1, 100000);
+
   struct Joining {
     DuState st;
     std::chrono::steady_clock::time_point first;
@@ -823,18 +821,41 @@ int main() {
             std::chrono::duration_cast<std::chrono::milliseconds>(now - d.at).count();
         return d.at.time_since_epoch().count() != 0 && age_ms + rep_age <= meas_stale_ms;
       };
-      /* A UE's own report of a cell: with suspend gaps, as old as one
-       * suspend period (+1.5 s for the MR and F1 report path) still counts —
-       * else a neighbour measured only there flickers stale and the A3's
-       * time-to-trigger restarts every time (the three-cell crossing: the
-       * 2 -> 3 handover fired 12 s late). */
-      auto live_ue = [&](const DuState &d, uint16_t age_ms) {
+      auto live_within = [&](const DuState &d, uint16_t age_ms, int64_t bound_ms) {
         const int64_t rep_age =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - d.at).count();
-        int64_t bound = meas_stale_ms;
-        if (gap_suspend && d.rep.period_us > 0)
-          bound = std::max<int64_t>(bound, gap_suspend_sf * d.rep.period_us / 1000 + 1500);
-        return d.at.time_since_epoch().count() != 0 && age_ms + rep_age <= bound;
+        return d.at.time_since_epoch().count() != 0 && age_ms + rep_age <= bound_ms;
+      };
+      /* The neighbours a UE of DU `d` (at position `pos`) reaches only in
+       * suspend gaps (MeasGap.h suspend_only, from the reports: phases,
+       * channels, its slots), when its DU runs them (Report.gap_suspend_sf). A
+       * UE measures each of them once per k suspend periods (k of them, round
+       * robin), so its report of one counts that long (+1.5 s for the MR and
+       * F1 report path); every other report keeps RAN_MEAS_STALE_MS. Else such
+       * a neighbour flickers stale and the A3's time-to-trigger restarts (the
+       * three-cell crossing: the 2 -> 3 handover fired 12 s late). */
+      auto suspend_only_of = [&](const DuState &d, uint8_t pos) {
+        std::set<uint16_t> out;
+        if (d.rep.gap_suspend_sf == 0 || d.rep.period_us <= 0 || pos == 0)
+          return out;
+        const auto pc = devourer::cell::phase_cell(d.rep.du, d.rep.channel, d.rep.phase_us, d.rep.period_us,
+                                                   d.rep.fixed, d.rep.positions);
+        if (pos > pc.positions.size())
+          return out;
+        const std::vector<devourer::cell::GridSpan> busy = {
+            {0, pc.beacon_us}, pc.positions[pos - 1].first, pc.positions[pos - 1].second};
+        for (const auto &o : dus) {
+          if (o.first == d.rep.du || now - o.second.at >= std::chrono::seconds(3) ||
+              o.second.rep.period_us != d.rep.period_us)
+            continue;
+          const devourer::cell::Neighbour n{
+              o.first, o.second.rep.channel,
+              devourer::cell::neighbour_offset_us(o.second.rep.phase_us, d.rep.phase_us, d.rep.period_us)};
+          if (devourer::cell::suspend_only(n, d.rep.channel, phase_pp.retune_us, phase_pp.guard_us,
+                                           d.rep.period_us, busy))
+            out.insert(o.first);
+        }
+        return out;
       };
       auto log_candidate = [&](uint16_t ue, uint16_t from, uint16_t to, double sv, double tv,
                                int64_t held, bool ue_reported) {
@@ -873,9 +894,19 @@ int main() {
             return metric == "rssi" ? qdb_rssi / 4.0 : qdb_snr / 4.0;
           };
           const double serving_du = val(q.rssi_qdbm, q.snr_qdb);
+          uint8_t qpos = 0;
+          for (const auto &a : dit->second.rep.ues)
+            if (a.ue == q.ue)
+              qpos = a.pos;
+          const auto susp_only = suspend_only_of(dit->second, qpos);
+          const int64_t susp_bound_ms =
+              std::max<int64_t>(meas_stale_ms, static_cast<int64_t>(susp_only.size()) *
+                                                       dit->second.rep.gap_suspend_sf *
+                                                       dit->second.rep.period_us / 1000 +
+                                                   1500);
           std::optional<double> serving_ue;
           for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
-            if (m.ue == q.ue && m.cell == cell && live_ue(dit->second, m.age_ms))
+            if (m.ue == q.ue && m.cell == cell && live(dit->second, m.age_ms))
               serving_ue = val(m.rssi_qdbm, m.snr_qdb);
           struct Pair {
             double s, t;
@@ -890,7 +921,8 @@ int main() {
             std::optional<double> ue_v, du_v;
             if (serving_ue)
               for (const f1::UeCellMeas &m : dit->second.rep.ue_meas)
-                if (m.ue == q.ue && m.cell == o && live_ue(dit->second, m.age_ms))
+                if (m.ue == q.ue && m.cell == o &&
+                    live_within(dit->second, m.age_ms, susp_only.count(o) ? susp_bound_ms : meas_stale_ms))
                   ue_v = val(m.rssi_qdbm, m.snr_qdb);
             if (auto oit = dus.find(o); oit != dus.end())
               for (const f1::HeardUe &h : oit->second.rep.heard)

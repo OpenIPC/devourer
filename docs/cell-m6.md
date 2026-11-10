@@ -1199,14 +1199,27 @@ the switch was lost (the three-cell crossing: 12–14).
 - **Loop cadence:** during the window the UE loop runs every 30 ms, not
   100 ms, so the next superframe's visit is in reach after one ends
   ~75 ms into its superframe.
+- **What a visit checks:**
+  - the whole send, from queuing through the hold, must be clear of the
+    target's active span;
+  - a late wake skips the visit;
+  - an outbound retune that overran the instant skips the send and retunes
+    straight back (`cell.ue.daps_visit_skip`);
+  - both retunes feed the adaptive bound.
+- **The step hold:** a visit holds TSF steps only through its own
+  superframe; steps held are counted in `cell.ue.done`.
 
 **Its sequence number at the CU** (F1 v14):
 - The target DU forwards the copy as before (`daps_ids`, area tag), now with
   its reception instant on the network timebase (`Uplink.net_us`).
-- A copy heard by another cell's DU is mapped by the CU to the UE's last
-  own uplink slot at or before it (`Handover.h` `ul_seq_for_copy`), using
-  the source cell's phase and the UE's uplink position from the source's
-  report.
+- The CU maps EVERY forwarded uplink to the UE's last own uplink slot at or
+  before it (`Handover.h` `ul_seq_for_copy`), the serving DU's own copies
+  included. It uses the identity's last-known slot (its cell's phase and its
+  uplink position from the latest report naming it, kept 30 s).
+- Mapping every copy keeps both copies of one uplink on one seq even with
+  the slot next to a network-superframe boundary, where a timing advance
+  puts the serving copy before it. A copy arriving after the source released
+  the UE still maps.
 - The visit, sent ~30 ms after the slot and possibly in the next network
   superframe, therefore dedups with the source's copy of the same uplink.
   The UE needs no global clock.
@@ -1223,12 +1236,12 @@ stream on.
 
 | uplinks missing at the CU around the switch | before the switch | at the switch |
 |---|---|---|
-| source killed at the accept, visits | **0, 0** | 2, 2 |
-| source killed at the accept, no visits | 13, 13 | 2, 2 |
-| no fault, visits | 0, 0 | 1, 1 |
+| source killed at the accept, visits | **0, 0** | 1, 2 |
+| source killed at the accept, no visits | 15, 15 | 2, 2 |
+| no fault, visits | 0, 0 | 2, 1 |
 
-- **20–21 visits per handover**, every one sent and back; deaf time
-  55.6–57.2 ms each.
+- **20–21 visits per handover**, every one sent and back, none skipped;
+  deaf time 55.6–56.8 ms each.
 - **They cost the source nothing:** without a fault, DU1 heard UE1's uplink
   in every superframe from the accept to the switch, in slot 100 %.
 - **The switch's own cost:** the switch superframe (with the source dead,
@@ -1241,7 +1254,8 @@ stream on.
   the step hold (above), visits stopping two superframes before the switch
   left those two uncovered.
 - **Regression:** the inter-frequency measurement-gap handover, same-channel
-  DAPS, the plain and fault handovers and the three-cell crossing pass.
+  DAPS, the plain and fault handovers, the two-cell crossing with a source
+  failure, and the three-cell crossing with one all pass.
 
 ## Replay of a signed neighbour list
 

@@ -3140,7 +3140,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   bool had_susp_prev = false; /* last pass had neighbours only a suspend gap reaches */
   std::vector<uint8_t> last_bcn; /* the uplink beacon frame on air (for DAPS visits) */
   int64_t last_visit_sf = -1;
-  uint64_t visits = 0, visits_ok = 0;
+  uint64_t visits = 0, visits_ok = 0, steps_held = 0;
   uint64_t susp_gaps = 0, susp_heard = 0, susp_fail = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     /* A DAPS-visit window: passes 30 ms apart, so the next superframe's
@@ -3657,6 +3657,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
      * in the next pass; 20 gaps without one lost nothing. The mechanism is
      * not established; the step simply waits a few superframes. */
     if (step != 0 && du_now / P < no_step_until_sf) {
+      ++steps_held;
     } else if (step != 0) {
       /* The offset changes only on a write, so the loop's (t, f) pair gives
        * the offset this step must produce. */
@@ -3821,13 +3822,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
       constexpr int64_t kVisitHoldUs = 4000;
       const int64_t lo = ul_end + gap_guard_us + gap_retune_us,
                     hi = P - gap_guard_us - gap_retune_us - kVisitHoldUs - 1000;
-      auto in_target = [&](int64_t v) {
-        const int64_t d = ((v - o_t) % P + P) % P;
-        return d < span + 1000 || d > P - 1000;
+      /* The whole send — queued at v, airing any time during the hold — must
+       * stay clear of the target cell's active span (1 ms guards). */
+      auto clear_of_target = [&](int64_t a, int64_t b) {
+        for (int64_t x = a; x <= b; x += 250) {
+          const int64_t d = ((x - o_t) % P + P) % P;
+          if (d < span + 1000 || d > P - 1000)
+            return false;
+        }
+        return true;
       };
       std::optional<int64_t> v;
       for (int64_t x = lo; x <= hi && !v; x += 500)
-        if (!in_target(x))
+        if (clear_of_target(x - 500, x + kVisitHoldUs + 1000))
           v = x;
       const auto now_du = serving_now();
       for (const int64_t S : {sfn, sfn + 1}) {
@@ -3839,6 +3846,18 @@ int run_ue(IRadio *dev, const Cfg &c) {
           continue;
         last_visit_sf = S;
         std::this_thread::sleep_for(std::chrono::microseconds(go - *now_du));
+        auto skip = [&](const char *why, int64_t late_us) {
+          char l[200];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.daps_visit_skip\",\"ue\":%d,\"sf\":%lld,\"why\":\"%s\",\"late_us\":%lld}",
+                   me, (long long)S, why, (long long)late_us);
+          emit(l);
+        };
+        /* Woke late: the window was planned for `go` only (as run_gap). */
+        if (const auto woke = serving_now(); !woke || *woke - go > gap_guard_us / 2) {
+          skip("late", woke ? *woke - go : -1);
+          break;
+        }
         const auto g0 = std::chrono::steady_clock::now();
         bool out_ok = true, sent = false;
         try {
@@ -3848,13 +3867,23 @@ int run_ue(IRadio *dev, const Cfg &c) {
         }
         const auto g1 = std::chrono::steady_clock::now();
         if (out_ok) {
-          if (const auto t_now = serving_now(); t_now && *t_now < S * P + *v)
-            std::this_thread::sleep_for(std::chrono::microseconds(S * P + *v - *t_now));
-          auto pkt = build_dl_radiotap(6);
-          pkt.insert(pkt.end(), last_bcn.begin(), last_bcn.end());
-          sent = dev->send_packet(pkt.data(), pkt.size());
-          std::this_thread::sleep_for(std::chrono::microseconds(kVisitHoldUs));
+          /* The outbound retune may overrun: send only if the instant is
+           * still (about) ahead — the copy must not slide into the target's
+           * span, nor the return past the serving beacon. */
+          const auto t_now = serving_now();
+          const int64_t at = S * P + *v;
+          if (!t_now || *t_now > at + 1000) {
+            skip("retune_overrun", t_now ? *t_now - at : -1);
+          } else {
+            if (*t_now < at)
+              std::this_thread::sleep_for(std::chrono::microseconds(at - *t_now));
+            auto pkt = build_dl_radiotap(6);
+            pkt.insert(pkt.end(), last_bcn.begin(), last_bcn.end());
+            sent = dev->send_packet(pkt.data(), pkt.size());
+            std::this_thread::sleep_for(std::chrono::microseconds(kVisitHoldUs));
+          }
         }
+        const auto g1b = std::chrono::steady_clock::now();
         bool back_ok = false;
         for (int k = 0; k < 3 && !back_ok; ++k) {
           try {
@@ -3869,7 +3898,13 @@ int run_ue(IRadio *dev, const Cfg &c) {
             beaconing = false;
           retune_to = cur_ch;
         }
-        no_step_until_sf = S + 4; /* as after a gap */
+        /* The bound only grows with what was measured (as for gaps). */
+        gap_retune_us = std::max<int64_t>(
+            {gap_retune_us, std::chrono::duration_cast<std::chrono::microseconds>(g1 - g0).count(),
+             std::chrono::duration_cast<std::chrono::microseconds>(g2 - g1b).count()});
+        /* Steps wait only out this superframe (visits come every one: a
+         * longer hold would freeze them for the whole window). */
+        no_step_until_sf = S + 1;
         ++visits;
         visits_ok += out_ok && back_ok && sent ? 1 : 0;
         char l[260];
@@ -4044,7 +4079,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
            "\"keyed\":%d,\"gm_ok\":%llu,\"gm_refused\":%llu,\"nbr_refused\":{\"stale\":%llu,"
            "\"unlisted\":%llu,\"phase\":%llu},\"dl_pdus\":{\"delivered\":%llu,\"duplicates\":%llu,"
            "\"missing\":%llu,\"stale\":%llu,\"top\":%lld},\"suspend_gaps\":{\"n\":%llu,\"heard\":%llu,"
-           "\"fail\":%llu},\"daps_visits\":{\"n\":%llu,\"ok\":%llu}}",
+           "\"fail\":%llu},\"daps_visits\":{\"n\":%llu,\"ok\":%llu},\"steps_held\":%llu}",
            me_a.load(), steps, step_fails, (long long)listen_from, (long long)listen_to,
            (unsigned long long)dl_new, (unsigned long long)dl_dup, auth ? 1 : 0,
            (unsigned long long)gm_ok, (unsigned long long)gm_refused,
@@ -4054,7 +4089,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
            (unsigned long long)dl_stream.stale(),
            dl_stream.top() ? (long long)*dl_stream.top() : -1LL, (unsigned long long)susp_gaps,
            (unsigned long long)susp_heard, (unsigned long long)susp_fail, (unsigned long long)visits,
-           (unsigned long long)visits_ok);
+           (unsigned long long)visits_ok, (unsigned long long)steps_held);
   emit(l);
   return 0;
 }

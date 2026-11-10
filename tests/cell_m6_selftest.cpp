@@ -456,6 +456,13 @@ int main() {
       CHECK(ul_seq_from_network_time(S + 67700 + 40000, P) == at_slot + 1); /* ... the raw seq would differ */
       CHECK(ul_seq_for_copy(S + 67700 + P, ph, ul, P) == at_slot + 1);     /* the next slot */
       CHECK(ul_seq_for_copy(S + 67700 + P - 6000, ph, ul, P) == at_slot);  /* still before it */
+      /* The slot 200 us after a network-superframe boundary: the serving
+       * copy heard 400 us early (timing advance) is in the PREVIOUS raw
+       * superframe, a visit 30 ms later in the slot's — mapping BOTH (the CU
+       * maps every copy) gives one seq. */
+      CHECK(ul_seq_for_copy(S - 200, 0, 200, P) == ul_seq_for_copy(S + 30200, 0, 200, P));
+      CHECK(ul_seq_for_copy(S - 200, 0, 200, P) == ul_seq_from_network_time(S, P));
+      CHECK(ul_seq_from_network_time(S - 200, P) + 1 == ul_seq_from_network_time(S, P)); /* raw differ */
       /* phase 0: slot at 16500 of the same network superframe */
       CHECK(ul_seq_for_copy(S + 16500 + 50000, 0, ul, P) == ul_seq_from_network_time(S, P));
     }

@@ -981,6 +981,12 @@ int main() {
             retired.erase(r);
           }
           seen.insert(key);
+          /* A UE whose handover is in flight: its A3 is frozen until the flight
+           * ends. The UE leaves at the instant, and the source's reports then
+           * lose its own measurements; the DUs' stale ones must not clear the
+           * candidate and raise another for the same move. */
+          if (flights.count(key))
+            continue;
           auto it = ho.find(key);
           if (it == ho.end())
             it = ho.emplace(key, HoState{devourer::cell::A3Trigger(cell, a3c), std::nullopt}).first;
@@ -1079,6 +1085,12 @@ int main() {
                        std::to_string(cell) + ",\"to\":" + std::to_string(force->tgt) + "}");
                 }
                 ul.alias({cmd.target, cmd.target_ue}, {cmd.source, cmd.ue}); /* DAPS: one stream */
+                /* The target identity's uplink slot from the command itself:
+                 * its first uplinks come before the target's report names it,
+                 * and must map to the slot they belong to. */
+                if (cmd.target_pos >= 1 && cmd.target_pos <= tr.positions.size())
+                  ul_slot[{cmd.target, cmd.target_ue}] = {tr.phase_us, tr.period_us,
+                                                          tr.positions[cmd.target_pos - 1].ul.start_us, ms_now()};
                 if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end()) {
                   char db[200];
                   snprintf(db, sizeof db,

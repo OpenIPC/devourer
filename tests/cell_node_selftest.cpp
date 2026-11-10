@@ -162,8 +162,9 @@ int main() {
     dlt[26 + 13] ^= 1; /* seq */
     CHECK(!parse_dl_frame(dlt.data(), dlt.size(), 5, k1));
     /* What a DL frame takes from the queue after a switch: not-yet-offered
-     * first; an offered one before it falls 24 sns behind (a lost answer's
-     * PDU stays inside the UE's reorder window); plain order without a mark. */
+     * first; an offered one just before the fresh one that would push it out
+     * of the UE's reorder window while still recoverable; plain order without
+     * a mark. */
     {
       std::deque<uint32_t> q;
       for (uint32_t s = 100; s < 110; ++s)
@@ -192,6 +193,15 @@ int main() {
         }
       }
       CHECK(ok);
+      /* After a DAPS handover: a 40-PDU offered backlog (100..139, the UE has
+       * them up to 139) and the next fresh PDU (140): the fresh one rides the
+       * FIRST frame (only 107, which 140 would push out of the window while
+       * still recoverable, goes just before it). */
+      std::deque<uint32_t> h;
+      for (uint32_t s = 100; s < 141; ++s)
+        h.push_back(s);
+      auto f = pick_dl_pdus(h, 139u, 8);
+      CHECK(f.size() == 8 && f[0] == 107 && f[1] == 140);
     }
     /* A DAPS-visit DL answer: broadcast RA, the target identity in the body,
      * tagged with the target cell's key; not a unicast DL frame. */

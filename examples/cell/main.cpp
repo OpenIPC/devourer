@@ -3299,6 +3299,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int64_t last_susp_sf = -1;
   bool susp_infeasible = false;
   bool had_susp_prev = false; /* last pass had neighbours only a suspend gap reaches */
+  std::optional<std::chrono::steady_clock::time_point> next_pass_at; /* (a switch's) */
+  std::optional<uint8_t> place_ul_slot; /* an inter-frequency switch: place the TSF after its retune */
+  std::optional<std::chrono::steady_clock::time_point> beacon_hold_until; /* no beacon restart before */
   std::vector<uint8_t> last_bcn; /* the uplink beacon frame on air (for DAPS visits) */
   int64_t last_visit_sf = -1;
   uint64_t visits = 0, visits_ok = 0, steps_held = 0;
@@ -3307,7 +3310,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
     /* A DAPS-visit window: passes 30 ms apart, so the next superframe's
      * visit is in reach after one ends ~75 ms into its superframe. */
     const bool visiting = daps_visit && ho_pending && ho_pending->channel != 0 && ho_pending->channel != cur_ch;
-    std::this_thread::sleep_for(std::chrono::milliseconds(visiting ? 30 : 100));
+    {
+      /* Right after a switch: the next pass at the new cell's first superframe
+       * (+1 ms), so the uplink beacon restarts — and the step places it —
+       * before that superframe's uplink slot, not a whole pass later. */
+      auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(visiting ? 30 : 100);
+      if (next_pass_at && *next_pass_at < until)
+        until = *next_pass_at;
+      next_pass_at.reset();
+      std::this_thread::sleep_until(until);
+    }
     uint64_t t = 0, f = 0;
     if (!dev->ReadTsfAndFreeRun(t, f))
       continue;
@@ -3445,8 +3457,12 @@ int run_ue(IRadio *dev, const Cfg &c) {
         emit(l);
         rearm_ack = true;
         ho_back = HoBack{source_key, cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
-        if (h.channel != 0 && h.channel != cur_ch)
+        if (du_now >= 0)
+          next_pass_at = std::chrono::steady_clock::now() + std::chrono::microseconds((sfn + 1) * P + 1000 - du_now);
+        if (h.channel != 0 && h.channel != cur_ch) {
           retune_to = h.channel; /* inter-frequency: done right after this lock */
+          place_ul_slot = h.ul_slot; /* and the TSF placed for the target's slot */
+        }
       }
       /* Committed once the target's map in force grants us; no grant by the
        * deadline = back to the source (conditional: the UE never ends up
@@ -3524,6 +3540,46 @@ int run_ue(IRadio *dev, const Cfg &c) {
           emit(l);
         }
         const auto r1 = std::chrono::steady_clock::now();
+        if (tuned && place_ul_slot && grid && *place_ul_slot < grid->slots().size()) {
+          /* The switch's TSF placement, while the beacon is stopped: its
+           * restart then fires in the target's uplink slot from the first
+           * one (a step after the restart came too late for it: the first
+           * uplink landed at the source's phase, 40 ms off). */
+          uint64_t t2 = 0, f2 = 0;
+          if (dev->ReadTsfAndFreeRun(t2, f2)) {
+            int64_t du2 = -1;
+            {
+              std::lock_guard<std::mutex> lk(mu);
+              du2 = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f2))));
+            }
+            const int64_t st = ue_tsf_step(static_cast<int64_t>(t2), du2,
+                                           grid->slots()[*place_ul_slot].start_us, 0, P, 2);
+            const bool ok = st == 0 || dev->WriteTsf(static_cast<uint64_t>(
+                                           static_cast<int64_t>(dev->ReadTsf()) + st +
+                                           static_cast<int64_t>(std::llround(comp_us))));
+            /* Kestrel's beacon timer takes a TSF write from the TBTT after next:
+             * the first beacon after this step fires at the OLD phase, i.e. at
+             * (slot + step) on the target's grid. Harmless in its idle time;
+             * inside its active span it would collide, so the restart then
+             * waits that TBTT out (one uplink, not a collision). */
+            int64_t span = 0;
+            for (const auto &x : grid->slots())
+              span = std::max<int64_t>(span, x.start_us + x.len_us);
+            const int64_t stale = ((grid->slots()[*place_ul_slot].start_us + st) % P + P) % P;
+            const bool collide = st != 0 && (stale < span + 1000 || stale > P - 1000);
+            if (collide && du2 >= 0) {
+              const int64_t s_at = (du2 / P + 1) * P + stale; /* the stale TBTT, next superframe */
+              beacon_hold_until = std::chrono::steady_clock::now() + std::chrono::microseconds(s_at - du2 + 2000);
+            }
+            char l[200];
+            snprintf(l, sizeof l,
+                     "{\"ev\":\"cell.ue.switch_place\",\"ue\":%d,\"step_us\":%lld,\"ok\":%d,\"stale_us\":%lld,"
+                     "\"hold\":%d}",
+                     me_a.load(), (long long)st, ok ? 1 : 0, (long long)stale, collide ? 1 : 0);
+            emit(l);
+          }
+        }
+        place_ul_slot.reset();
         if (tuned) {
           cur_ch = to;
           retune_done_us.store(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -3760,6 +3816,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
     const bool content_moved = force_beacon || !beaconing || running_epoch != mcopy.epoch ||
                                fb.base != last_fb.base || fb.bitmap != last_fb.bitmap ||
                                snr_gen != last_snr_gen;
+    if (content_moved && !beaconing && beacon_hold_until) {
+      if (std::chrono::steady_clock::now() < *beacon_hold_until)
+        continue; /* a switch's stale TBTT is still ahead (see switch_place) */
+      beacon_hold_until.reset();
+    }
     if (content_moved) {
       auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, ue_area);
       {

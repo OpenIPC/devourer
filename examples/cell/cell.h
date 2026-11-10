@@ -396,22 +396,38 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
 }
 
 // The PDUs one DL frame carries from a UE's queue (taken out of it, in
-// order): those no DAPS-visit answer has offered yet first (the UE most
-// likely has the offered ones), but an offered PDU goes first once it would
-// fall more than `lag` sns behind the fresh one next in line, so that a lost
-// answer's PDU still reaches the UE inside its reorder window (a late copy,
-// never a confirmed gap). Without an offered mark: plain queue order.
+// order): those no DAPS-visit answer has offered yet first — the UE most
+// likely took the offered ones, so its reception top is about the offered
+// mark. Sending a fresh sn f moves that top to f, which would push an offered
+// sn p out of the UE's reorder window (`window`) while p could still be
+// recovered (offered - p <= window) and f - p > window: such a p goes just
+// before f, so a lost answer's PDU arrives as a late copy, never a confirmed
+// gap. Normally (f = offered + 1) that is at most one PDU, in the same frame.
+// Without an offered mark: plain queue order.
 inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::optional<uint32_t> &offered,
-                                          size_t max, uint32_t lag = 24) {
+                                          size_t max, uint32_t window = 32) {
   std::deque<uint32_t> fresh, old;
   for (uint32_t sn : q)
     (offered && !devourer::cell::seq_lt(*offered, sn) ? old : fresh).push_back(sn);
   std::vector<uint32_t> out;
   while (out.size() < max && (!fresh.empty() || !old.empty())) {
-    const bool take_old = fresh.empty() || (!old.empty() && fresh.front() - old.front() > lag);
-    auto &from = take_old ? old : fresh;
-    out.push_back(from.front());
-    from.pop_front();
+    auto urgent = old.end();
+    if (!fresh.empty())
+      for (auto it = old.begin(); it != old.end(); ++it)
+        if (*offered - *it <= window && fresh.front() - *it > window) {
+          urgent = it;
+          break;
+        }
+    if (urgent != old.end()) {
+      out.push_back(*urgent);
+      old.erase(urgent);
+    } else if (!fresh.empty()) {
+      out.push_back(fresh.front());
+      fresh.pop_front();
+    } else {
+      out.push_back(old.front());
+      old.pop_front();
+    }
   }
   for (auto it = q.begin(); it != q.end();)
     it = std::find(out.begin(), out.end(), *it) != out.end() ? q.erase(it) : std::next(it);

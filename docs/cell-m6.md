@@ -522,6 +522,62 @@ measurements. Each UE is strongest to the DU on its own box:
   hover case), the measurement-gap handover and the plain and fault
   handovers pass with the A3 change.
 
+### A UE crossing three cells
+
+The emulated crossing (TX ramps, the A3 at its defaults, nothing forced) on
+the three-cell layout, with one UE.
+
+**What the rig allows:**
+- A DU's TX offset reaches −20 dB at most: Kestrel's effective power floor
+  is 0 dBm, and the base is ~20 dBm.
+- Each UE radio hears the DU on its own box far above the others, so no
+  radio can be made to *enter* all three cells.
+- The j6412-3 radio comes closest: cell 1 at −57, cell 2 at −39 and cell 3
+  at −38 dBm, all at full power. It can start in cell 1 and cross 1 → 2 →
+  3, but entering cell 1 from either other cell is out of reach.
+- The second crossing is on the pair it measures only in suspend gaps
+  (cells 2 and 3 share a phase).
+
+**The ramps** (DU1 stays at 0):
+- DU2 −20 → 0 dB over 40–55 s, holds, then back to −20 over 70–85 s;
+- DU3 −20 → 0 dB over 70–85 s.
+
+The CU's DL stream and both DAPS directions are on.
+
+**Rig result** (testrig `scripts/m6_crossing3.sh`): 3 runs, all pass.
+
+| per run | 1 → 2 (idle-gap measurements) | 2 → 3 (suspend-gap measurements only) |
+|---|---|---|
+| trigger margin (A3 defaults) | 6–7 dB | 7–10 dB |
+| crossing → switch | 48–64 sf | 42–48 sf |
+| measurements of the target before the switch | 16–27 idle gaps | 16–17 suspend gaps, no idle one |
+
+- **Every switch:** TSF continuity (18–75 ms after the network instant),
+  the target heard the UE in slot ≥ 99 % until the next switch, and the
+  source released it.
+- **No DL in a deaf window:** no DU aired the UE a DL frame inside a suspend
+  gap, in any serving segment.
+- **DL stream:** 0 PDUs missing in the handover windows; the longest DL
+  silence was 465–614 ms.
+- **Uplinks** at the CU: 82–86 missing per run, all but 2 of them the
+  suspend gaps' own cost. That cost is each gap's superframe and the two
+  after it, while the UE served in cells 2 and 3.
+
+**What the first runs found: a neighbour measured only in suspend gaps
+flickered stale at the CU.**
+- A UE's report of a cell counted while its sample age plus the report's
+  age stayed within `RAN_MEAS_STALE_MS` (2 s).
+- Cell 3, measured once per suspend period (2.05 s), kept going stale, and
+  the A3 restarted its time-to-trigger each time.
+- The 2 → 3 handover fired 112 and 120 superframes after the crossing (one
+  run 41), at a 19 dB margin.
+- With suspend gaps on, a UE-reported measurement now counts for one
+  suspend period plus 1.5 s (`RAN_GAP_SUSPEND_SF`, the cells' value),
+  when that is longer.
+- A UE with two neighbours reachable only through suspend gaps measures
+  each one every two periods, past the UE's own 3 s table staleness. That
+  case has not run.
+
 ## The UE's clock fit across a jump of its DU's TSF
 
 The UE fits the DU's TSF against its own free-running counter
@@ -1242,11 +1298,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   variant, with its retune and deaf-time budget. The downlink is duplicated
   through the target's buffer, but not received from both DUs at once (see
   the downlink duplication section).
-- **More than three cells:** the rig runs three cells, with handovers among
-  them, including one into a cell measured only in suspend gaps. A UE
-  crossing all three in turn, as in the emulated crossing, has not run.
-  Re-phasing live cells is still open; it is not needed for
-  measurability.
+- **More than three cells, and a full tour:** the rig runs three cells,
+  with handovers among them and a UE crossing 1 → 2 → 3. The way back into
+  cell 1 is out of reach of the DUs' 20 dB TX range on this rig. Re-phasing
+  live cells is still open; it is not needed for measurability.
 - **A real moving UE:** the crossing below is emulated by the DUs' TX
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,

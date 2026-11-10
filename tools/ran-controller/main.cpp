@@ -388,6 +388,14 @@ int main() {
     std::deque<uint32_t> recent; /* the last RAN_DL_DAPS_BACKLOG sns sent */
   };
   std::map<std::pair<uint16_t, uint16_t>, DlStream> dls;
+  /* Per UE identity (cell, ue): where its uplink slot sits (its cell's phase
+   * and period, the slot's start on the grid), from the latest report that
+   * listed it — what a forwarded copy is mapped to (Handover.h
+   * ul_seq_for_copy); kept 30 s past the last report naming it. */
+  struct UlSlot {
+    int64_t phase_us = 0, period_us = 0, ul_start_us = 0, at_ms = 0;
+  };
+  std::map<std::pair<uint16_t, uint16_t>, UlSlot> ul_slot;
   auto dl_undup = [&](const devourer::cell::HoCommand &cmd) {
     if (auto d = dls.find({cmd.source, cmd.ue}); d != dls.end())
       d->second.dup.reset();
@@ -534,7 +542,27 @@ int main() {
             known = known || ul.stream_id({u->cell, u->ue}).has_value();
           }
           if (known) {
+            /* A copy heard by ANOTHER cell's DU (DAPS: the target hearing the
+             * source identity) may be a sequential-DAPS visit, sent after the
+             * UE's own uplink slot on the target's channel: its seq is that of
+             * the slot (Handover.h ul_seq_for_copy), from the serving cell's
+             * phase and the UE's uplink position in its last report. */
+            /* Every copy, the serving DU's own too: the two copies of one
+             * uplink must get the same seq even with the slot next to a
+             * network-superframe boundary (a timing advance puts the
+             * serving copy before it). From the identity's last-known slot,
+             * so a copy that arrives after the source released the UE still
+             * maps. */
+            if (auto m = ul_slot.find({u->cell, u->ue}); m != ul_slot.end() && ms_now() - m->second.at_ms < 30000)
+              u->seq = devourer::cell::ul_seq_for_copy(u->net_us, m->second.phase_us, m->second.ul_start_us,
+                                                       m->second.period_us);
+            const uint32_t raw_seq = static_cast<uint32_t>(u->net_us / std::max<int64_t>(1, dus.count(u->du) ? dus.at(u->du).rep.period_us : 102400));
             const auto r = ul.deliver({u->cell, u->ue}, u->seq, u->du);
+            if (u->du != u->cell)
+              emit("{\"ev\":\"ran.ul_copy\",\"du\":" + std::to_string(u->du) + ",\"cell\":" +
+                   std::to_string(u->cell) + ",\"ue\":" + std::to_string(u->ue) + ",\"raw\":" +
+                   std::to_string(raw_seq) + ",\"seq\":" + std::to_string(u->seq) + ",\"fresh\":" +
+                   (r.fresh ? "1" : "0") + "}");
             ul_seen[r.stream] = std::chrono::steady_clock::now();
             ul_name[r.stream] = {u->cell, u->ue};
             if (r.fresh) {
@@ -627,6 +655,11 @@ int main() {
             d.rep = *r;
             d.addr = from;
             d.at = std::chrono::steady_clock::now();
+            if (r->period_us > 0)
+              for (const auto &a : r->ues)
+                if (a.pos >= 1 && a.pos <= r->positions.size())
+                  ul_slot[{r->du, a.ue}] = {r->phase_us, r->period_us, r->positions[a.pos - 1].ul.start_us,
+                                            ms_now()};
             if (first) {
               char a[INET_ADDRSTRLEN] = {};
               inet_ntop(AF_INET, &from.sin_addr, a, sizeof a);

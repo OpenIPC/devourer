@@ -1286,21 +1286,34 @@ target had been holding every PDU since the command (DAPS DL).
   RX callback. On the rig, sending from inside it froze the DU (the RX loop
   is what recycles the TX pages).
 
-**Rig result** (testrig `scripts/m6_daps_xch.sh`): 2 runs per case, all pass. The same layout as the uplink runs: cell 1 on
-ch149, cell 2 on ch157, the A3 handing UE1 over 1 → 2, and the CU's DL
-stream on.
+**Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case, all pass.
+- **The trigger:** the handover is triggered by the CU's A3 at its defaults
+  on the UEs' own measurements, with the UEs static: cell 2 is simply the
+  stronger at UE1's radio. It is not the emulated crossing (see "An
+  emulated crossing").
+- **The layout:** the same as the uplink runs (cell 1 on ch149, cell 2 on
+  ch157), with the CU's DL stream on.
 
-| longest DL silence at UE1 (ms between deliveries of a new PDU) | runs |
-|---|---|
-| source killed at the accept, visits answered | 205, 205 |
-| source killed at the accept, no visits | 1395, 1498 |
-| no fault, visits answered | 308, 205 |
+| per run (min / median / max over 4) | DL gap across the switch | longest DL silence | uplinks lost before the switch |
+|---|---|---|---|
+| source killed at the accept, visits answered | 225 / 225 / 226 ms | 225 / 225 / 226 ms | 0 / 0 / 0 |
+| source killed at the accept, no visits | 1497 / 1549 / 1805 ms | the same | 10 / 10.5 / 14 |
+| no fault, visits answered | 225 / 225 / 226 ms | 225 / 225.5 / 307 ms | 0 / 0 / 0 |
 
-- **Answers:** 19–21 per handover; every new PDU in the window reached the
-  UE in one, and DL DAPS lost no PDU in any run.
-- **What is left** is the switch's own pause: ~2 superframes. The UE leaves
-  at the instant, retunes, and the target's grant takes effect from its next
-  superframe.
+The DL gap across the switch runs from the last new PDU before the switch
+to the first after it.
+- **Answers:** 18–20 per handover, none expired; DL DAPS lost no PDU in
+  any run.
+- **The bookkeeping** (from the review):
+  - An answer that is not queued, expires (3 ms after the copy that
+    prompted it) or fails gives its PDUs back: the offered mark rolls back.
+  - After the switch, `pick_dl_pdus` sends not-yet-offered PDUs first, but
+    an offered PDU before it would fall 24 sns behind them. A lost answer's
+    PDU then reaches the UE inside its reorder window (selftest: a lost
+    answer behind a 60-PDU backlog).
+- **What is left** is the switch's own pause: ~2 superframes (225 ms). The
+  UE leaves at the instant, retunes, and the target's grant takes effect
+  from its next superframe.
 - **Same channel:** the target sent no answers, and same-channel DL DAPS
   kept its silence (526 ms plain, 1754 ms with the source killed).
 - **The first runs found:**

@@ -519,7 +519,18 @@ int main() {
   };
   while (std::chrono::steady_clock::now() < deadline) {
     pollfd pf{fd, POLLIN, 0};
-    if (poll(&pf, 1, 50) > 0 && (pf.revents & POLLIN)) {
+    /* Woken for the DL stream's next PDU too: with a fixed 50 ms the PDUs
+     * left up to 50 ms late (whenever a datagram or the timeout woke the
+     * loop), so a DU saw them unevenly — a PDU missing a DL frame's pick by
+     * a few ms waited a superframe. */
+    int wait_ms = 50;
+    if (dl_ms > 0) {
+      const auto to_dl = std::chrono::ceil<std::chrono::milliseconds>(
+                             next_dl - std::chrono::steady_clock::now())
+                             .count();
+      wait_ms = static_cast<int>(std::clamp<int64_t>(to_dl, 0, 50));
+    }
+    if (poll(&pf, 1, wait_ms) > 0 && (pf.revents & POLLIN)) {
       uint8_t buf[f1::kMaxDatagram];
       sockaddr_in from{};
       socklen_t fl = sizeof from;

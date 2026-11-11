@@ -321,7 +321,12 @@ struct DlHarq {
  * used, the rest zero: a fixed length, so the DL slot budget is one size).
  * A HARQ retransmission carries the same ones. Under the tag: a forged sn
  * cannot make the UE drop a real PDU as a duplicate. */
-constexpr size_t kDlMaxPdus = 8;
+/* 32: after a DAPS switch every queued PDU more than DlStreamRx's reorder
+ * window (32) behind the fresh one goes in the same frame as it (see
+ * pick_dl_pdus) — at most kDlQueueMax - 32 - 1 of them; with 8 the target's
+ * backlog (~41 sns at the switch on the rig) could fill a frame and hold the
+ * fresh PDU a superframe. */
+constexpr size_t kDlMaxPdus = 32;
 constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1 + 8 + 1 + 4 * kDlMaxPdus;
 constexpr size_t kDlBodyLen = kDlTaggedLen + kCellTagLen;
 
@@ -402,8 +407,10 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
 // fresh sn f moves that top to f and confirms as missing every sn more than
 // `window` behind it (DlStreamRx's reorder window). Every queued offered sn p
 // with f - p > window therefore goes before f, oldest first: a lost answer's
-// PDU arrives as a late copy, never a confirmed gap. Normally (the queue
-// spans at most `window` sns behind f) that is none, and f leads.
+// PDU arrives as a late copy, never a confirmed gap — as many as fit with f
+// in the frame: f always rides it (a frame's PDUs arrive together, so the
+// order inside it does not matter). With a contiguous queue (the CU's sns)
+// of at most kDlQueueMax they all fit a kDlMaxPdus frame.
 // Without an offered mark: plain queue order.
 inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::optional<uint32_t> &offered,
                                           size_t max, uint32_t window = 32) {
@@ -411,6 +418,7 @@ inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::op
   for (uint32_t sn : q)
     (offered && !devourer::cell::seq_lt(*offered, sn) ? old : fresh).push_back(sn);
   std::vector<uint32_t> out;
+  bool fresh_in = false; /* the frame carries a fresh PDU */
   while (out.size() < max && (!fresh.empty() || !old.empty())) {
     auto urgent = old.end();
     if (!fresh.empty())
@@ -419,12 +427,15 @@ inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::op
           urgent = it;
           break;
         }
-    if (urgent != old.end()) {
+    /* ... but never the first fresh one's place: with gaps in the queue (it
+     * takes any newer sn) every slot could be urgent. */
+    if (urgent != old.end() && (fresh_in || out.size() + 1 < max)) {
       out.push_back(*urgent);
       old.erase(urgent);
     } else if (!fresh.empty()) {
       out.push_back(fresh.front());
       fresh.pop_front();
+      fresh_in = true;
     } else {
       out.push_back(old.front());
       old.pop_front();

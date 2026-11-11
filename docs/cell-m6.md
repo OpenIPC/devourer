@@ -1401,9 +1401,9 @@ backlog, so the first fresh PDU waited. Now a DL frame takes the
 not-yet-offered PDUs first (`pick_dl_pdus`). Only the offered PDUs that the
 fresh one would push out of the UE's reorder window go before it (the
 answers may have been lost: the offered mark is not the UE's top), so a
-lost answer's PDU is still a late copy, not a confirmed gap. The queue
-after a switch normally spans no more than that window, and the fresh PDU
-leads.
+lost answer's PDU is still a late copy, not a confirmed gap. (The queue
+after a switch spans ~41 sns on the rig; those out-of-window PDUs ride the
+fresh one's frame — see *The DL cadence at the switch*.)
 Uplinks lost in the whole window, switch superframe included: 0 in 7 of the
 8 visit runs, 1 in one.
 
@@ -1414,11 +1414,73 @@ the 6 visit runs, 225 in 2. In all four 123 ms runs the first frame after
 the switch carried the next fresh PDU; in both 225 ms runs the target's
 queue held no fresh PDU yet when that frame was built (31 PDUs, all
 offered — the CU sends one per 100 ms), and the next frame led with it.
-The rest of the 225 ms is PDU cadence, not queue order. Over all the runs
-on this branch's builds, 18 of 24 visit runs were at 122–123 ms. The
-target's queue spans ~39 sns behind the fresh PDU, so ~7 offered PDUs that
-the fresh one would push out of the UE's window go before it, in the same
-8-PDU frame. No UL was lost before the switch in any visit run.
+Not queue order — but not the PDU cadence either, as first read: see
+*The DL cadence at the switch* below. Over all the runs on this branch's
+builds, 18 of 24 visit runs were at 122–123 ms. No UL was lost before the
+switch in any visit run.
+
+### The DL cadence at the switch
+
+The remaining 225 ms switch gaps (about 1 run in 4) had three causes, each
+found with timestamps on the target DU's clock (`cell.dl.pdu_in`: when
+each PDU reached a DAPS target's queue; `cell.dl` `pick_ms`; the answers'
+`t_ms`):
+
+- **The DU took a frame's PDUs a superframe early.** The DL loop built the
+  frame for superframe N right after sending N-1's, then slept to its slot:
+  a PDU arriving in those ~100 ms waited for N+1. Now the frame is picked
+  and built `CELL_DL_PICK_LEAD_US` (3 ms) before its slot. DL send lateness
+  unchanged (p50 3 µs, p99 8 µs).
+- **The CU sent its PDUs up to 50 ms late.** Its loop polled with a fixed
+  50 ms timeout and sent a due PDU only when something woke it, so PDUs
+  reached the DUs unevenly (one >119 ms after the previous). The poll now
+  also wakes for the next PDU: spacing at the target 99–102 ms in every run.
+- **The fresh PDU did not fit the frame.** At the switch the target's queue
+  holds the command's backlog (16) and every PDU since (~25): ~41 sns. Every
+  queued PDU more than the reorder window behind the fresh one goes first
+  (review fix above) — up to 8 of them, the whole 8-PDU frame, and the
+  fresh one waited a superframe (seen directly: it had arrived 51 ms before
+  the pick). A DL frame now carries up to 32 PDU sns (fixed length: +96
+  bytes, ~32 µs at 24 Mb/s), at least the queue's (64) out-of-window
+  maximum plus the fresh one (a `static_assert`). The DU's queue takes any
+  newer sn, so with gaps every slot could be out-of-window: `pick_dl_pdus`
+  keeps the first fresh PDU's place in any case (from the review).
+- **A frame ready too late is not aired.** The pick and build now run inside
+  the lead; a frame whose submission would start more than
+  `CELL_DL_GUARD_US` (500 µs) into its slot is skipped (`cell.dl.late_skip`),
+  its PDUs and HARQ attempt given back. DL send lateness over the runs:
+  p99.9 12–13 µs before and after; single outliers of 319 µs (before this
+  change) and 264–373 µs (after), cause not established.
+- **Found by that skip: a DU served its UEs in grant order, not slot
+  order.** With two UEs (a handed-over UE at position 1, the DU's own at
+  position 2; later 2 and 3), the UE whose slot comes first was served
+  after the other's slot. Every one of its frames went out ~4.1 ms late,
+  inside the other UE's slot (404 of 404 in a `m6_daps_dl` crossing run on
+  the code before this change). With the skip they were dropped (440 per
+  run), and that crossing lost 5–6 uplinks of the arriving UE where it had
+  lost 0–1; why dropped DL frames cost uplinks was not established. The DU
+  now serves in DL-slot order. On this build the `m6_daps_dl` crossing (DAPS, 2 runs) lost 0
+  uplinks and 0 DL PDUs, and its longest DL silence was 0.39 and 1.03 s,
+  where the table above had 3.6–4.3 s. Those earlier runs aired every frame
+  to the arriving UE ~4 ms late; that this was the silence is likely, not
+  established. The 1.03 s ends before the command (the source fading before
+  the A3 fires); the 0.39 s is at a switch.
+
+**Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case (cells 149 → 157).
+
+| case | UL lost before the switch | DL gap across the switch (ms) | first target frame |
+|---|---|---|---|
+| source dies, visits | 0 (all 4) | 122, 122, 123, 123 | fresh PDU in all 4 |
+| source dies, no visits | 12–15 | 1395–1703 | — |
+| source alive, visits | 0 (all 4) | 122, 123, 123, 166 | fresh PDU in all 4 |
+
+The 166 ms run: the source's own DL frame had delivered the newest PDU
+43 ms before the last answer (which then had nothing new), so the gap
+counts from there; the target's first frame carried the next one. Each
+first target frame carried 32 PDUs. Before these fixes 6 of 24 visit runs
+were at 225 ms. The longest DL silence elsewhere in a run reached 307 ms
+in two runs, not at the switch; its cause was not established here. Regression passes: measgap,
+three_ho, crossing3, handover, daps, daps_dl, crossing.
 
 ## Replay of a signed neighbour list
 

@@ -321,7 +321,12 @@ struct DlHarq {
  * used, the rest zero: a fixed length, so the DL slot budget is one size).
  * A HARQ retransmission carries the same ones. Under the tag: a forged sn
  * cannot make the UE drop a real PDU as a duplicate. */
-constexpr size_t kDlMaxPdus = 8;
+/* 32: after a DAPS switch every queued PDU more than DlStreamRx's reorder
+ * window (32) behind the fresh one goes in the same frame as it (see
+ * pick_dl_pdus) — at most kDlQueueMax - 32 - 1 of them; with 8 the target's
+ * backlog (~41 sns at the switch on the rig) could fill a frame and hold the
+ * fresh PDU a superframe. */
+constexpr size_t kDlMaxPdus = 32;
 constexpr size_t kDlTaggedLen = 2 + 1 + 2 + 8 + 4 + 4 + 1 + 1 + 8 + 1 + 4 * kDlMaxPdus;
 constexpr size_t kDlBodyLen = kDlTaggedLen + kCellTagLen;
 

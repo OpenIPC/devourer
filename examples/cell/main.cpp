@@ -625,6 +625,8 @@ int run_du(IRadio *dev, const Cfg &c) {
   const double ta_gain = envf("CELL_TA_GAIN", 0.5, 0.0, 1.0);
   const int ta_every_s = static_cast<int>(envl("CELL_TA_EVERY_S", 2, 1, 60));
   const size_t pad = static_cast<size_t>(envl("CELL_DL_PAD", 64, 0, 1400));
+  /* How long before its slot a DL frame takes its PDUs and is built. */
+  const int64_t dl_pick_lead_us = envl("CELL_DL_PICK_LEAD_US", 3000, 500, 100000);
   const bool harq_on = envl("CELL_HARQ", 1, 0, 1) != 0;
   const bool la_on = harq_on && envl("CELL_LA", 1, 0, 1) != 0;
   HarqConfig hc;
@@ -1218,6 +1220,9 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint64_t dropped = 0, refused = 0;
   };
   constexpr size_t kDlQueueMax = 64;
+  /* pick_dl_pdus' out-of-window PDUs (at most kDlQueueMax - 33) and the fresh
+   * one fit one frame. */
+  static_assert(kDlMaxPdus >= kDlQueueMax - devourer::cell::DlStreamRx::kReorder, "a DL frame too small");
   std::map<uint16_t, DlQueue> dlq;
   for (uint16_t ue : ues)
     dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
@@ -1351,8 +1356,12 @@ int run_du(IRadio *dev, const Cfg &c) {
         unoffer(a.ue, a.prev_offered, a.offered);
       char l[200];
       snprintf(l, sizeof l,
-               "{\"ev\":\"cell.daps.visit_dl\",\"ue\":%u,\"pdus\":%zu,\"first\":%u,\"sent\":%d,\"expired\":%d}",
-               a.ue, a.pdus, a.first, sent ? 1 : 0, expired ? 1 : 0);
+               "{\"ev\":\"cell.daps.visit_dl\",\"ue\":%u,\"pdus\":%zu,\"first\":%u,\"sent\":%d,\"expired\":%d,"
+               "\"t_ms\":%lld}",
+               a.ue, a.pdus, a.first, sent ? 1 : 0, expired ? 1 : 0,
+               (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
       emit(l);
     }
   });
@@ -1767,6 +1776,12 @@ int run_du(IRadio *dev, const Cfg &c) {
           q.last_sn = dp->sn;
           q.sns.push_back(dp->sn);
           q.last_push = std::chrono::steady_clock::now();
+          if (q.offered) { /* a DAPS target's queue: when each PDU came (vs. the frames' picks) */
+            char l[120];
+            snprintf(l, sizeof l, "{\"ev\":\"cell.dl.pdu_in\",\"ue\":%u,\"sn\":%u,\"t_ms\":%lld}", dp->ue, dp->sn,
+                     (long long)now_ms());
+            emit(l);
+          }
           if (q.sns.size() > kDlQueueMax) {
             q.sns.pop_front();
             ++q.dropped;
@@ -2058,6 +2073,11 @@ int run_du(IRadio *dev, const Cfg &c) {
         }
       }
       const int64_t start = grid->slot_start_tsf(sf, idx);
+      /* The frame is picked and built just before its slot, not right after
+       * the previous one: a CU PDU that arrives in between rides THIS frame,
+       * not the next superframe's (after a DAPS switch that was the first
+       * target frame missing the next PDU: ~2 superframes of DL gap). */
+      sleep_until_tsf(dev, start - dl_pick_lead_us);
       /* What to send: a due HARQ retransmission, else new data (or, with
        * HARQ off, a new frame every superframe). */
       std::optional<devourer::cell::HarqTx> tx;
@@ -2065,6 +2085,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       uint64_t pdu_epoch = 0;
       size_t q_left = 0;
       std::optional<uint32_t> offered_mark; /* the queue's DAPS-visit offered mark (logged) */
+      const long long pick_ms = static_cast<long long>(now_ms());
       {
         std::lock_guard<std::mutex> lk(mu);
         DlUe &d = dlue.at(ue);
@@ -2142,7 +2163,7 @@ int run_du(IRadio *dev, const Cfg &c) {
         for (uint32_t sn : pdus)
           fresh += devourer::cell::seq_lt(*offered_mark, sn) ? 1 : 0;
         pick = ",\"sn0\":" + std::to_string(pdus.front()) + ",\"fresh\":" + std::to_string(fresh) +
-               ",\"offered\":" + std::to_string(*offered_mark);
+               ",\"offered\":" + std::to_string(*offered_mark) + ",\"pick_ms\":" + std::to_string(pick_ms);
       }
       char l[320];
       snprintf(l, sizeof l,

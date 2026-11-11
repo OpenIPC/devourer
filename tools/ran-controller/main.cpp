@@ -1126,12 +1126,22 @@ int main() {
       }
       /* In flight: (re)send to both DUs until staged; conclude when the
        * target reports the UE; give up long after the instant. */
+      /* A flight that ends without the move: the source key's A3 (frozen in
+       * flight) starts over, a new candidate needs its own time-to-trigger. */
+      auto a3_restart = [&](const devourer::cell::HoCommand &c, const char *why) {
+        if (auto h = ho.find({c.source, c.ue}); h != ho.end()) {
+          if (h->second.firing)
+            log_clear(c.ue, c.source, *h->second.firing, why);
+          ho.erase(h);
+        }
+      };
       for (auto it = flights.begin(); it != flights.end();) {
         HoFlight &fl = it->second;
         auto sit = dus.find(fl.cmd.source), tit = dus.find(fl.cmd.target);
         if (sit == dus.end() || tit == dus.end()) {
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* the provisional alias */
           dl_undup(fl.cmd);
+          a3_restart(fl.cmd, "flight_lost");
           it = flights.erase(it);
           continue;
         }
@@ -1177,6 +1187,7 @@ int main() {
           cancels[fl.cmd.id] = Cancel{fl.cmd}; /* never committed: free the target */
           ul.forget({fl.cmd.target, fl.cmd.target_ue}); /* and its provisional alias */
           dl_undup(fl.cmd);
+          a3_restart(fl.cmd, "timeout");
           it = flights.erase(it);
           continue;
         }

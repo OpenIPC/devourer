@@ -1308,12 +1308,13 @@ to the first after it.
   - An answer that is not queued, expires (3 ms after the copy that
     prompted it) or fails gives its PDUs back: the offered mark rolls back.
   - After the switch, `pick_dl_pdus` sends not-yet-offered PDUs first, but
-    an offered PDU goes just before the fresh one that would push it out of
-    the UE's reorder window while it is still recoverable. A lost answer's
-    PDU then reaches the UE inside its reorder window (selftest: a lost
-    answer behind a 60-PDU backlog). (This rule is from the switch-
-    interruption change below; the first version, "before it falls 24 sns
-    behind", let a large offered backlog lead the queue.)
+    every queued offered PDU that the fresh one would push out of the UE's
+    reorder window goes before it. A lost answer's PDU then reaches the UE
+    inside its reorder window (selftests: a lost answer behind a 60-PDU
+    backlog; a 40-PDU backlog with every answer lost, through DlStreamRx).
+    (This rule is from the switch-interruption change below; the first
+    version, "before it falls 24 sns behind", let a large offered backlog
+    lead the queue.)
 - **What is left** is the switch's own pause: ~2 superframes (225 ms). The
   UE leaves at the instant, retunes, and the target's grant takes effect
   from its next superframe.
@@ -1362,8 +1363,13 @@ off" of the three-cell handover.
 - **The stale-phase beacon** is harmless in the target's idle time, and
   there it is heard and forwarded. If it would land in the target's active
   span, the UE holds the restart until that TBTT has passed: one uplink
-  given up rather than a collision. On the rig the guard held 5 of 18
-  switches, all in three-cell layouts.
+  given up rather than a collision. The beacon restarts no earlier than
+  the expedited pass, so the stale TBTT is the first at that phase from
+  then. A failed clock read or write keeps the placement pending: it is
+  retried before the restart (3 tries, then the ordinary step corrects it a
+  pass later), and the expedited pass itself survives a failed clock read
+  (retried 2 ms later). On the rig the guard held 5 of 18 switches, all in
+  three-cell layouts.
 - **The CU** records the target identity's uplink slot from the handover
   command. The first uplinks after the switch come before the target's
   report names the UE; before this, they were mapped to the wrong network
@@ -1373,7 +1379,9 @@ off" of the three-cell handover.
   measurements; with a slow conclusion (the target's report naming the UE
   up to ~15 superframes later, as before), the DUs' stale uplink evidence
   cleared the candidate and raised a second one for the same move (no
-  second command, but a wrong record).
+  second command, but a wrong record). A flight that ends without the move
+  (lost DU, timeout) restarts that A3, so a new candidate needs its own
+  time-to-trigger.
 
 **Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case, source cell
 on 149, target on 157, phase difference 60 ms, a CU DL stream of one PDU per
@@ -1390,20 +1398,27 @@ target.
 Before this change the gap across the switch was 225 ms with one run at
 327: the target's queue after the switch led with its large offered
 backlog, so the first fresh PDU waited. Now a DL frame takes the
-not-yet-offered PDUs first (`pick_dl_pdus`). An offered PDU goes only just
-before the fresh one that would push it out of the UE's reorder window
-while it is still recoverable, so a lost answer's PDU is still a late copy,
-not a confirmed gap.
+not-yet-offered PDUs first (`pick_dl_pdus`). Only the offered PDUs that the
+fresh one would push out of the UE's reorder window go before it (the
+answers may have been lost: the offered mark is not the UE's top), so a
+lost answer's PDU is still a late copy, not a confirmed gap. The queue
+after a switch normally spans no more than that window, and the fresh PDU
+leads.
 Uplinks lost in the whole window, switch superframe included: 0 in 7 of the
 8 visit runs, 1 in one.
 
-Re-run on the final build (with the frozen A3 above), 2 runs per case:
-gap across the switch 122–123 ms in 3 of the 4 visit runs, 225 in one. In
-that run the last visit's answer had already carried the newest PDUs, and
-the next one (the CU sends one per 100 ms) was not yet at the target when
-its first frame after the switch was built: that frame carried only
-already-received PDUs, and the next superframe the new one. Cadence, not
-queue order; no UL lost before the switch in any visit run.
+Re-run on the final build (review fixes; `cell.dl` now logs, after visit
+answers, a frame's first sn, how many of its PDUs were not yet offered, and
+the offered mark), 3 runs per case: gap across the switch 123 ms in 4 of
+the 6 visit runs, 225 in 2. In all four 123 ms runs the first frame after
+the switch carried the next fresh PDU; in both 225 ms runs the target's
+queue held no fresh PDU yet when that frame was built (31 PDUs, all
+offered — the CU sends one per 100 ms), and the next frame led with it.
+The rest of the 225 ms is PDU cadence, not queue order. Over all the runs
+on this branch's builds, 18 of 24 visit runs were at 122–123 ms. The
+target's queue spans ~39 sns behind the fresh PDU, so ~7 offered PDUs that
+the fresh one would push out of the UE's window go before it, in the same
+8-PDU frame. No UL was lost before the switch in any visit run.
 
 ## Replay of a signed neighbour list
 

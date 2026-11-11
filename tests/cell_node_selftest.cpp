@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cell.h"
+#include "cell/Handover.h"
 
 using namespace cellnode;
 
@@ -178,7 +179,7 @@ int main() {
       CHECK(b == std::vector<uint32_t>({106, 107, 108, 109, 100, 101, 102, 103}));
       CHECK(r == std::deque<uint32_t>({104, 105}));
       /* A lost answer with a large backlog: 100..109 offered, 110..169 fresh —
-       * the offered ones go before the fresh run gets 24 ahead of them. */
+       * each offered one goes before the fresh run gets a window ahead of it. */
       std::deque<uint32_t> w;
       for (uint32_t s = 100; s < 170; ++s)
         w.push_back(s);
@@ -193,15 +194,29 @@ int main() {
         }
       }
       CHECK(ok);
-      /* After a DAPS handover: a 40-PDU offered backlog (100..139, the UE has
-       * them up to 139) and the next fresh PDU (140): the fresh one rides the
-       * FIRST frame (only 107, which 140 would push out of the window while
-       * still recoverable, goes just before it). */
+      /* After a DAPS handover, the usual queue (offered 108..139, at most a
+       * window behind the next fresh PDU 140): the fresh one leads. */
       std::deque<uint32_t> h;
-      for (uint32_t s = 100; s < 141; ++s)
+      for (uint32_t s = 108; s < 141; ++s)
         h.push_back(s);
       auto f = pick_dl_pdus(h, 139u, 8);
-      CHECK(f.size() == 8 && f[0] == 107 && f[1] == 140);
+      CHECK(f.size() == 8 && f[0] == 140 && f[1] == 108);
+      /* A 40-PDU offered backlog (100..139) whose answers were ALL lost (the
+       * UE's top is 99) and fresh 140..149: the UE's DlStreamRx confirms no
+       * gap — 100..107 go before 140 would push them out of its window. */
+      std::deque<uint32_t> g;
+      for (uint32_t s = 100; s < 150; ++s)
+        g.push_back(s);
+      devourer::cell::DlStreamRx rx;
+      rx.accept(1, 99);
+      auto g1 = pick_dl_pdus(g, 139u, 8);
+      CHECK(g1 == std::vector<uint32_t>({100, 101, 102, 103, 104, 105, 106, 107}));
+      for (uint32_t sn : g1)
+        rx.accept(1, sn);
+      while (!g.empty())
+        for (uint32_t sn : pick_dl_pdus(g, 139u, 8))
+          rx.accept(1, sn);
+      CHECK(rx.missing_confirmed() == 0 && rx.missing_total() == 0 && rx.delivered() == 51);
     }
     /* A DAPS-visit DL answer: broadcast RA, the target identity in the body,
      * tagged with the target cell's key; not a unicast DL frame. */

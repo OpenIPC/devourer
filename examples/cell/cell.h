@@ -397,12 +397,13 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
 
 // The PDUs one DL frame carries from a UE's queue (taken out of it, in
 // order): those no DAPS-visit answer has offered yet first — the UE most
-// likely took the offered ones, so its reception top is about the offered
-// mark. Sending a fresh sn f moves that top to f, which would push an offered
-// sn p out of the UE's reorder window (`window`) while p could still be
-// recovered (offered - p <= window) and f - p > window: such a p goes just
-// before f, so a lost answer's PDU arrives as a late copy, never a confirmed
-// gap. Normally (f = offered + 1) that is at most one PDU, in the same frame.
+// likely took the offered ones. But an answer may have been lost, so the
+// offered mark says nothing certain about the UE's reception top: sending a
+// fresh sn f moves that top to f and confirms as missing every sn more than
+// `window` behind it (DlStreamRx's reorder window). Every queued offered sn p
+// with f - p > window therefore goes before f, oldest first: a lost answer's
+// PDU arrives as a late copy, never a confirmed gap. Normally (the queue
+// spans at most `window` sns behind f) that is none, and f leads.
 // Without an offered mark: plain queue order.
 inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::optional<uint32_t> &offered,
                                           size_t max, uint32_t window = 32) {
@@ -414,7 +415,7 @@ inline std::vector<uint32_t> pick_dl_pdus(std::deque<uint32_t> &q, const std::op
     auto urgent = old.end();
     if (!fresh.empty())
       for (auto it = old.begin(); it != old.end(); ++it)
-        if (*offered - *it <= window && fresh.front() - *it > window) {
+        if (fresh.front() - *it > window) {
           urgent = it;
           break;
         }

@@ -627,6 +627,9 @@ int run_du(IRadio *dev, const Cfg &c) {
   const size_t pad = static_cast<size_t>(envl("CELL_DL_PAD", 64, 0, 1400));
   /* How long before its slot a DL frame takes its PDUs and is built. */
   const int64_t dl_pick_lead_us = envl("CELL_DL_PICK_LEAD_US", 3000, 500, 100000);
+  /* A frame that would start later than this into its slot is not sent (the
+   * slot budget's guard, as du_budget_ok counts it). */
+  const int64_t dl_guard_us = envl("CELL_DL_GUARD_US", 500, 0, 100000);
   const bool harq_on = envl("CELL_HARQ", 1, 0, 1) != 0;
   const bool la_on = harq_on && envl("CELL_LA", 1, 0, 1) != 0;
   HarqConfig hc;
@@ -1220,8 +1223,9 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint64_t dropped = 0, refused = 0;
   };
   constexpr size_t kDlQueueMax = 64;
-  /* pick_dl_pdus' out-of-window PDUs (at most kDlQueueMax - 33) and the fresh
-   * one fit one frame. */
+  /* A contiguous queue's out-of-window PDUs (at most kDlQueueMax - 33) and the
+   * fresh one fit one frame; with gaps pick_dl_pdus still keeps the fresh
+   * one's place. */
   static_assert(kDlMaxPdus >= kDlQueueMax - devourer::cell::DlStreamRx::kReorder, "a DL frame too small");
   std::map<uint16_t, DlQueue> dlq;
   for (uint16_t ue : ues)
@@ -2047,6 +2051,12 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::vector<uint16_t> served;
     for (const Grant &g : serving.grants)
       served.push_back(g.ue);
+    /* In DL-slot order (the slots are in time order): in grant order a UE
+     * whose slot comes first in the superframe was served after the other's
+     * slot, ~4 ms late into it (a handed-over UE at position 1 of a DU whose
+     * own UE has position 2). */
+    std::sort(served.begin(), served.end(),
+              [&](uint16_t a, uint16_t b) { return serving.find(a)->dl_slot < serving.find(b)->dl_slot; });
     /* Pace the pass to its superframe when there is no DL to wait for (a
      * DU with no UE, e.g. after its last one handed over): `sf` must track
      * the TSF, or the network superframe it reports runs away. */
@@ -2144,7 +2154,17 @@ int run_du(IRadio *dev, const Cfg &c) {
           rate, ue == atten_ue && atten_db != 0 ? std::optional<int8_t>(atten_db) : std::nullopt);
       pkt.insert(pkt.end(), f.begin(), f.end());
       const int64_t sub = sleep_until_tsf(dev, start);
-      const bool ok = dev->send_packet(pkt.data(), pkt.size());
+      /* Ready too late (the pick and build run after the lead's wait; a rare
+       * OS stall of a few hundred µs was seen before this, too): not aired
+       * past its slot's guard — its PDUs and HARQ attempt go back. */
+      const bool late = sub - start > dl_guard_us;
+      if (late) {
+        char l[160];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.dl.late_skip\",\"ue\":%u,\"sf\":%lld,\"late_us\":%lld}", ue,
+                 (long long)sf, (long long)(sub - start));
+        emit(l);
+      }
+      const bool ok = !late && dev->send_packet(pkt.data(), pkt.size());
       if (!ok) {
         std::lock_guard<std::mutex> lk(mu);
         if (harq_on)

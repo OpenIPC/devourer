@@ -1442,7 +1442,29 @@ each PDU reached a DAPS target's queue; `cell.dl` `pick_ms`; the answers'
   fresh one waited a superframe (seen directly: it had arrived 51 ms before
   the pick). A DL frame now carries up to 32 PDU sns (fixed length: +96
   bytes, ~32 µs at 24 Mb/s), at least the queue's (64) out-of-window
-  maximum plus the fresh one (a `static_assert`).
+  maximum plus the fresh one (a `static_assert`). The DU's queue takes any
+  newer sn, so with gaps every slot could be out-of-window: `pick_dl_pdus`
+  keeps the first fresh PDU's place in any case (from the review).
+- **A frame ready too late is not aired.** The pick and build now run inside
+  the lead; a frame whose submission would start more than
+  `CELL_DL_GUARD_US` (500 µs) into its slot is skipped (`cell.dl.late_skip`),
+  its PDUs and HARQ attempt given back. DL send lateness over the runs:
+  p99.9 12–13 µs before and after; single outliers of 319 µs (before this
+  change) and 264–373 µs (after), cause not established.
+- **Found by that skip: a DU served its UEs in grant order, not slot
+  order.** With two UEs (a handed-over UE at position 1, the DU's own at
+  position 2; later 2 and 3), the UE whose slot comes first was served
+  after the other's slot. Every one of its frames went out ~4.1 ms late,
+  inside the other UE's slot (404 of 404 in a `m6_daps_dl` crossing run on
+  the code before this change). With the skip they were dropped (440 per
+  run), and that crossing lost 5–6 uplinks of the arriving UE where it had
+  lost 0–1; why dropped DL frames cost uplinks was not established. The DU
+  now serves in DL-slot order. On this build the `m6_daps_dl` crossing (DAPS, 2 runs) lost 0
+  uplinks and 0 DL PDUs, and its longest DL silence was 0.39 and 1.03 s,
+  where the table above had 3.6–4.3 s. Those earlier runs aired every frame
+  to the arriving UE ~4 ms late; that this was the silence is likely, not
+  established. The 1.03 s ends before the command (the source fading before
+  the A3 fires); the 0.39 s is at a switch.
 
 **Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case (cells 149 → 157).
 

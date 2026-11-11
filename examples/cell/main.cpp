@@ -2064,6 +2064,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       std::vector<uint32_t> pdus; /* the CU DL PDUs this frame carries */
       uint64_t pdu_epoch = 0;
       size_t q_left = 0;
+      std::optional<uint32_t> offered_mark; /* the queue's DAPS-visit offered mark (logged) */
       {
         std::lock_guard<std::mutex> lk(mu);
         DlUe &d = dlue.at(ue);
@@ -2081,6 +2082,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             }
           } else if (auto qi = dlq.find(ue); qi != dlq.end()) {
             pdu_epoch = qi->second.epoch;
+            offered_mark = qi->second.offered;
             /* PDUs a DAPS-visit answer has not offered go first; the offered
              * ones (the UE most likely took them before the switch) fill the
              * rest, still sent in case an answer was lost — the UE takes a
@@ -2133,12 +2135,21 @@ int run_du(IRadio *dev, const Cfg &c) {
             qi->second.sns.insert(qi->second.sns.begin(), pdus.begin(), pdus.end());
         }
       }
-      char l[260];
+      /* After DAPS-visit answers: what the frame carried against the mark. */
+      std::string pick;
+      if (offered_mark && !pdus.empty()) {
+        size_t fresh = 0;
+        for (uint32_t sn : pdus)
+          fresh += devourer::cell::seq_lt(*offered_mark, sn) ? 1 : 0;
+        pick = ",\"sn0\":" + std::to_string(pdus.front()) + ",\"fresh\":" + std::to_string(fresh) +
+               ",\"offered\":" + std::to_string(*offered_mark);
+      }
+      char l[320];
       snprintf(l, sizeof l,
                "{\"ev\":\"cell.dl\",\"ue\":%u,\"sf\":%lld,\"seq\":%u,\"attempt\":%d,"
-               "\"rate\":%d,\"late_us\":%lld,\"ok\":%d,\"pdus\":%zu,\"q\":%zu}",
+               "\"rate\":%d,\"late_us\":%lld,\"ok\":%d,\"pdus\":%zu,\"q\":%zu%s}",
                ue, (long long)sf, tx->seq, tx->attempt, rate, (long long)(sub - start), ok ? 1 : 0,
-               pdus.size(), q_left);
+               pdus.size(), q_left, pick.c_str());
       emit(l);
     }
     /* DL queues of UEs this DU does not serve and the CU stopped feeding
@@ -3299,25 +3310,114 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int64_t last_susp_sf = -1;
   bool susp_infeasible = false;
   bool had_susp_prev = false; /* last pass had neighbours only a suspend gap reaches */
+  std::optional<std::chrono::steady_clock::time_point> next_pass_at; /* (a switch's) */
+  std::optional<uint8_t> place_ul_slot; /* an inter-frequency switch: place the TSF after its retune */
+  std::optional<std::chrono::steady_clock::time_point> beacon_hold_until; /* no beacon restart before */
+  int place_tries = 0;                   /* ... retried before the beacon restart if it failed */
+  int64_t restart_du = -1; /* the switch's expedited pass (DU time): the beacon restarts there */
+  /* The switch's TSF placement, while the beacon is stopped: its restart
+   * then fires in the target's uplink slot from the first one (a step after
+   * the restart came too late for it: the first uplink landed at the
+   * source's phase, 40 ms off). False (still pending) if the clock could not
+   * be read or written: retried before the restart, a few times. */
+  auto switch_place = [&]() -> bool {
+    if (!place_ul_slot || *place_ul_slot >= grid->slots().size()) {
+      place_ul_slot.reset();
+      return true;
+    }
+    uint64_t t2 = 0, f2 = 0;
+    int64_t du2 = -1;
+    if (dev->ReadTsfAndFreeRun(t2, f2)) {
+      std::lock_guard<std::mutex> lk(mu);
+      if (sync.Ready() && wrap.ready())
+        du2 = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f2))));
+    }
+    int64_t st = 0;
+    bool ok = du2 >= 0;
+    if (ok) {
+      st = ue_tsf_step(static_cast<int64_t>(t2), du2, grid->slots()[*place_ul_slot].start_us, 0, P, 2);
+      ok = st == 0 || dev->WriteTsf(static_cast<uint64_t>(static_cast<int64_t>(dev->ReadTsf()) + st +
+                                                          static_cast<int64_t>(std::llround(comp_us))));
+    }
+    if (!ok) {
+      char l[160];
+      snprintf(l, sizeof l, "{\"ev\":\"cell.ue.switch_place_fail\",\"ue\":%d,\"try\":%d,\"what\":\"%s\"}",
+               me_a.load(), place_tries + 1, du2 < 0 ? "read" : "write");
+      emit(l);
+      if (++place_tries >= 3)
+        place_ul_slot.reset(); /* the ordinary step corrects it, a pass later */
+      return false;
+    }
+    /* Kestrel's beacon timer takes a TSF write from the TBTT after next: the
+     * first beacon after this step fires at the OLD phase, i.e. at
+     * (slot + step) on the target's grid. Harmless in its idle time; inside
+     * its active span it would collide, so the restart then waits that TBTT
+     * out (one uplink, not a collision). The beacon restarts no earlier than
+     * the expedited pass (restart_du), so the stale TBTT is the first one at
+     * that phase from then on. */
+    int64_t span = 0;
+    for (const auto &x : grid->slots())
+      span = std::max<int64_t>(span, x.start_us + x.len_us);
+    const int64_t stale = ((grid->slots()[*place_ul_slot].start_us + st) % P + P) % P;
+    const bool collide = st != 0 && (stale < span + 1000 || stale > P - 1000);
+    if (collide) {
+      const int64_t from = std::max(du2, restart_du);
+      int64_t s_at = from / P * P + stale;
+      if (s_at < from)
+        s_at += P;
+      beacon_hold_until = std::chrono::steady_clock::now() + std::chrono::microseconds(s_at - du2 + 2000);
+    }
+    char l[200];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.ue.switch_place\",\"ue\":%d,\"step_us\":%lld,\"ok\":1,\"stale_us\":%lld,"
+             "\"hold\":%d}",
+             me_a.load(), (long long)st, (long long)stale, collide ? 1 : 0);
+    emit(l);
+    place_ul_slot.reset();
+    return true;
+  };
   std::vector<uint8_t> last_bcn; /* the uplink beacon frame on air (for DAPS visits) */
   int64_t last_visit_sf = -1;
   uint64_t visits = 0, visits_ok = 0, steps_held = 0;
   uint64_t susp_gaps = 0, susp_heard = 0, susp_fail = 0;
+  bool expedited = false;
+  int expedite_tries = 0;
   while (std::chrono::steady_clock::now() < deadline) {
     /* A DAPS-visit window: passes 30 ms apart, so the next superframe's
      * visit is in reach after one ends ~75 ms into its superframe. */
     const bool visiting = daps_visit && ho_pending && ho_pending->channel != 0 && ho_pending->channel != cur_ch;
-    std::this_thread::sleep_for(std::chrono::milliseconds(visiting ? 30 : 100));
+    {
+      /* Right after a switch: the next pass at the new cell's first superframe
+       * (+1 ms), so the uplink beacon restarts — and the step places it —
+       * before that superframe's uplink slot, not a whole pass later. */
+      auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(visiting ? 30 : 100);
+      if (next_pass_at && *next_pass_at < until)
+        until = *next_pass_at;
+      expedited = next_pass_at.has_value();
+      next_pass_at.reset();
+      std::this_thread::sleep_until(until);
+    }
+    /* The expedited pass is not given up on one failed clock read: retried
+     * 2 ms later (a few times), not at the normal pass interval. */
+    auto retry_expedited = [&] {
+      if (expedited && ++expedite_tries <= 5)
+        next_pass_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+    };
     uint64_t t = 0, f = 0;
-    if (!dev->ReadTsfAndFreeRun(t, f))
+    if (!dev->ReadTsfAndFreeRun(t, f)) {
+      retry_expedited();
       continue;
+    }
     int64_t du_now = 0;
     const GrantMap *m = nullptr;
     GrantMap mcopy;
     {
       std::lock_guard<std::mutex> lk(mu);
-      if (!sync.Ready() || !wrap.ready())
+      if (!sync.Ready() || !wrap.ready()) {
+        retry_expedited();
         continue;
+      }
+      expedite_tries = 0;
       du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
       if (sync.Steps() != fit_steps_seen || sync.Rejected() != fit_rejected_seen) {
         char l[200];
@@ -3445,8 +3545,15 @@ int run_ue(IRadio *dev, const Cfg &c) {
         emit(l);
         rearm_ack = true;
         ho_back = HoBack{source_key, cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
-        if (h.channel != 0 && h.channel != cur_ch)
+        if (du_now >= 0) {
+          restart_du = (sfn + 1) * P + 1000;
+          next_pass_at = std::chrono::steady_clock::now() + std::chrono::microseconds(restart_du - du_now);
+        }
+        if (h.channel != 0 && h.channel != cur_ch) {
           retune_to = h.channel; /* inter-frequency: done right after this lock */
+          place_ul_slot = h.ul_slot; /* and the TSF placed for the target's slot */
+          place_tries = 0;
+        }
       }
       /* Committed once the target's map in force grants us; no grant by the
        * deadline = back to the source (conditional: the UE never ends up
@@ -3524,6 +3631,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
           emit(l);
         }
         const auto r1 = std::chrono::steady_clock::now();
+        if (!tuned)
+          place_ul_slot.reset(); /* stays on the source: nothing to place */
+        else
+          switch_place();
         if (tuned) {
           cur_ch = to;
           retune_done_us.store(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -3760,6 +3871,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
     const bool content_moved = force_beacon || !beaconing || running_epoch != mcopy.epoch ||
                                fb.base != last_fb.base || fb.bitmap != last_fb.bitmap ||
                                snr_gen != last_snr_gen;
+    if (content_moved && !beaconing && place_ul_slot && !switch_place()) {
+      /* the switch's placement failed: no restart at the old phase; again soon */
+      next_pass_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+      continue;
+    }
+    if (content_moved && !beaconing && beacon_hold_until) {
+      if (std::chrono::steady_clock::now() < *beacon_hold_until)
+        continue; /* a switch's stale TBTT is still ahead (see switch_place) */
+      beacon_hold_until.reset();
+    }
     if (content_moved) {
       auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, ue_area);
       {

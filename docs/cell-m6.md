@@ -505,10 +505,10 @@ measurements. Each UE is strongest to the DU on its own box:
 - **The misses behind 99.9 %:** every switch between cells of different
   phase (1↔3: 51.2 ms apart) had exactly one target uplink out of slot, of
   724–786. It came in the second superframe after the switch, 49–51 ms off,
-  about the phase difference, as if that one uplink still ran on the source
-  cell's timing. The switch 2→3, between cells of the same phase, had none
-  (0 of 530 and 596). Its cause is not established, and no fallback
-  followed.
+  about the phase difference. The switch 2→3, between cells of the same
+  phase, had none (0 of 530 and 596), and no fallback followed. The cause
+  is Kestrel's beacon timer: the first beacon after the switch's TSF step
+  fires at the old phase (see "The switch's own interruption").
 - **Every switch:** TSF continuity (18–134 ms after the network instant,
   under 2 P), `ran.ho_done` 5–17 superframes after it, and no fallback.
 - **No DL in a deaf window:** no DU aired a UE a DL frame inside a suspend
@@ -1308,9 +1308,13 @@ to the first after it.
   - An answer that is not queued, expires (3 ms after the copy that
     prompted it) or fails gives its PDUs back: the offered mark rolls back.
   - After the switch, `pick_dl_pdus` sends not-yet-offered PDUs first, but
-    an offered PDU before it would fall 24 sns behind them. A lost answer's
-    PDU then reaches the UE inside its reorder window (selftest: a lost
-    answer behind a 60-PDU backlog).
+    every queued offered PDU that the fresh one would push out of the UE's
+    reorder window goes before it. A lost answer's PDU then reaches the UE
+    inside its reorder window (selftests: a lost answer behind a 60-PDU
+    backlog; a 40-PDU backlog with every answer lost, through DlStreamRx).
+    (This rule is from the switch-interruption change below; the first
+    version, "before it falls 24 sns behind", let a large offered backlog
+    lead the queue.)
 - **What is left** is the switch's own pause: ~2 superframes (225 ms). The
   UE leaves at the instant, retunes, and the target's grant takes effect
   from its next superframe.
@@ -1327,6 +1331,94 @@ to the first after it.
 - **Regression:** the uplink results are unchanged (0 lost before the
   switch with visits). Same-channel DL DAPS, the three-cell crossing with a
   source failure, and the plain and fault handovers all pass.
+
+### The switch's own interruption (inter-frequency)
+
+With the visits, the only losses left were at the switch itself. A plain
+inter-frequency handover cost the UE ~2 superframes of DL (225 ms) and
+1–2 uplinks. The timeline (rig, cell 2's phase 60 ms after cell 1's):
+- **The switch:** the UE switches at the instant, on time (0.07 ms into the
+  source superframe, 42 ms into the target's), and retunes in 24 ms.
+- **The target's grant** takes effect from its next superframe, 60 ms
+  after the instant; its first DL frame there is received.
+- **The uplink beacon** was restarted only by the UE loop's NEXT pass, 100 ms
+  later, past that superframe's uplink slot. That uplink was lost.
+- **The next uplink** fired 40.7 ms off the slot: at the source's phase.
+
+**Kestrel's beacon timer.** The first beacon after a large TSF step fires
+at the OLD phase, whether the step comes before the beacon's restart or
+right after it. The engine evidently schedules each TBTT from the previous
+one and takes a TSF write only from the TBTT after next (a hypothesis that
+fits every observation). The UE now predicts where that beacon lands, at
+the target slot + the step: 57.2 ms predicted, 57.3 observed. This is
+also the "one uplink out of slot per switch, about the phase difference
+off" of the three-cell handover.
+
+**What changed** (`examples/cell`, `tools/ran-controller`):
+- **The pass after a switch** is scheduled for the new cell's first
+  superframe (+1 ms), not a full loop period later.
+- **The TSF is placed for the target's uplink slot** right after the
+  switch's retune, while the beacon is stopped (`cell.ue.switch_place`), so
+  every beacon from the second one is in the target's slot.
+- **The stale-phase beacon** is harmless in the target's idle time, and
+  there it is heard and forwarded. If it would land in the target's active
+  span, the UE holds the restart until that TBTT has passed: one uplink
+  given up rather than a collision. The beacon restarts no earlier than
+  the expedited pass, so the stale TBTT is the first at that phase from
+  then. A failed clock read or write keeps the placement pending: it is
+  retried before the restart (3 tries, then the ordinary step corrects it a
+  pass later), and the expedited pass itself survives a failed clock read
+  (retried 2 ms later). On the rig the guard held 5 of 18 switches, all in
+  three-cell layouts.
+- **The CU** records the target identity's uplink slot from the handover
+  command. The first uplinks after the switch come before the target's
+  report names the UE; before this, they were mapped to the wrong network
+  superframe, and the switch superframe counted as lost.
+- **The A3 of a UE in flight is frozen** until its handover concludes. The
+  UE leaves at the instant and the source's reports lose its own
+  measurements; with a slow conclusion (the target's report naming the UE
+  up to ~15 superframes later, as before), the DUs' stale uplink evidence
+  cleared the candidate and raised a second one for the same move (no
+  second command, but a wrong record). A flight that ends without the move
+  (lost DU, timeout) restarts that A3, so a new candidate needs its own
+  time-to-trigger.
+
+**Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case, source cell
+on 149, target on 157, phase difference 60 ms, a CU DL stream of one PDU per
+100 ms. "Before the switch" counts uplinks lost in the window before it; "DL
+gap" is the last DL PDU received from the source to the first from the
+target.
+
+| case | UL lost before the switch | DL silence (ms) | DL gap across the switch (ms) |
+|---|---|---|---|
+| source dies, visits | 0 / 0 / 0 / 0 | 205 (all 4) | 122–123 |
+| source dies, no visits | 10–16 (median 13.5) | 1498–2010 (median 1805) | the same |
+| source alive, visits | 0 / 0 / 0 / 0 | 205 (all 4) | 123 (all 4) |
+
+Before this change the gap across the switch was 225 ms with one run at
+327: the target's queue after the switch led with its large offered
+backlog, so the first fresh PDU waited. Now a DL frame takes the
+not-yet-offered PDUs first (`pick_dl_pdus`). Only the offered PDUs that the
+fresh one would push out of the UE's reorder window go before it (the
+answers may have been lost: the offered mark is not the UE's top), so a
+lost answer's PDU is still a late copy, not a confirmed gap. The queue
+after a switch normally spans no more than that window, and the fresh PDU
+leads.
+Uplinks lost in the whole window, switch superframe included: 0 in 7 of the
+8 visit runs, 1 in one.
+
+Re-run on the final build (review fixes; `cell.dl` now logs, after visit
+answers, a frame's first sn, how many of its PDUs were not yet offered, and
+the offered mark), 3 runs per case: gap across the switch 123 ms in 4 of
+the 6 visit runs, 225 in 2. In all four 123 ms runs the first frame after
+the switch carried the next fresh PDU; in both 225 ms runs the target's
+queue held no fresh PDU yet when that frame was built (31 PDUs, all
+offered — the CU sends one per 100 ms), and the next frame led with it.
+The rest of the 225 ms is PDU cadence, not queue order. Over all the runs
+on this branch's builds, 18 of 24 visit runs were at 122–123 ms. The
+target's queue spans ~39 sns behind the fresh PDU, so ~7 offered PDUs that
+the fresh one would push out of the UE's window go before it, in the same
+8-PDU frame. No UL was lost before the switch in any visit run.
 
 ## Replay of a signed neighbour list
 

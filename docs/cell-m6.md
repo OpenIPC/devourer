@@ -1376,7 +1376,7 @@ off" of the three-cell handover.
   second command, but a wrong record).
 
 **Rig result** (testrig `scripts/m6_daps_xch.sh`): 4 runs per case, source cell
-on 36, target on 157, phase difference 60 ms, a CU DL stream of one PDU per
+on 149, target on 157, phase difference 60 ms, a CU DL stream of one PDU per
 100 ms. "Before the switch" counts uplinks lost in the window before it; "DL
 gap" is the last DL PDU received from the source to the first from the
 target.

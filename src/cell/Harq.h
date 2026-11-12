@@ -41,6 +41,7 @@
 #include <deque>
 #include <iterator>
 #include <optional>
+#include <vector>
 
 namespace devourer::cell {
 
@@ -131,6 +132,7 @@ struct HarqTx {
 
 struct HarqStats {
   uint64_t new_tx = 0, retx = 0, acked = 0, dropped = 0, nacks = 0, timeouts = 0, implausible = 0;
+  uint64_t abandoned = 0; /* given up whole (abandon_all) */
 };
 
 class HarqSender {
@@ -233,6 +235,20 @@ public:
       }
       ++it;
     }
+  }
+
+  /* Give up every frame in flight, oldest first in the result: a handover
+   * target's frames aired before the arriving UE was there. Their
+   * retransmissions would go before any new data; the caller re-queues what
+   * they carried. Seqs go on from the next new one, so the receiver never
+   * sees a seq reused for other content. */
+  std::vector<uint32_t> abandon_all() {
+    std::vector<uint32_t> out;
+    for (const Entry &e : q_)
+      out.push_back(e.seq);
+    st_.abandoned += q_.size();
+    q_.clear();
+    return out;
   }
 
   /* Window low edge: the oldest unresolved seq, or the next new one. */

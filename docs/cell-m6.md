@@ -1482,6 +1482,65 @@ were at 225 ms. The longest DL silence elsewhere in a run reached 307 ms
 in two runs, not at the switch; its cause was not established here. Regression passes: measgap,
 three_ho, crossing3, handover, daps, daps_dl, crossing.
 
+### A same-channel arrival's first frames
+
+The return switch of the `m6_daps_dl` crossing still had 392 ms of DL gap
+(both runs), where a plain same-channel switch had 112. The UE's first
+frames from the target were HARQ retransmissions (attempts 2–3) of PDUs it
+already had. The target airs to an arriving UE from the handover's
+effective superframe, but the UE switches 2–200 ms after that instant, so
+the first frames can go out before it is there. They are never ACKed, and
+a due retransmission goes before any new data.
+
+**What changed** (`examples/cell`, `src/cell/Harq.h`, `src/cell/Handover.h`,
+protocol v5):
+- **Until the target hears the arriving UE**, every DL frame to it is a new
+  one. What the earlier ones carried goes back to the queue
+  (`HarqSender::abandon_all`, seqs never reused). At its first uplink
+  (`cell.ho.arrival_heard`) its HARQ feedback is applied first, so a frame
+  it caught is ACKed, and the rest are given up the same way.
+- **The UE reports its DL stream status** in its uplink beacon (3GPP's PDCP
+  status report): the stream, the newest sn delivered, which of the 32
+  below it are still pending, its oldest still-pending sn (a pending run
+  stays until its last sn leaves the window, so it can reach past the
+  bitmap), and the first sn it tracked (`DlStreamRx::status`, `UeDlStatus`,
+  under the cell and area tags).
+- **The target sends only what the UE lacks.** On the UE's own uplinks, and
+  before the switch on its beacons to the source (heard on one channel, or
+  as a visit copy across channels; the area tag), the target's queue drops
+  only what the UE has or has settled (`prune_dl_queue`,
+  `cell.dl.status_prune`). It keeps anything the UE cannot vouch for: below
+  its first tracked sn, or between the window and a pending run's start.
+  PDUs given back to a full queue drop the oldest, counted
+  (`cell.dl.requeue_overflow`), as an F1 arrival does (from the review). The source keeps airing until
+  the switch, and the target cannot know otherwise what got through.
+- **What did not work, on the rig:**
+  - Giving the PDUs back as offered (a guess at what the source aired) made
+    a plain switch worse: 214–317 ms. The source had delivered past the
+    target's mark, and the PDUs the UE lacked did not fit the first frame.
+  - Abandoning only at the first uplink left the return switch at 183–187
+    ms. In the arrival superframe the DL slot comes before the UE's first
+    uplink, so the frame it caught was still a retransmission.
+
+**Rig result** (testrig `scripts/m6_daps_dl.sh`): DL gap across each switch (ms; the
+first frame from the target: first attempt and new PDUs in every DAPS run).
+
+| case, with DAPS (runs) | before | now |
+|---|---|---|
+| plain, same channel (3) | 112, 112, 112 | 112, 112, 112 |
+| crossing: the switch there (2) | 111, 214 | 111, 112 |
+| crossing: the return switch (2) | 392, 392 | 84, 94 |
+| source killed (3) | 1444–1648 | 1349–1750 |
+| crossing, longest DL silence (2) | 392, 1031 | 213, 316 |
+
+- **Source killed:** the gap is the dead source's time before the switch.
+  The first target frame carried the 13–18 PDUs the UE lacked; 0 lost.
+- **Where the pruning came from:** mostly the UE's beacons to its source,
+  heard by the target before the switch (12–39 per run, `via`
+  `source_id`), then its own first uplinks (0–2).
+- 0 DL PDUs and 0 uplinks lost with DAPS in every run; without DAPS 7–34
+  PDUs and up to 16 uplinks, as before.
+
 ## Replay of a signed neighbour list
 
 A signature proves who wrote a beacon, not when it was aired, so the

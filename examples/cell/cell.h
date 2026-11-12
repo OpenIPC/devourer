@@ -188,7 +188,9 @@ inline std::optional<RachFrame> parse_rach_frame(const uint8_t *p, size_t len, u
  * the DU accepts a UE's feedback only with a gen_sf no older than the last it
  * accepted (main.cpp); a replayed DL frame is a HARQ duplicate. */
 using CellMac = std::function<bool(const uint8_t *data, size_t len, uint8_t out[20])>;
-constexpr uint8_t kCellProtoVersion = 4; /* v4: the DL body carries the CU's DL PDUs (sns) */
+/* v4: the DL body carries the CU's DL PDUs (sns); v5: the UE beacon carries
+ * its DL stream status (UeDlStatus). */
+constexpr uint8_t kCellProtoVersion = 5;
 constexpr size_t kCellTagLen = 8;
 
 namespace detail {
@@ -218,12 +220,29 @@ inline bool cell_tag_ok(const CellMac &mac, char label, uint16_t cell, const uin
 }  // namespace detail
 
 /* UE IE body after the OUI: 'C' 'U' ver ue(2) epoch(4) base(4) bitmap(4)
- * gen_sf(4, low 32 bits) snr(1) snr_gen(1) | tag(8) | area tag(8).
+ * gen_sf(4, low 32 bits) snr(1) snr_gen(1) dl(1) dl_epoch(4, low 32 bits)
+ * dl_top(4) dl_missing(4) dl_low(4) dl_floor(4) | tag(8) | area tag(8).
+ * dl = 1: the DL stream status (UeDlStatus) is present.
  * The tag (label 'U') is the serving cell's key: its DU acts on the body.
  * The area tag (label 'V', the area key, src/cell/Keys.h) is what ANOTHER
  * cell's DU checks before it counts the UE as heard or forwards it for DAPS;
  * with one shared key both are that key. */
-constexpr size_t kUeBodyLen = 2 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 1;
+constexpr size_t kUeBodyLen = 2 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 1 + 1 + 4 + 4 + 4 + 4 + 4;
+
+/* A UE's DL stream status (src/cell/Handover.h DlStreamRx::Status): the
+ * stream (low 32 bits of its epoch), the newest sn delivered, which of the 32
+ * below it are still pending (bit i: top - 1 - i), the oldest sn still
+ * pending (top + 1: none), and the first sn tracked. Under the tags. */
+struct UeDlStatus {
+  uint32_t epoch32 = 0;
+  uint32_t top = 0;
+  uint32_t missing = 0;
+  uint32_t low = 0;
+  uint32_t floor = 0;
+  bool operator==(const UeDlStatus &o) const {
+    return epoch32 == o.epoch32 && top == o.top && missing == o.missing && low == o.low && floor == o.floor;
+  }
+};
 constexpr uint8_t kUeIeLen = static_cast<uint8_t>(3 + kUeBodyLen + 2 * kCellTagLen);
 
 // The UE uplink beacon: header + the 'C' 'U' vendor IE above. dl_snr_half_db
@@ -234,7 +253,8 @@ inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int inter
                                             uint32_t epoch,
                                             devourer::cell::HarqFeedback fb = {},
                                             uint8_t dl_snr_half_db = 0, uint8_t snr_gen = 0,
-                                            const CellMac &mac = {}, const CellMac &area = {}) {
+                                            const CellMac &mac = {}, const CellMac &area = {},
+                                            const std::optional<UeDlStatus> &dl = std::nullopt) {
   uint8_t sa[6];
   cell_mac(sa, cell, ue);
   auto f = detail::beacon_head(sa, interval_tu);
@@ -246,6 +266,12 @@ inline std::vector<uint8_t> build_ue_beacon(uint16_t cell, uint8_t ue, int inter
   detail::put(b, fb.gen_sf & 0xFFFFFFFFull, 4);
   b.push_back(dl_snr_half_db);
   b.push_back(snr_gen);
+  b.push_back(dl ? 1 : 0);
+  detail::put(b, dl ? dl->epoch32 : 0, 4);
+  detail::put(b, dl ? dl->top : 0, 4);
+  detail::put(b, dl ? dl->missing : 0, 4);
+  detail::put(b, dl ? dl->low : 0, 4);
+  detail::put(b, dl ? dl->floor : 0, 4);
   uint8_t t[kCellTagLen], at[kCellTagLen];
   detail::cell_tag(mac, 'U', cell, b.data(), b.size(), t);
   detail::cell_tag(area, 'V', cell, b.data(), b.size(), at);
@@ -263,6 +289,7 @@ struct UeBeacon {
   devourer::cell::HarqFeedback fb;
   uint8_t dl_snr_half_db = 0; /* 0 = none */
   uint8_t snr_gen = 0;
+  std::optional<UeDlStatus> dl; /* its DL stream status, if it has one */
 };
 // Parse a UE uplink beacon of `cell` (MPDU, radiotap stripped): nullopt for
 // another cell, another protocol version, an SA/body mismatch, or (keyed
@@ -301,6 +328,10 @@ inline std::optional<UeBeacon> parse_ue_beacon(const uint8_t *p, size_t len, uin
       r.fb.gen_sf = detail::get(b + 17, 4); /* low 32 bits: extend at the DU */
       r.dl_snr_half_db = b[21];
       r.snr_gen = b[22];
+      if (b[23] == 1)
+        r.dl = UeDlStatus{static_cast<uint32_t>(detail::get(b + 24, 4)), static_cast<uint32_t>(detail::get(b + 28, 4)),
+                          static_cast<uint32_t>(detail::get(b + 32, 4)), static_cast<uint32_t>(detail::get(b + 36, 4)),
+                          static_cast<uint32_t>(detail::get(b + 40, 4))};
       return r;
     }
     off += 2 + l;
@@ -398,6 +429,54 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
   for (size_t i = 0; i < np; ++i)
     d.pdus.push_back(static_cast<uint32_t>(detail::get(b + 32 + 4 * i, 4)));
   return d;
+}
+
+// A handover target's queue against the UE's DL status: an sn goes only if
+// the UE has it (its top, or within `window` below it and not pending) or it
+// is settled there (tracked, at or above `floor`, and older than its oldest
+// pending sn `low`, outside the window). Kept: anything newer, pending, or
+// that the UE cannot vouch for (below its first tracked sn; between the
+// window and a pending run reaching further back). Returns how many went.
+inline size_t prune_dl_queue(std::deque<uint32_t> &q, const UeDlStatus &s, uint32_t window = 32) {
+  size_t n = 0;
+  for (auto it = q.begin(); it != q.end();) {
+    const uint32_t sn = *it;
+    bool keep = devourer::cell::seq_lt(s.top, sn) || devourer::cell::seq_lt(sn, s.floor);
+    if (!keep) {
+      const uint32_t d = s.top - sn;
+      if (d >= 1 && d <= window)
+        keep = (s.missing >> (d - 1)) & 1u;
+      else if (d > window)
+        keep = !devourer::cell::seq_lt(sn, s.low);
+    }
+    if (keep) {
+      ++it;
+    } else {
+      it = q.erase(it);
+      ++n;
+    }
+  }
+  return n;
+}
+
+// PDUs of frames given up (a handover arrival's, aired before it switched)
+// back at the head of a DL queue, oldest first, each once. The queue is
+// bounded (`cap`): past it the oldest go, as on an F1 arrival — counted, and
+// the UE's DL status then prunes what it has. Returns (added, dropped).
+inline std::pair<size_t, size_t> requeue_dl(std::deque<uint32_t> &q, std::vector<uint32_t> back, size_t cap) {
+  std::sort(back.begin(), back.end(), [](uint32_t a, uint32_t b) { return devourer::cell::seq_lt(a, b); });
+  back.erase(std::unique(back.begin(), back.end()), back.end());
+  std::vector<uint32_t> add;
+  for (uint32_t sn : back)
+    if (std::find(q.begin(), q.end(), sn) == q.end())
+      add.push_back(sn);
+  q.insert(q.begin(), add.begin(), add.end());
+  size_t dropped = 0;
+  while (q.size() > cap) {
+    q.pop_front();
+    ++dropped;
+  }
+  return {add.size(), dropped};
 }
 
 // The PDUs one DL frame carries from a UE's queue (taken out of it, in

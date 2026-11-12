@@ -295,6 +295,7 @@ public:
     if (!have_top_) {
       have_top_ = true;
       top_ = sn;
+      floor_ = sn;
     } else if (auto m = std::find(missing_.begin(), missing_.end(), sn); m != missing_.end()) {
       missing_.erase(m); /* a late copy: recovered */
     } else {
@@ -320,6 +321,31 @@ public:
   /* Confirmed plus still within the reorder window (at the end of a run). */
   uint64_t missing_total() const { return lost_ + missing_.size(); }
   std::optional<uint32_t> top() const { return have_top_ ? std::optional<uint32_t>(top_) : std::nullopt; }
+  /* What this UE holds, for a handover target (3GPP's PDCP status report):
+   * the stream, the newest sn delivered, which of the kReorder sns below it
+   * are still pending (bit i: top - 1 - i), the oldest sn still pending
+   * (`low`; top + 1 if none: a pending run stays until its LAST sn leaves the
+   * window, so it can reach further back than the bitmap), and the first sn
+   * tracked in this stream (`floor`: nothing below it is known here).
+   * Settled: [floor, low) outside the bitmap. */
+  struct Status {
+    uint64_t epoch = 0;
+    uint32_t top = 0;
+    uint32_t missing = 0;
+    uint32_t low = 0;
+    uint32_t floor = 0;
+  };
+  std::optional<Status> status() const {
+    if (!have_top_)
+      return std::nullopt;
+    Status s{epoch_, top_, 0, missing_.empty() ? top_ + 1 : missing_.front(), floor_};
+    for (uint32_t sn : missing_) {
+      const uint32_t d = top_ - sn;
+      if (d >= 1 && d <= kReorder)
+        s.missing |= 1u << (d - 1);
+    }
+    return s;
+  }
 
 private:
   /* Runs in serial order (missing_ is: holes are appended as top moves on),
@@ -342,6 +368,7 @@ private:
   bool have_epoch_ = false, have_top_ = false;
   uint64_t epoch_ = 0;
   uint32_t top_ = 0;
+  uint32_t floor_ = 0; /* the first sn of this stream taken */
   std::deque<uint32_t> missing_; /* serial order */
   std::vector<Gap> gaps_;
   uint64_t delivered_ = 0, dups_ = 0, stale_ = 0, lost_ = 0;

@@ -112,9 +112,75 @@ The messages are UDP datagrams with an HMAC-SHA1 tag, keyed by `CELL_F1_KEY` /
   the DUs are actually on. Spare-channel proposals come from a separate
   advisory plan.
 
-**Not applied:** the planner's channel proposals are logged (`ran.retune`)
-but not applied, because a DU changes channel only at start. Moving a running
-cell and its UEs to another channel is M6 territory.
+**Applied with `RAN_RETUNE_APPLY=1`:** the proposal moves the running cell
+and its UEs (next section). Without it, proposals are only logged
+(`ran.retune`).
+
+## Moving a running cell to another channel
+
+When the planner can't separate two co-channel cells in time (no
+conflict-free position left), it proposes a spare channel
+(`RAN_SPARE_CHANNELS`) for one DU. With `RAN_RETUNE_APPLY=1` the CU applies
+it, one move at a time, never across a handover
+(`src/cell/ChannelSwitch.h`, F1 v15 `ChannelSwitch`):
+- **The command:** the CU tells the DU to serve on the new channel from a
+  network superframe `RAN_CS_LEAD_SF` (20) ahead (`ran.cs_cmd`). It resends
+  until the DU acks it Staged (`ran.cs_ack`). The DU refuses a move with too
+  little lead, to its own channel, while a handover involves it, or when its
+  retune would not fit the idle window (`no_window`). A refused or timed-out
+  move holds that DU off for `RAN_CS_BACKOFF_S` (30 s), so a DU that can't
+  move is not asked every round. A staged move makes the DU refuse handover
+  commands. The CU resends the command until the instant, staged or not, so
+  a DU that restarted after staging stages it again; an id it already holds
+  arriving with another channel or instant is refused (`id_reused`), as after
+  a CU restart within the same second.
+- **The announcement:** the DU carries a channel-switch IE in its beacon
+  until the instant: id, cell, channel, and the first superframe on the new
+  channel (`CsIe`, tagged with the cell key, CRC). A UE takes it once
+  (`CsReceiver`): a newer id, with the instant still ahead, so a replayed
+  beacon can't move it.
+- **The move:** in the idle part of the superframe before the instant, after
+  every slot (`cs_retune_at_us`: the active span + 1 ms, if the retune
+  budget `CELL_CS_RETUNE_US` (26 ms) and a guard fit before the next beacon),
+  the DU and each of its UEs stop their beacon, retune (`FastRetune`) and
+  restart it (`cell.cs.switch`, `cell.ue.cs_switch`). The TSF does not move,
+  so the beacon grid and every slot keep their phase: no re-sync and no new
+  grant.
+- **Only an announced move is made:** the DU moves only if a published
+  beacon carried the IE in at least 3 superframes before the instant (not,
+  say, after losing sync, when the IE is not aired); otherwise it stays
+  (`why` `unannounced`). A beacon that won't restart on the new channel (3
+  tries) takes it back to the old one. Either way it acks the outcome to the
+  CU: Applied, or Invalid (refused and backed off).
+- **A UE with a handover pending** does not take the move, and doesn't mark
+  it seen either: the cell's next beacons offer it again once the handover
+  is resolved. A UE whose own retune failed is still on the old channel, and
+  its fall-back is dropped (it is already where it would go back to).
+- **The way back:** a UE that moved but doesn't hear its cell on the new
+  channel within 10 superframes returns to the old one
+  (`cell.ue.cs_fallback`). A move the DU did not make times out at the CU 50
+  superframes after its instant (`ran.cs_timeout`). Not exercised on the rig
+  since the staging check: a DU now refuses a move it can't make, and nothing
+  else on the rig makes one fail after it was announced. Before that check
+  (DU1 with a budget that did not fit), the UE fell back every time and was
+  heard on the old channel 1 superframe later.
+- **Done:** the CU sees the DU report the new channel at or after the instant
+  (`ran.cs_done`); the planner then plans on the new channels.
+
+**Rig result** (testrig `scripts/m5_retune.sh`): two cells on 149, capacity 1 each, cell 2 at phase 5000
+us. Its DL slot then starts at cell 1's UL slot, so DU2's DL frames land on
+UE1's uplink, and each DU hears the other's UE. The planner can't resolve
+that by position and proposes 157 for DU1 (`RAN_SPARE_CHANNELS=157`).
+
+| case (runs) | move | UE1 across the switch | witness on 149: cross-cell overlaps | UE1's uplinks lost, last ~440 sf |
+|---|---|---|---|---|
+| apply (2) | done; DU 23.7 ms retune, UE 70–116 µs after its window | 0 / 1 uplinks lost, 0 DL frames lost; 147/147 uplinks after, all in slot | 20, 1 (before the move; none after) | 0, 0 |
+| fault: DU1 can't fit the retune (2) | refused at staging (`no_window`), never announced; 3 commands in 90 s (backoff) | the UE never moved | 59, 61 | 1, 3 |
+| baseline, `RAN_RETUNE_APPLY=0` (1) | proposed, not made | — | 68 | 1 |
+
+- **The switch costs about nothing:** the DU and the UE retune in the idle part of the superframe, the beacon grid keeps its phase, and the UE's uplink is in its slot from the first superframe on the new channel.
+- **What the move buys here:** the on-air overlap stops. On this rig at these levels the overlap costs UE1 only a few uplinks (1–3 of ~440 in the baseline and fault runs; 35 of 864 in one exploratory run), so the gain is the conflict removed, not a large delivery loss recovered.
+- **First attempt at the scenario:** at phase 3000 the planner saw a conflict (slot spans overlapping), but the witness counted 0 frame overlaps on air. The planner plans on whole slots, conservatively. Phase 5000 makes the frames actually meet.
 
 ## Rig result
 
@@ -168,8 +234,9 @@ code.
 
 ## Not covered
 
-- Applying a channel change at runtime: frequency separation is proposed,
-  not applied.
-- A USB (coarse-tier) DU: the rig has none. The tier rule is selftest-only.
-- More than two DUs on the rig: the planner handles N, and the selftest runs
-  2–4.
+- A USB (coarse-tier) DU: the rig has none. The tier rule is selftest-only
+  (#565).
+- More than three DUs: the planner handles N (the selftest runs 2–4); the rig
+  has run three under this CU (M6, `docs/cell-m6.md`, three cells).
+- A channel move for a cell whose UE is mid-handover is refused, not queued:
+  the planner proposes it again once the handover is over.

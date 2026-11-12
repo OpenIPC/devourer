@@ -80,7 +80,7 @@ namespace devourer::cell::f1 {
 /* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). 13:
  * Report carries the DU's suspend-gap period. */
 /* 14: Uplink carries its reception instant (net_us). */
-constexpr uint8_t kVersion = 14; /* v14: Uplink.net_us */
+constexpr uint8_t kVersion = 15; /* v14: Uplink.net_us; v15: ChannelSwitch */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -93,7 +93,7 @@ constexpr size_t kMaxUeMeas = kMaxUesPerCell * (kMaxNeighbours + 1); /* 216 < 25
 constexpr size_t kMaxDatagram = 8192;
 
 enum class Type : uint8_t { Report = 1, Schedule = 2, Ack = 3, Handover = 4, Uplink = 5, Neighbours = 6,
-                            Phase = 7, AreaKeys = 8, Downlink = 9 };
+                            Phase = 7, AreaKeys = 8, Downlink = 9, ChannelSwitch = 10 };
 enum class AckStatus : uint8_t { Staged = 0, Applied = 1, Stale = 2, Late = 3, Invalid = 4 };
 
 inline const char *ack_status_name(AckStatus s) {
@@ -188,7 +188,7 @@ struct Schedule {
 };
 
 /* What an Ack acknowledges. */
-enum class AckKind : uint8_t { Schedule = 0, Handover = 1 };
+enum class AckKind : uint8_t { Schedule = 0, Handover = 1, ChannelSwitch = 2 };
 
 struct Ack {
   uint16_t du = 0;
@@ -351,7 +351,7 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
 inline std::optional<Type> peek_type(const uint8_t *p, size_t n) {
   if (p == nullptr || n < 4 + kTagLen || p[0] != 'F' || p[1] != '1' || p[2] != kVersion)
     return std::nullopt;
-  if (p[3] < 1 || p[3] > 9)
+  if (p[3] < 1 || p[3] > static_cast<uint8_t>(Type::ChannelSwitch))
     return std::nullopt;
   return static_cast<Type>(p[3]);
 }
@@ -557,7 +557,7 @@ inline std::optional<Ack> decode_ack(const uint8_t *p, size_t n, const Mac &mac)
   Ack a;
   a.du = static_cast<uint16_t>(r.get(2));
   const uint8_t kind = static_cast<uint8_t>(r.get(1));
-  if (kind > static_cast<uint8_t>(AckKind::Handover))
+  if (kind > static_cast<uint8_t>(AckKind::ChannelSwitch))
     return std::nullopt;
   a.kind = static_cast<AckKind>(kind);
   a.version = static_cast<uint32_t>(r.get(4));
@@ -616,6 +616,49 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return std::make_pair(du, h);
+}
+
+/* A running cell's move to another channel (ChannelSwitch.h), CU -> that
+ * DU: from the network superframe `effective_net_sf` it serves on `channel`.
+ * `seq` orders the copies (a replayed or reordered one is Stale). The DU
+ * acks each copy Staged (and announces the move), or Late/Invalid; at the
+ * instant it acks the outcome: Applied once it moved, Invalid if it did not
+ * (not announced long enough, missed, or the radio failed). */
+struct ChannelSwitchCmd {
+  uint16_t du = 0;
+  uint32_t id = 0;
+  uint8_t channel = 0;
+  uint64_t effective_net_sf = 0;
+  uint64_t seq = 0;
+  bool operator==(const ChannelSwitchCmd &) const = default;
+};
+
+inline std::vector<uint8_t> encode_channel_switch(const ChannelSwitchCmd &c, const Mac &mac) {
+  using namespace detail;
+  auto m = head(Type::ChannelSwitch);
+  put(m, c.du, 2);
+  put(m, c.id, 4);
+  m.push_back(c.channel);
+  put(m, c.effective_net_sf, 8);
+  put(m, c.seq, 8);
+  return seal(std::move(m), mac);
+}
+
+inline std::optional<ChannelSwitchCmd> decode_channel_switch(const uint8_t *p, size_t n, const Mac &mac) {
+  using namespace detail;
+  auto o = open(p, n, Type::ChannelSwitch, mac);
+  if (!o)
+    return std::nullopt;
+  Rd &r = *o;
+  ChannelSwitchCmd c;
+  c.du = static_cast<uint16_t>(r.get(2));
+  c.id = static_cast<uint32_t>(r.get(4));
+  c.channel = static_cast<uint8_t>(r.get(1));
+  c.effective_net_sf = r.get(8);
+  c.seq = r.get(8);
+  if (!r.ok || r.i != r.n || c.channel == 0)
+    return std::nullopt;
+  return c;
 }
 
 /* DAPS (M6): one UE uplink a DU heard, forwarded to the CU. `cell`/`ue`

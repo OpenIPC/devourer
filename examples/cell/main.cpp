@@ -97,6 +97,9 @@
 //   CELL_JOINER_MAC           the joiner's MAC (default: derived from the host
 //                             name + DEVOURER_PCIE_BDF, so a restart re-joins
 //                             into the same position instead of a new one)
+//   CELL_CS_RETUNE_US [26000] a channel move's retune budget (DU and UE):
+//                             the move needs it, + 2 ms, after every slot and
+//                             before the next beacon (ChannelSwitch.h)
 //   CELL_RELEASE_SF [50]      DU: release a JOINED UE whose uplink has been
 //                             absent this many superframes (static UEs stay)
 //   CELL_GAP_SUSPEND_SF [0]   DU and UEs alike: suspend gaps (MeasGap.h). A
@@ -243,6 +246,7 @@
 #include "cell/SlotGrid.h"
 #include "logger.h"
 #include "radio_open.h"
+#include "cell/ChannelSwitch.h"
 #include "cell/Coord.h"
 #include "cell/F1.h"
 #include "cell/Keys.h"
@@ -627,6 +631,14 @@ int run_du(IRadio *dev, const Cfg &c) {
   const size_t pad = static_cast<size_t>(envl("CELL_DL_PAD", 64, 0, 1400));
   /* How long before its slot a DL frame takes its PDUs and is built. */
   const int64_t dl_pick_lead_us = envl("CELL_DL_PICK_LEAD_US", 3000, 500, 100000);
+  /* A channel move's retune budget (the 8852CE's FastRetune: 23.5-23.7 ms). */
+  const int64_t cs_retune_us = envl("CELL_CS_RETUNE_US", 26000, 1000, 100000);
+  const int64_t grid_span_us = [&] { /* every slot's end: where a move's window starts */
+    int64_t span = 0;
+    for (const auto &x : grid->slots())
+      span = std::max<int64_t>(span, x.start_us + x.len_us);
+    return span;
+  }();
   /* A frame that would start later than this into its slot is not sent (the
    * slot budget's guard, as du_budget_ok counts it). */
   const int64_t dl_guard_us = envl("CELL_DL_GUARD_US", 500, 0, 100000);
@@ -1009,6 +1021,10 @@ int run_du(IRadio *dev, const Cfg &c) {
     fprintf(stderr, "StartBeacon failed\n");
     return 1;
   }
+  std::vector<uint8_t> live_bcn = bcn; /* what airs now: restarted after a channel move */
+  /* The channel this DU serves on: DEVOURER_CHANNEL at start, then where a
+   * channel move (ChannelSwitch.h, from the CU) took it. */
+  std::atomic<uint8_t> du_ch{c.ch};
 
   uint64_t t0 = 0, f0 = 0;
   if (!dev->ReadTsfAndFreeRun(t0, f0)) {
@@ -1357,6 +1373,18 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::map<uint16_t, HoOut> ho_out; /* by (source) UE id */
   bool have_ho_seq = false;
   uint64_t last_ho_seq = 0;
+  /* A staged channel move (ChannelSwitch.h; f1_mu): announced in the beacon
+   * until its instant, then this DU and its UEs retune together. */
+  struct CsStaged {
+    uint32_t id = 0;
+    uint8_t channel = 0;
+    int64_t eff_sf = 0; /* this DU's count */
+    int aired = 0;      /* superframes a published beacon carried its IE */
+  };
+  std::optional<CsStaged> cs_staged;
+  uint32_t cs_aired_id = 0; /* the move whose IE the live beacon carries (f1_mu) */
+  bool have_cs_seq = false;
+  uint64_t last_cs_seq = 0;
   /* DAPS: the other identities to forward, until a local superframe (f1_mu). */
   const bool daps_on = envl("CELL_DAPS", 1, 0, 1) != 0;
   std::map<std::pair<uint16_t, uint16_t>, int64_t> daps_ids;
@@ -1769,7 +1797,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.tier = static_cast<uint8_t>(tier);
             r.sync_state = f1_view.sync_state;
             r.coordinated = f1_view.coordinated;
-            r.channel = c.ch;
+            r.channel = du_ch.load();
             r.phase_us = static_cast<int64_t>(dc.phase_us);
             r.period_us = P;
             r.gap_suspend_sf = static_cast<uint16_t>(std::min<int64_t>(gap_suspend_every, 65535));
@@ -1909,10 +1937,67 @@ int run_du(IRadio *dev, const Cfg &c) {
           }
           continue;
         }
+        if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::ChannelSwitch) {
+          auto cs = f1::decode_channel_switch(buf, static_cast<size_t>(n), f1_mac);
+          if (!cs || cs->du != c.cell)
+            continue;
+          f1::AckStatus st = f1::AckStatus::Staged;
+          int64_t net_now = -1;
+          const char *why = "";
+          {
+            std::lock_guard<std::mutex> lk(f1_mu);
+            net_now = f1_view.net_sf;
+            const bool same = cs_staged && cs_staged->id == cs->id;
+            const int64_t eff_new = static_cast<int64_t>(cs->effective_net_sf) - net_off.load();
+            const bool reused = same && (cs_staged->channel != cs->channel || cs_staged->eff_sf != eff_new);
+            if (have_cs_seq && cs->seq <= last_cs_seq) {
+              st = f1::AckStatus::Stale; /* a replay or reordering */
+            } else {
+              have_cs_seq = true;
+              last_cs_seq = cs->seq;
+              const int64_t eff = static_cast<int64_t>(cs->effective_net_sf) - net_off.load();
+              if (reused) {
+                st = f1::AckStatus::Invalid, why = "id_reused"; /* another move under a staged id */
+              } else if (same) {
+                st = f1::AckStatus::Staged; /* a resend of the one staged */
+              } else if (net_now < 0) {
+                st = f1::AckStatus::Late, why = "no_clock";
+              } else if (static_cast<int64_t>(cs->effective_net_sf) < net_now + 4) {
+                st = f1::AckStatus::Late, why = "lead"; /* announced too few superframes ahead */
+              } else if (cs->channel == du_ch.load() || !ho_in.empty() || !ho_out.empty() ||
+                         (cs_staged && cs_staged->id > cs->id)) {
+                st = f1::AckStatus::Invalid, why = "busy_or_same";
+              } else if (!devourer::cell::cs_retune_at_us(grid_span_us, cs_retune_us, 1000, P)) {
+                st = f1::AckStatus::Invalid, why = "no_window"; /* the retune would not fit: never announced */
+              } else {
+                cs_staged = CsStaged{cs->id, cs->channel, eff};
+              }
+            }
+          }
+          send(f1::encode_ack({c.cell, f1::AckKind::ChannelSwitch, cs->id, st,
+                               net_now < 0 ? 0 : static_cast<uint64_t>(net_now)},
+                              f1_mac));
+          char l[200];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.cs.cmd\",\"id\":%u,\"channel\":%u,\"effective_net_sf\":%llu,"
+                   "\"status\":\"%s\",\"why\":\"%s\"}",
+                   cs->id, cs->channel, (unsigned long long)cs->effective_net_sf, f1::ack_status_name(st), why);
+          emit(l);
+          continue;
+        }
         if (f1::peek_type(buf, static_cast<size_t>(n)) == f1::Type::Handover) {
           auto h = f1::decode_handover(buf, static_cast<size_t>(n), f1_mac);
           if (!h || h->first != c.cell)
             continue;
+          bool moving = false;
+          {
+            std::lock_guard<std::mutex> lk(f1_mu);
+            moving = cs_staged.has_value();
+          }
+          if (moving) { /* a channel move staged: no handover across it */
+            send(f1::encode_ack({c.cell, f1::AckKind::Handover, h->second.id, f1::AckStatus::Invalid, 0}, f1_mac));
+            continue;
+          }
           const devourer::cell::HoCommand &cmd = h->second;
           f1::AckStatus st = f1::AckStatus::Invalid;
           const char *role = cmd.target == c.cell ? "target" : cmd.source == c.cell ? "source" : "none";
@@ -2008,7 +2093,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                  * every uplink of the UE, and an answer there would land in
                  * the source cell's schedule. */
                 for (const auto &nb : nb_list)
-                  if (nb.cell == cmd.source && nb.channel != 0 && nb.channel != c.ch)
+                  if (nb.cell == cmd.source && nb.channel != 0 && nb.channel != du_ch.load())
                     visit_src[{cmd.source, cmd.ue}] = {cmd.target_ue, static_cast<int64_t>(eff)};
                 ue_home[cmd.target_ue] = cmd.home; /* reported on, for its next handover */
               } else {
@@ -2035,7 +2120,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               ie.ul_slot = static_cast<uint8_t>(*ul);
               ie.effective_sf = static_cast<uint64_t>(static_cast<int64_t>(cmd.effective_net_sf) - off);
               ie.tsf_delta_us = cmd.tsf_delta_us;
-              ie.channel = cmd.target_channel != c.ch ? cmd.target_channel : 0;
+              ie.channel = cmd.target_channel != du_ch.load() ? cmd.target_channel : 0;
               ie.ctx = cmd.ctx; /* the target's key for this UE: relayed, opaque */
               auto bytes = devourer::cell::encode_ho_ie(ie, auth);
               if (!bytes.empty()) {
@@ -2157,7 +2242,7 @@ int run_du(IRadio *dev, const Cfg &c) {
         const std::vector<devourer::cell::GridSpan> busy = {
             {0, c.bcn_us}, {sl[sg->dl_slot].start_us, sl[sg->dl_slot].len_us},
             {sl[sg->ul_slot].start_us, sl[sg->ul_slot].len_us}};
-        if (devourer::cell::needs_suspend(nl_dl, c.ch, gap_floor_us, gap_guard_du_us, P, busy)) {
+        if (devourer::cell::needs_suspend(nl_dl, du_ch.load(), gap_floor_us, gap_guard_du_us, P, busy)) {
           char l[120];
           snprintf(l, sizeof l, "{\"ev\":\"cell.dl.suspend\",\"ue\":%u,\"sf\":%lld}", ue, (long long)sf);
           emit(l);
@@ -2441,6 +2526,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     std::vector<devourer::cell::RachResponse> rar_sel;
     std::vector<uint16_t> to_release;
     std::vector<uint8_t> ho_ies;     /* handover IEs to air (source side) */
+    std::optional<CsStaged> csn;     /* a staged channel move, announced in ho_ies */
     std::vector<uint16_t> ho_done;   /* source-side handovers concluded */
     std::optional<uint64_t> ho_eff;  /* a handover arrival's instant (target side) */
     uint16_t ho_eff_ue = 0;
@@ -2725,6 +2811,16 @@ int run_du(IRadio *dev, const Cfg &c) {
     if (synced && f1_on) {
       const auto nl = devourer::cell::encode_nl_ie(c.cell, nl_gen_snap, nb_snap, area);
       ho_ies.insert(ho_ies.end(), nl.begin(), nl.end());
+      /* A staged channel move, announced until its instant. */
+      {
+        std::lock_guard<std::mutex> lk(f1_mu);
+        csn = cs_staged;
+      }
+      if (csn && sf < csn->eff_sf) {
+        const auto cie = devourer::cell::encode_cs_ie(
+            {csn->id, c.cell, csn->channel, static_cast<uint64_t>(csn->eff_sf)}, auth);
+        ho_ies.insert(ho_ies.end(), cie.begin(), cie.end());
+      }
       /* Signed once per list and network window (its freshness: the
        * network superframe / kNlWindowSf, on the shared timebase). */
       const int64_t net_sf_now = net_ok.load() ? sf + net_off.load() : -1;
@@ -2770,6 +2866,12 @@ int run_du(IRadio *dev, const Cfg &c) {
       const auto nb = build_du_beacon(next, auth, rar_now, ho_ies);
       const bool ok = !nb.empty() && dev->UpdateBeaconPayload(nb.data(), nb.size());
       beacon_fail_run = ok ? 0 : beacon_fail_run + 1;
+      if (ok)
+        live_bcn = nb;
+      if (ok) { /* what the live beacon now announces (nothing, if the IE went) */
+        std::lock_guard<std::mutex> lk(f1_mu);
+        cs_aired_id = csn && sf < csn->eff_sf && cs_staged && cs_staged->id == csn->id ? csn->id : 0;
+      }
       if (ok) {
         rar_on_air = rar_now;
         rar_on_air_set = rar_sel;
@@ -2871,6 +2973,87 @@ int run_du(IRadio *dev, const Cfg &c) {
     if (rach_on && !rar_on_air_set.empty()) {
       std::lock_guard<std::mutex> lk(mu);
       srv.published(rar_on_air_set);
+    }
+    /* A staged channel move: in the idle part of the superframe before its
+     * instant (after every slot), the beacon stops, the radio retunes and the
+     * beacon restarts — the TSF does not move, so neither does the grid. Only
+     * a move its UEs were told of (its IE aired in >= 3 superframes) is made;
+     * a beacon that will not restart on the new channel takes the DU back to
+     * the old one. The CU gets the outcome (Applied, or Invalid). */
+    {
+      std::optional<CsStaged> cs;
+      {
+        std::lock_guard<std::mutex> lk(f1_mu);
+        if (cs_staged && cs_aired_id == cs_staged->id && sf < cs_staged->eff_sf)
+          ++cs_staged->aired;
+        cs = cs_staged;
+      }
+      if (cs && sf + 1 >= cs->eff_sf) {
+        const auto at = devourer::cell::cs_retune_at_us(grid_span_us, cs_retune_us, 1000, P);
+        const uint8_t from = du_ch.load();
+        bool moved = false;
+        int64_t late_us = 0, retune_us = 0;
+        const char *why = "";
+        if (!at || sf + 1 != cs->eff_sf) {
+          why = "missed";
+        } else if (cs->aired < 3) {
+          why = "unannounced"; /* the UEs were not told: never moved without them */
+        } else {
+          late_us = sleep_until_tsf(dev, grid->slot_start_tsf(sf, 0) + *at) - (grid->slot_start_tsf(sf, 0) + *at);
+          bool stopped = false;
+          for (int k = 0; k < 3 && !stopped; ++k)
+            stopped = dev->StopBeacon();
+          if (!stopped) {
+            why = "stop_beacon";
+          } else {
+            auto tune = [&](uint8_t ch) {
+              try {
+                dev->FastRetune(ch);
+                return true;
+              } catch (const std::exception &) {
+                return false;
+              }
+            };
+            auto restart = [&] {
+              for (int k = 0; k < 3; ++k)
+                if (dev->StartBeacon(live_bcn.data(), live_bcn.size(), c.tu))
+                  return true;
+              return false;
+            };
+            const auto r0 = std::chrono::steady_clock::now();
+            const bool tuned = tune(cs->channel);
+            retune_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - r0)
+                            .count();
+            if (tuned && restart()) {
+              moved = true;
+              du_ch.store(cs->channel);
+            } else {
+              why = tuned ? "restart_beacon" : "retune";
+              /* back where its UEs can still find it */
+              const bool back = !tuned || tune(from);
+              if (!back || !restart())
+                emit("{\"ev\":\"cell.cs.stranded\"}"); /* no beacon: the CU sees the DU go quiet */
+            }
+          }
+        }
+        char l[240];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.cs.switch\",\"id\":%u,\"from\":%u,\"to\":%u,\"sf\":%lld,\"ok\":%d,"
+                 "\"retune_us\":%lld,\"late_us\":%lld,\"aired\":%d,\"why\":\"%s\"}",
+                 cs->id, from, cs->channel, (long long)sf, moved ? 1 : 0, (long long)retune_us, (long long)late_us,
+                 cs->aired, why);
+        emit(l);
+        if (f1_on) { /* the outcome, from this thread (a UDP send is thread-safe) */
+          const auto ack = devourer::cell::f1::encode_ack({c.cell, devourer::cell::f1::AckKind::ChannelSwitch, cs->id,
+                                           moved ? devourer::cell::f1::AckStatus::Applied : devourer::cell::f1::AckStatus::Invalid,
+                                           static_cast<uint64_t>(std::max<int64_t>(0, sf + net_off.load()))},
+                                          f1_mac);
+          sendto(f1_fd.fd, ack.data(), ack.size(), 0, reinterpret_cast<const sockaddr *>(&f1_addr), f1_addr_len);
+        }
+        std::lock_guard<std::mutex> lk(f1_mu);
+        cs_staged.reset();
+        cs_aired_id = 0;
+      }
     }
     ++sf;
   }
@@ -3060,6 +3243,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * serving DU's beacon addressed to us, the one accepted (fresh, instant
    * ahead), and the target's grant maps heard while waiting for it. */
   std::optional<devourer::cell::HoIe> ho_seen, ho_pending;
+  /* M5: the serving cell's channel move (ChannelSwitch.h), as seen in its
+   * beacon, accepted (CsReceiver), and after it the way back if the cell is
+   * not heard on the new channel. */
+  std::optional<devourer::cell::CsIe> cs_seen, cs_pending;
+  devourer::cell::CsReceiver cs_rx;
+  struct CsBack {
+    uint8_t to = 0;           /* the channel it came from */
+    int64_t deadline_sf = 0;
+    uint64_t bcn_at = 0;      /* serving beacons counted at the move */
+  };
+  std::optional<CsBack> cs_back;
+  std::atomic<uint64_t> serv_bcn_n{0}; /* serving-cell beacons heard */
+  const int64_t ue_cs_retune_us = envl("CELL_CS_RETUNE_US", 26000, 1000, 100000);
   std::string ho_target_key;  /* the accepted handover's target key (hex) */
   CellMac target_auth;        /* ... as a Mac: the target's buffered maps (mu) */
   uint32_t ho_no_ctx_id = 0;  /* the last command refused for no context (logged once) */
@@ -3300,6 +3496,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
           if (auto h = devourer::cell::find_ho_ie(p.Data.data(), p.Data.size(), cell_a.load(),
                                                   static_cast<uint16_t>(me_a.load()), auth))
             ho_seen = h;
+        if (auto cs = devourer::cell::find_cs_ie(p.Data.data(), p.Data.size(), cell_a.load(), auth))
+          cs_seen = cs;
+        ++serv_bcn_n;
         wrap.feed(p.RxAtrib.tsfl);
         if (reattach_sf > 0 && sync.Steps() != reattach_armed_steps) {
           reattach_armed_steps = sync.Steps();
@@ -3578,6 +3777,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
         no_step_until_sf = -1;
         ho_seen.reset();      /* commands aired by the old instance */
         ho_pending.reset();
+        cs_seen.reset();
+        cs_pending.reset();
         /* A target that restarted mid-handover lost the staged UE: the way
          * back stays, its deadline re-based on the new count. */
         if (ho_back)
@@ -3598,6 +3799,64 @@ int run_ue(IRadio *dev, const Cfg &c) {
        * SHIFTED to the target's (TsfSync::ShiftRemote, the CU's delta), the
        * identity becomes the target's, and the target's buffered grant
        * maps take over. No scan, no re-acquisition, no association. */
+      /* M5: the serving cell moves to another channel (ChannelSwitch.h):
+       * accepted once (newer id, instant ahead); in the idle part of the
+       * superframe before its instant the UE stops its beacon and retunes
+       * with the cell (the retune below), restarting the beacon at once — no
+       * TSF change, so its uplink keeps its slot. Not heard there within 10
+       * superframes: back to the channel it came from. */
+      if (cs_seen) {
+        /* Not while a handover is pending: then not taken (nor marked seen),
+         * so the cell's next beacons offer it again. */
+        if (!ho_pending && cs_rx.accept(*cs_seen, static_cast<uint64_t>(sfn))) {
+          cs_pending = cs_seen;
+          char l[160];
+          snprintf(l, sizeof l, "{\"ev\":\"cell.ue.cs_staged\",\"ue\":%d,\"id\":%u,\"channel\":%u,\"eff_sf\":%llu}",
+                   me_a.load(), cs_seen->id, cs_seen->channel, (unsigned long long)cs_seen->effective_sf);
+          emit(l);
+        }
+        cs_seen.reset();
+      }
+      if (cs_pending && du_now >= 0 && !retune_to) {
+        int64_t span = 0;
+        for (const auto &x : grid->slots())
+          span = std::max<int64_t>(span, x.start_us + x.len_us);
+        const auto at = devourer::cell::cs_retune_at_us(span, ue_cs_retune_us, 1000, P);
+        /* no window of its own (its budget): still right after every slot */
+        const int64_t win = (static_cast<int64_t>(cs_pending->effective_sf) - 1) * P + at.value_or(span + 1000);
+        if (du_now >= win) {
+          if (cs_pending->channel != cur_ch) {
+            retune_to = cs_pending->channel;
+            cs_back = CsBack{cur_ch, static_cast<int64_t>(cs_pending->effective_sf) + 10, serv_bcn_n.load()};
+            /* the beacon restarts on the new channel before its next uplink slot */
+            next_pass_at = std::chrono::steady_clock::now() + std::chrono::microseconds(ue_cs_retune_us + 2000);
+          }
+          char l[200];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.cs_switch\",\"ue\":%d,\"id\":%u,\"from\":%u,\"to\":%u,\"late_us\":%lld}",
+                   me_a.load(), cs_pending->id, cur_ch, cs_pending->channel, (long long)(du_now - win));
+          emit(l);
+          cs_pending.reset();
+        } else {
+          const auto due = std::chrono::steady_clock::now() + std::chrono::microseconds(win - du_now);
+          if (!next_pass_at || due < *next_pass_at)
+            next_pass_at = due;
+        }
+      }
+      if (cs_back && !retune_to) {
+        if (cur_ch == cs_back->to) {
+          cs_back.reset(); /* its own retune failed: still on the old channel */
+        } else if (serv_bcn_n.load() > cs_back->bcn_at && sfn >= cs_back->deadline_sf - 10) {
+          cs_back.reset(); /* the cell is heard on the new channel */
+        } else if (sfn > cs_back->deadline_sf) {
+          retune_to = cs_back->to;
+          char l[160];
+          snprintf(l, sizeof l, "{\"ev\":\"cell.ue.cs_fallback\",\"ue\":%d,\"to\":%u,\"sf\":%lld}",
+                   me_a.load(), cs_back->to, (long long)sfn);
+          emit(l);
+          cs_back.reset();
+        }
+      }
       if (ho_seen) {
         /* Per-cell keys: the target's key, unwrapped from the context the IE
          * carries for this UE alone. Without one (or a context not for this

@@ -1206,6 +1206,9 @@ int run_du(IRadio *dev, const Cfg &c) {
     /* The CU DL PDUs each HARQ seq in flight carries, and their stream (a
      * retransmission re-airs the same ones). */
     std::map<uint32_t, std::pair<uint64_t, std::vector<uint32_t>>> pdus;
+    /* A handover arrival not heard yet: the frames aired to it so far may
+     * have gone out before the UE switched (see the uplink handler). */
+    bool arriving = false;
   };
   std::map<uint16_t, DlUe> dlue;
   /* The CU's DL PDUs (F1 Downlink) waiting per UE (guarded by mu). Kept
@@ -1228,6 +1231,52 @@ int run_du(IRadio *dev, const Cfg &c) {
    * one's place. */
   static_assert(kDlMaxPdus >= kDlQueueMax - devourer::cell::DlStreamRx::kReorder, "a DL frame too small");
   std::map<uint16_t, DlQueue> dlq;
+  /* A UE's DL status against its queue here (mu held): what it has goes.
+   * Logged when anything went. `via`: its own uplink, or its source-identity
+   * beacon heard before the switch. */
+  auto status_prune = [&](uint16_t ue, const UeDlStatus &st, const char *via) {
+    auto qi = dlq.find(ue);
+    if (qi == dlq.end() || static_cast<uint32_t>(qi->second.epoch) != st.epoch32)
+      return;
+    const size_t n = prune_dl_queue(qi->second.sns, st);
+    if (n == 0)
+      return;
+    char l[200];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.dl.status_prune\",\"ue\":%u,\"top\":%u,\"missing\":%u,\"pruned\":%zu,"
+             "\"left\":%zu,\"via\":\"%s\"}",
+             ue, st.top, static_cast<unsigned>(__builtin_popcount(st.missing)), n, qi->second.sns.size(), via);
+    emit(l);
+  };
+  /* A handover arrival's DL frames in flight given up (mu held): aired
+   * before the UE switched (it switches up to ~2 superframes after the
+   * instant), their retransmissions would go before any new data. Their
+   * PDUs go back to the head of the queue; the UE's DL status (its beacons)
+   * then prunes what it has (status_prune). Returns (frames given up, PDUs
+   * re-queued). */
+  auto arrival_abandon = [&](DlUe &d, uint16_t ue) -> std::pair<size_t, size_t> {
+    const auto gone = d.harq.abandon_all();
+    std::vector<uint32_t> back;
+    uint64_t back_epoch = 0;
+    for (uint32_t seq : gone)
+      if (auto pi = d.pdus.find(seq); pi != d.pdus.end()) {
+        back_epoch = pi->second.first;
+        back.insert(back.end(), pi->second.second.begin(), pi->second.second.end());
+        d.pdus.erase(pi);
+      }
+    size_t requeued = 0;
+    if (auto qi = dlq.find(ue); qi != dlq.end() && !back.empty() && qi->second.epoch == back_epoch) {
+      const auto [added, over] = requeue_dl(qi->second.sns, std::move(back), kDlQueueMax);
+      requeued = added;
+      qi->second.dropped += over;
+      if (over) {
+        char l[120];
+        snprintf(l, sizeof l, "{\"ev\":\"cell.dl.requeue_overflow\",\"ue\":%u,\"dropped\":%zu}", ue, over);
+        emit(l);
+      }
+    }
+    return {gone.size(), requeued};
+  };
   for (uint16_t ue : ues)
     dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
   std::vector<uint8_t> rar_on_air;                 /* the RACH answers in the live beacon */
@@ -1311,6 +1360,10 @@ int run_du(IRadio *dev, const Cfg &c) {
   /* DAPS: the other identities to forward, until a local superframe (f1_mu). */
   const bool daps_on = envl("CELL_DAPS", 1, 0, 1) != 0;
   std::map<std::pair<uint16_t, uint16_t>, int64_t> daps_ids;
+  /* A staged arrival's source identity -> its id here (f1_mu): the UE's
+   * beacons to its source carry its DL status, so this DU's queue for it is
+   * pruned before the switch too. Expires with its daps_ids entry. */
+  std::map<std::pair<uint16_t, uint16_t>, uint16_t> arrival_of;
   /* Sequential DAPS, DL (f1_mu): an INTER-FREQUENCY staged arrival's SOURCE
    * identity -> its id here and its switch instant (this DU's count): a visit
    * copy heard under that identity before the switch is answered with its
@@ -1489,14 +1542,22 @@ int run_du(IRadio *dev, const Cfg &c) {
             if (!amac)
               return;
           }
-          if (!parse_ue_beacon(p.Data.data(), p.Data.size(), oc, amac, true))
+          const auto ob = parse_ue_beacon(p.Data.data(), p.Data.size(), oc, amac, true);
+          if (!ob)
             return;
           bool fwd = false;
+          std::optional<uint16_t> arrival; /* staged here: its id */
           {
             std::lock_guard<std::mutex> lk(f1_mu);
+            if (auto ai = arrival_of.find({oc, ou}); ai != arrival_of.end())
+              arrival = ai->second;
             meas_tab.update(oc, ou, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
                             static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
             fwd = daps_on && daps_ids.count({oc, ou}) > 0;
+          }
+          if (arrival && ob->dl) {
+            std::lock_guard<std::mutex> lk(mu);
+            status_prune(*arrival, *ob->dl, "source_id");
           }
           if (fwd) {
             forward_ul(oc, ou, p);
@@ -1631,6 +1692,23 @@ int run_du(IRadio *dev, const Cfg &c) {
             if (harq_on)
               d->second.harq.on_feedback(fb);
           }
+          /* A handover arrival's first uplink: the UE is here. What its
+           * feedback did not ACK was aired before it switched (it switches up
+           * to ~2 superframes after the instant); retransmitting those would
+           * go before any new data — the first frames after a same-channel
+           * switch were attempts 2-3 of PDUs it had. Given up instead, their
+           * PDUs back at the head of the queue (the UE dedups by sn). */
+          if (d->second.arriving) {
+            d->second.arriving = false;
+            const auto [gone, requeued] = arrival_abandon(d->second, ub->ue);
+            char l[160];
+            snprintf(l, sizeof l,
+                     "{\"ev\":\"cell.ho.arrival_heard\",\"ue\":%u,\"sf\":%lld,\"abandoned\":%zu,\"requeued\":%zu}",
+                     ub->ue, (long long)pos.superframe, gone, requeued);
+            emit(l);
+          }
+          if (ub->dl)
+            status_prune(ub->ue, *ub->dl, "own");
           /* One sample per SNR measurement, not per beacon repeating it. */
           if (ub->dl_snr_half_db &&
               (!d->second.have_snr_gen || ub->snr_gen != d->second.last_snr_gen)) {
@@ -1780,7 +1858,10 @@ int run_du(IRadio *dev, const Cfg &c) {
           q.last_sn = dp->sn;
           q.sns.push_back(dp->sn);
           q.last_push = std::chrono::steady_clock::now();
-          if (q.offered) { /* a DAPS target's queue: when each PDU came (vs. the frames' picks) */
+          const auto du_it = dlue.find(dp->ue);
+          if (q.offered || du_it == dlue.end() || du_it->second.arriving) {
+            /* a DAPS target's queue (staged, arriving, or answering visits):
+             * when each PDU came, against the frames' picks */
             char l[120];
             snprintf(l, sizeof l, "{\"ev\":\"cell.dl.pdu_in\",\"ue\":%u,\"sn\":%u,\"t_ms\":%lld}", dp->ue, dp->sn,
                      (long long)now_ms());
@@ -1921,6 +2002,7 @@ int run_du(IRadio *dev, const Cfg &c) {
                 /* DAPS: the UE's source identity, heard here until the switch
                  * (+ the release window, for its last old-identity beacons). */
                 daps_ids[{cmd.source, cmd.ue}] = static_cast<int64_t>(eff) + ho_release_sf;
+                arrival_of[{cmd.source, cmd.ue}] = cmd.target_ue;
                 /* Answered only across channels (the source's channel, from
                  * this DU's neighbour list): on one channel the target hears
                  * every uplink of the UE, and an answer there would land in
@@ -2100,6 +2182,11 @@ int run_du(IRadio *dev, const Cfg &c) {
         std::lock_guard<std::mutex> lk(mu);
         DlUe &d = dlue.at(ue);
         if (harq_on) {
+          /* Not heard yet: nothing aired to it is known to have arrived, so
+           * every frame is a new one with the freshest PDUs, not a
+           * retransmission of a frame aired before it switched. */
+          if (d.arriving)
+            arrival_abandon(d, ue);
           tx = d.harq.next(static_cast<uint64_t>(sf), true);
         } else {
           const uint32_t s = d.plain_seq++;
@@ -2293,6 +2380,8 @@ int run_du(IRadio *dev, const Cfg &c) {
       f1_view.coordinated = coordinated;
       for (auto it = daps_ids.begin(); it != daps_ids.end();)
         it = it->second < sf ? daps_ids.erase(it) : std::next(it);
+      for (auto it = arrival_of.begin(); it != arrival_of.end();)
+        it = daps_ids.count(it->first) ? std::next(it) : arrival_of.erase(it);
       for (auto it = visit_src.begin(); it != visit_src.end();)
         it = it->second.eff_sf < sf ? visit_src.erase(it) : std::next(it);
       nb_snap = nb_list;
@@ -2385,6 +2474,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             /* Fresh DL state (an id reused after another UE left keeps
              * nothing of it); its DL queue is the DAPS buffer: kept. */
             dlue.insert_or_assign(u.ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
+            dlue.at(u.ue).arriving = true;
             last_ul_sf[u.ue] = static_cast<int64_t>(hi->second.eff_sf); /* silence clock at the switch */
             ho_eff = hi->second.eff_sf;
             ho_eff_ue = u.ue;
@@ -3332,6 +3422,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   devourer::cell::HarqFeedback last_fb{};
   uint8_t last_snr_half = 0;
   uint8_t last_snr_gen = 0;
+  std::optional<UeDlStatus> last_dl_st;
   long steps = 0;
   /* TSF-write compensation: a read-add-write lands a few us late (the MMIO
    * round trip between ReadTsf and the write). Each step is checked against
@@ -3887,11 +3978,16 @@ int run_ue(IRadio *dev, const Cfg &c) {
      * DU reads them at its next UL slot; a beacon update lands 1-2 beacons
      * later, which Harq's nack_min_age_sf allows for). */
     devourer::cell::HarqFeedback fb{};
+    /* ... and the DL stream status: a handover target hears it (directly, or
+     * forwarded by DAPS before the switch) and sends only what is missing. */
+    std::optional<UeDlStatus> dl_st;
     uint8_t snr_half = last_snr_half;
     uint8_t snr_gen = last_snr_gen;
     {
       std::lock_guard<std::mutex> lk(mu);
       fb = hrx.feedback(static_cast<uint64_t>(du_now / P)); /* the UE's view of the DU sf */
+      if (const auto st = dl_stream.status())
+        dl_st = UeDlStatus{static_cast<uint32_t>(st->epoch), st->top, st->missing, st->low, st->floor};
       if (dl_snr_n > 0) { /* a NEW measurement: a new snr_gen */
         const double m = dl_snr_sum / static_cast<double>(dl_snr_n);
         snr_half = static_cast<uint8_t>(m * 2 < 1 ? 1 : (m * 2 > 255 ? 255 : std::lround(m * 2)));
@@ -3911,7 +4007,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
     }
     const bool content_moved = force_beacon || !beaconing || running_epoch != mcopy.epoch ||
                                fb.base != last_fb.base || fb.bitmap != last_fb.bitmap ||
-                               snr_gen != last_snr_gen;
+                               snr_gen != last_snr_gen || dl_st != last_dl_st;
     if (content_moved && !beaconing && place_ul_slot && !switch_place()) {
       /* the switch's placement failed: no restart at the old phase; again soon */
       next_pass_at = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
@@ -3923,7 +4019,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
       beacon_hold_until.reset();
     }
     if (content_moved) {
-      auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, ue_area);
+      auto b = build_ue_beacon(cell_a.load(), me, c.tu, mcopy.epoch, fb, snr_half, snr_gen, auth, ue_area, dl_st);
       {
         std::vector<devourer::cell::MeasEntryUe> mr;
         {
@@ -3970,6 +4066,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
       last_fb = fb;
       last_snr_half = snr_half;
       last_snr_gen = snr_gen;
+      last_dl_st = dl_st;
       if (epoch_moved) { /* a feedback-only refresh logs nothing */
         char l[160];
         snprintf(l, sizeof l, "{\"ev\":\"cell.ue.epoch\",\"ue\":%u,\"epoch\":%u,\"ta_us\":%d}",

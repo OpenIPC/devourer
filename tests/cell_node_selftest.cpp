@@ -68,12 +68,19 @@ int main() {
     du[15] = 0;                                            /* SA = the DU */
     CHECK(!parse_ue_beacon(du.data(), du.size(), 5));
     auto bad = b;
-    bad[bad.size() - 36] = 4;                              /* body ue != SA */
+    const size_t body0 = bad.size() - 2 * kCellTagLen - kUeBodyLen; /* the IE body's first byte */
+    bad[body0 + 3] = 4;                                    /* body ue != SA */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     bad = b;
-    bad[bad.size() - 35] = 1;                              /* ue high byte: 0x0103 != 3 */
+    bad[body0 + 4] = 1;                                    /* ue high byte: 0x0103 != 3 */
     CHECK(!parse_ue_beacon(bad.data(), bad.size(), 5));
     CHECK(!parse_ue_beacon(b.data(), b.size() - 1, 5));   /* torn IE */
+    CHECK(u && !u->dl && up && !up->dl);                   /* no DL status unless given */
+    /* v5: the DL stream status rides the beacon, under the tags. */
+    const UeDlStatus ds{0xDEADBEEFu, 1234u, 0x80000001u, 1190u, 7u};
+    auto sb = build_ue_beacon(5, 3, 100, 42, {}, 0, 0, {}, {}, ds);
+    auto su = parse_ue_beacon(sb.data(), sb.size(), 5);
+    CHECK(su && su->dl && *su->dl == ds);
     CHECK(!parse_ue_beacon(nullptr, 0, 5));
   }
 
@@ -141,10 +148,10 @@ int main() {
     auto unsigned_ub = build_ue_beacon(5, 2, 100, 4, fb, 50, 1);
     CHECK(!parse_ue_beacon(unsigned_ub.data(), unsigned_ub.size(), 5, k1)); /* keyed: tag required */
     auto tampered = ub;
-    tampered[tampered.size() - 16 - 23 + 9] ^= 1; /* fb.base byte */
+    tampered[tampered.size() - 16 - kUeBodyLen + 9] ^= 1; /* fb.base byte */
     CHECK(!parse_ue_beacon(tampered.data(), tampered.size(), 5, k1));
     auto ver = ub;
-    ver[ver.size() - 16 - 23 + 2] = 2; /* an older protocol version */
+    ver[ver.size() - 16 - kUeBodyLen + 2] = 4; /* an older protocol version */
     CHECK(!parse_ue_beacon(ver.data(), ver.size(), 5));
     /* The area tag (v3): another cell's DU checks it with the area key; the
      * serving DU checks the cell tag. Each needs its own key. */
@@ -220,6 +227,44 @@ int main() {
         for (uint32_t sn : pick_dl_pdus(g, 139u, kDlMaxPdus))
           rx.accept(1, sn);
       CHECK(rx.missing_confirmed() == 0 && rx.missing_total() == 0 && rx.delivered() == 51);
+      /* The UE's DL status (its beacon) prunes a handover target's queue:
+       * what it has goes, what it lacks stays, settled ones go. */
+      devourer::cell::DlStreamRx sr;
+      for (uint32_t sn : {100u, 101u, 103u, 104u, 120u})
+        sr.accept(7, sn);
+      auto st = sr.status(); /* top 120; 102 and 105..119 pending; tracked from 100 */
+      CHECK(st && st->epoch == 7 && st->top == 120 && st->low == 102 && st->floor == 100);
+      CHECK(st && st->missing == ((1u << (120 - 102 - 1)) | ((1u << 15) - 1))); /* bits 17, 14..0 */
+      auto to_ue = [](const devourer::cell::DlStreamRx::Status &x) {
+        return UeDlStatus{static_cast<uint32_t>(x.epoch), x.top, x.missing, x.low, x.floor};
+      };
+      std::deque<uint32_t> tq;
+      for (uint32_t sn = 95; sn <= 125; ++sn) /* 95..99: below what the UE tracked */
+        tq.push_back(sn);
+      const size_t gone = prune_dl_queue(tq, to_ue(*st));
+      std::deque<uint32_t> want = {95, 96, 97, 98, 99, 102};
+      for (uint32_t sn = 105; sn <= 119; ++sn)
+        want.push_back(sn);
+      for (uint32_t sn = 121; sn <= 125; ++sn)
+        want.push_back(sn);
+      CHECK(tq == want && gone == 31 - want.size());
+      /* A pending run reaching past the 32-sn bitmap (its last sn still in the
+       * window): kept; what is older than its start and tracked: settled. */
+      devourer::cell::DlStreamRx lr;
+      for (uint32_t sn : {100u, 101u, 140u}) /* 102..139 pending: last sn 1 behind */
+        lr.accept(7, sn);
+      auto ls = lr.status();
+      CHECK(ls && ls->low == 102 && ls->missing == 0xFFFFFFFFu);
+      std::deque<uint32_t> lq = {100, 101, 102, 103, 107, 108, 139, 140, 141};
+      prune_dl_queue(lq, to_ue(*ls));
+      CHECK(lq == std::deque<uint32_t>({102, 103, 107, 108, 139, 141})); /* 102..107: beyond the bitmap, pending */
+      /* Abandoned frames' PDUs back at the head: once each, oldest first;
+       * the queue bound drops the oldest, counted. */
+      std::deque<uint32_t> rq = {50, 51, 52};
+      auto [ad, dr] = requeue_dl(rq, {45, 47, 46, 47, 51}, 64);
+      CHECK(ad == 3 && dr == 0 && rq == std::deque<uint32_t>({45, 46, 47, 50, 51, 52}));
+      auto [ad2, dr2] = requeue_dl(rq, {40, 41}, 6);
+      CHECK(ad2 == 2 && dr2 == 2 && rq == std::deque<uint32_t>({45, 46, 47, 50, 51, 52}));
       /* A queue with gaps (it takes any newer sn): 1..32 offered, then 101 —
        * every offered one is out of 101's window, yet 101 keeps its place. */
       std::deque<uint32_t> gq;

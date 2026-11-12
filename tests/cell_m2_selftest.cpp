@@ -125,6 +125,21 @@ int main() {
     CHECK(r2 && r2->retx && r2->attempt == 2 && s.stats().dropped == 0);
   }
 
+  /* --- abandon_all: a handover arrival's pre-arrival frames given up; no
+   * retransmission of them, and the seqs go on (never reused). --- */
+  {
+    HarqConfig c;
+    c.timeout_sf = 10; /* no retransmission falls due meanwhile */
+    HarqSender s(c);
+    for (int i = 0; i < 3; ++i)
+      s.next(static_cast<uint64_t>(i), true); /* seqs 0..2, unheard */
+    s.on_feedback(HarqFeedback{0, 1u << 0, 3}); /* the UE caught seq 1 */
+    auto g = s.abandon_all();
+    CHECK(g == std::vector<uint32_t>({0, 2}) && s.inflight() == 0 && s.stats().abandoned == 2);
+    auto t = s.next(5, true); /* new data first, not a retransmission */
+    CHECK(t && !t->retx && t->seq == 3 && t->low == 3);
+  }
+
   /* --- Implausible feedback (claims seqs never sent) is ignored whole. --- */
   {
     HarqSender s;

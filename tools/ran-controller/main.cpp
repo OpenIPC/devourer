@@ -13,8 +13,11 @@
 //     changed DU takes effect on ONE network superframe (now + RAN_LEAD_SF);
 //     unchanged ones get their current schedule again (the keepalive).
 // A DU that answers Stale / Late / Invalid gets a fresh version next round.
-// Channel separation the planner proposes is logged (ran.retune), not
-// applied: the DUs retune only at start (M5 scope).
+// Channel separation the planner proposes is logged (ran.retune); with
+// RAN_RETUNE_APPLY=1 it is applied: the DU is told to move (F1
+// ChannelSwitch, src/cell/ChannelSwitch.h) RAN_CS_LEAD_SF superframes ahead,
+// announces it in its beacon, and it and its UEs retune together. One move
+// at a time, never across a handover (ran.cs_cmd / ran.cs_ack / ran.cs_done).
 //
 // Env (defaults in brackets):
 //   RAN_PORT [47254]          UDP port the DUs report to
@@ -29,6 +32,11 @@
 //   RAN_LEAD_SF [12]          schedule lead (> the DUs' CELL_F1_MIN_LEAD_SF)
 //   RAN_PLAN_MS [1000]        plan / keepalive period
 //   RAN_SPARE_CHANNELS        channels the planner may propose (advisory)
+//   RAN_RETUNE_APPLY [0]      1: apply a proposal — move that running DU and
+//                             its UEs (F1 ChannelSwitch, ChannelSwitch.h)
+//   RAN_CS_LEAD_SF [20]       a move's instant, this many superframes ahead
+//   RAN_CS_BACKOFF_S [30]     a DU whose move was refused or timed out is not
+//                             asked again before this
 // Handover evaluation (M6, #260) — OBSERVE ONLY: for every UE the CU runs the
 // A3 (CHO) condition (src/cell/Handover.h) on the DUs' filtered reports —
 // the serving DU's own measurement against every other DU's heard one — and
@@ -225,6 +233,9 @@ int main() {
   const bool plan_on = envl("RAN_PLAN", 1, 0, 1) != 0;
   const int edge_dbm = static_cast<int>(envl("RAN_EDGE_DBM", -90, -127, 0));
   const uint64_t lead_sf = static_cast<uint64_t>(envl("RAN_LEAD_SF", 12, 2, 100000));
+  const bool retune_apply = envl("RAN_RETUNE_APPLY", 0, 0, 1) != 0;
+  const uint64_t cs_lead_sf = static_cast<uint64_t>(envl("RAN_CS_LEAD_SF", 20, 4, 100000));
+  const int cs_backoff_s = static_cast<int>(envl("RAN_CS_BACKOFF_S", 30, 1, 3600));
   const int plan_ms = static_cast<int>(envl("RAN_PLAN_MS", 1000, 50, 60000));
   const int secs = static_cast<int>(envl("RAN_SECS", 120, 1, 86400));
   const bool ho_on = envl("RAN_HO", 1, 0, 1) != 0;
@@ -358,6 +369,17 @@ int main() {
   };
   std::map<uint32_t, Cancel> cancels;
   uint32_t ho_last_id = 0;
+  /* A channel move in flight (RAN_RETUNE_APPLY): resent until staged, done
+   * when the DU reports the new channel at/after the instant. */
+  struct CsFlight {
+    f1::ChannelSwitchCmd cmd;
+    uint8_t from = 0;
+    bool staged = false;
+  };
+  std::optional<CsFlight> cs_flight;
+  uint32_t cs_last_id = 0;
+  /* A DU whose move was refused or timed out: not asked again before this. */
+  std::map<uint16_t, std::chrono::steady_clock::time_point> cs_hold;
   devourer::cell::UlStreams ul;
   /* Per stream: the newest seq delivered, its latest identity (labels only),
    * when it was last fed, and the seqs missing so far with the DU whose
@@ -681,6 +703,19 @@ int main() {
             }
           }
         } else if (ty == f1::Type::Ack) {
+          if (auto ca = f1::decode_ack(buf, static_cast<size_t>(n), mac);
+              ca && ca->kind == f1::AckKind::ChannelSwitch && cs_flight && ca->version == cs_flight->cmd.id &&
+              ca->du == cs_flight->cmd.du && ca->status != f1::AckStatus::Stale) {
+            const bool ok = ca->status == f1::AckStatus::Staged || ca->status == f1::AckStatus::Applied;
+            emit("{\"ev\":\"ran.cs_ack\",\"id\":" + std::to_string(ca->version) + ",\"du\":" +
+                 std::to_string(ca->du) + ",\"status\":\"" + f1::ack_status_name(ca->status) + "\"}");
+            if (ok) {
+              cs_flight->staged = true; /* Applied: done once its report shows the channel */
+            } else { /* refused, or not made: not asked again for RAN_CS_BACKOFF_S */
+              cs_hold[cs_flight->cmd.du] = std::chrono::steady_clock::now() + std::chrono::seconds(cs_backoff_s);
+              cs_flight.reset();
+            }
+          }
           if (auto a = f1::decode_ack(buf, static_cast<size_t>(n), mac);
               a && a->kind == f1::AckKind::Handover) {
             if (auto c = cancels.find(a->version);
@@ -1030,7 +1065,8 @@ int main() {
             forcing = true; /* done only once a command is in flight */
           }
           if (ho_exec && act) {
-            bool busy = flights.count(key) > 0;
+            bool busy = flights.count(key) > 0 ||
+                        (cs_flight && (cs_flight->cmd.du == *act || cs_flight->cmd.du == cell));
             for (const auto &fl : flights)
               busy = busy || fl.second.cmd.target == *act || fl.second.cmd.source == *act ||
                      fl.second.cmd.target == cell || fl.second.cmd.source == cell;
@@ -1359,6 +1395,26 @@ int main() {
       const uint64_t est = d.rep.net_sf + static_cast<uint64_t>(age_us / d.rep.period_us);
       net_now = std::max(net_now, est);
     }
+    /* A channel move in flight: resent until staged; done once the DU
+     * reports the new channel at or after the instant. */
+    if (cs_flight) {
+      const DuState &d = dus.at(cs_flight->cmd.du);
+      if (d.rep.channel == cs_flight->cmd.channel && d.rep.net_sf >= cs_flight->cmd.effective_net_sf) {
+        emit("{\"ev\":\"ran.cs_done\",\"id\":" + std::to_string(cs_flight->cmd.id) + ",\"du\":" +
+             std::to_string(cs_flight->cmd.du) + ",\"from\":" + std::to_string(cs_flight->from) + ",\"to\":" +
+             std::to_string(cs_flight->cmd.channel) + ",\"net_sf\":" + std::to_string(d.rep.net_sf) + "}");
+        cs_flight.reset();
+      } else if (net_now > cs_flight->cmd.effective_net_sf + 50) {
+        emit("{\"ev\":\"ran.cs_timeout\",\"id\":" + std::to_string(cs_flight->cmd.id) + "}");
+        cs_hold[cs_flight->cmd.du] = now + std::chrono::seconds(cs_backoff_s);
+        cs_flight.reset();
+      } else if (net_now + 2 < cs_flight->cmd.effective_net_sf) {
+        /* Resent until the instant, staged or not: a DU that restarted after
+         * staging lost the move, and re-stages it from this. */
+        cs_flight->cmd.seq = next_seq();
+        send(d, f1::encode_channel_switch(cs_flight->cmd, mac));
+      }
+    }
     const size_t before = devourer::cell::coord_conflicts(view);
     std::map<uint16_t, std::vector<CoordAssign>> target;
     devourer::cell::CoordPlan p;
@@ -1379,6 +1435,22 @@ int main() {
           last_adv = txt;
           fputs(txt.c_str(), stdout);
           fflush(stdout);
+        }
+        /* Applied (RAN_RETUNE_APPLY): one DU at a time, none in a handover. */
+        const bool held = !adv.retuned.empty() && cs_hold.count(adv.retuned.front()) &&
+                          now < cs_hold.at(adv.retuned.front());
+        if (retune_apply && !cs_flight && flights.empty() && !adv.retuned.empty() && !held) {
+          const uint16_t du = adv.retuned.front();
+          const DuState &d = dus.at(du);
+          CsFlight f;
+          cs_last_id = std::max(cs_last_id + 1, version_base);
+          f.cmd = {du, cs_last_id, adv.channel.at(du), net_now + cs_lead_sf, next_seq()};
+          f.from = d.rep.channel;
+          cs_flight = f;
+          send(d, f1::encode_channel_switch(f.cmd, mac));
+          emit("{\"ev\":\"ran.cs_cmd\",\"id\":" + std::to_string(f.cmd.id) + ",\"du\":" + std::to_string(du) +
+               ",\"from\":" + std::to_string(f.from) + ",\"to\":" + std::to_string(f.cmd.channel) +
+               ",\"effective_net_sf\":" + std::to_string(f.cmd.effective_net_sf) + "}");
         }
       }
     } else {

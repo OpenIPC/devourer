@@ -8,6 +8,7 @@
 #include <random>
 #include <vector>
 
+#include "cell/ChannelSwitch.h"
 #include "cell/Coord.h"
 #include "cell/F1.h"
 #include "cell/SlotGrid.h"
@@ -292,6 +293,42 @@ int main() {
     fresh.seq = ++seq; /* the CU itself, resending (new sequence) */
     CHECK(st.on_schedule(fresh, 170, 4100, ok) == f1::AckStatus::Staged);
     CHECK(st.cu_alive(4100));
+  }
+
+  /* A running cell's move to another channel (ChannelSwitch.h): the beacon
+   * IE, the UE's acceptance, the window, and the F1 command. */
+  {
+    const Mac k1 = fake_mac(11), k2 = fake_mac(22);
+    const CsIe cs{77, 2, 157, 5000};
+    auto ie = encode_cs_ie(cs, k1);
+    std::vector<uint8_t> bcn(36, 0);
+    bcn[0] = 0x80;
+    bcn.insert(bcn.end(), ie.begin(), ie.end());
+    CHECK(find_cs_ie(bcn.data(), bcn.size(), 2, k1) == cs);
+    CHECK(!find_cs_ie(bcn.data(), bcn.size(), 2, k2)); /* another cell's key */
+    CHECK(!find_cs_ie(bcn.data(), bcn.size(), 3, k1)); /* another cell */
+    auto t = bcn;
+    t[36 + 5 + 9] ^= 1; /* the channel byte: CRC and tag */
+    CHECK(!find_cs_ie(t.data(), t.size(), 2, k1));
+    CHECK(find_cs_ie(bcn.data(), bcn.size(), 2, {}) == cs); /* unkeyed cell */
+    CsReceiver rx;
+    CHECK(!rx.accept(cs, 5000)); /* its instant has come: spent */
+    CHECK(rx.accept(cs, 4990));
+    CHECK(!rx.accept(cs, 4991)); /* the same move again */
+    CHECK(!rx.accept(CsIe{76, 2, 36, 6000}, 4991)); /* an older id, replayed */
+    CHECK(rx.accept(CsIe{78, 2, 36, 6000}, 4992)); /* a later move */
+    /* The window: after the 20.5 ms span + 1 ms guard; 26 ms retune fits a
+     * 102.4 ms superframe; a span reaching 80 ms leaves no room. */
+    CHECK(cs_retune_at_us(20500, 26000, 1000, 102400) == 21500);
+    CHECK(!cs_retune_at_us(80000, 26000, 1000, 102400));
+    const f1::ChannelSwitchCmd cmd{2, 77, 157, 17523900000ull, 9};
+    auto m = f1::encode_channel_switch(cmd, k1);
+    CHECK(f1::peek_type(m.data(), m.size()) == f1::Type::ChannelSwitch);
+    CHECK(f1::decode_channel_switch(m.data(), m.size(), k1) == cmd);
+    CHECK(!f1::decode_channel_switch(m.data(), m.size(), k2));
+    auto ack = f1::encode_ack({2, f1::AckKind::ChannelSwitch, 77, f1::AckStatus::Staged, 17523899990ull}, k1);
+    auto da = f1::decode_ack(ack.data(), ack.size(), k1);
+    CHECK(da && da->kind == f1::AckKind::ChannelSwitch && da->version == 77);
   }
 
   if (failures == 0)

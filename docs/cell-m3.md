@@ -68,10 +68,25 @@ joiner is hot-plugged on a third box, and a fourth radio joins with the
   contention slot can budget the p99.9 guard, but not that tail. Keep the
   RACH slot away from the next beacon.
 
-## Not in M3 (yet)
+## Departure
+
+A JOINED UE whose uplink has been silent for `CELL_RELEASE_SF` (50)
+superframes gives its position back (`cell.release`); the next grant map no
+longer carries it. Static UEs (`CELL_UES`) are never released.
+
+**Rig** (testrig `scripts/m3_cell_rach.sh --leave-at`, the joiner killed
+40 s after it joined; `results/2026-11-12-m3-departure.txt`):
+- the DU released the joiner 51 superframes after its last uplink and
+  granted it no more;
+- UE1 stayed in its slot, 434/434 after the release; the witness saw 0
+  overlaps.
+
+## Not in M3
 
 - **The full 802.11 association** (probe / auth / assoc / WPA2 4-way, as in
-  `tests/ap_wpa2.cpp`) is not run. The join is authenticated with the cell
-  PSK instead.
-- **Departure** (releasing a silent UE's position) is not done. The registry
-  supports `release`; deciding when to call it is open.
+  `tests/ap_wpa2.cpp`) is descoped (#257). The join is authenticated with
+  the cell PSK, and nothing is allocated before the tag and freshness check
+  passes.
+- **On-air contention** with several joiners at once, and the pool-full
+  denial, are tested headless only (`tests/cell_m3_selftest.cpp`); the rig
+  ran one joiner at a time.

@@ -1660,6 +1660,37 @@ a standing difference defaults it to the medians of its passing runs:
 **Result:** on the changed rig every M6 suite passes again: handover,
 measgap, three_ho, daps, daps_dl, daps_xch, crossing3, crossing.
 
+## The 802.11 roam baseline
+
+The M6 issue measured the handover "vs the ~100 ms roam ghost bar", but no
+roam had been measured. testrig `scripts/m6_roam_baseline.sh` measures an
+ordinary roam on the same radios as the M6 handover, through the in-kernel
+Linux stack:
+- **The setup:** rtw89 (the radios moved off vfio for the run), two hostapd
+  APs with one SSID (WPA2-PSK), and a wpa_supplicant client with background
+  scan off.
+- **The roams:** forced, with `wpa_cli roam BSSID`, back and forth, 10 per
+  run.
+- **The KPI:** the M6 one, the DL gap across the switch with a datagram every
+  100 ms from each AP host, on the client's clock.
+
+| channels (AP1/AP2), 10 roams each | DL gap per roam (ms) | on returning to the first AP |
+|---|---|---|
+| 149 / 157 | 379–598 | 5600–5838 |
+| 157 / 149 | 435–663 | 5729–5804 |
+| 149 / 149 | 415–542 | 5671–5865 |
+
+- **An ordinary roam costs 0.38–0.66 s of DL here** (3–6 PDUs): about 250 ms
+  for the supplicant's authentication, association and four-way handshake,
+  then the data path. The M6 switch costs 84–123 ms on the same radios, with
+  no scan, no re-association and no clock re-acquisition.
+- **Returning to the AP the client joined first took 5.6–5.9 s, every
+  time.** That AP logs its authentication response three times as not
+  acknowledged, and the supplicant gets in on a retry ~5 s later. It follows
+  the first AP, not a channel or a box. The cause is not established. It is
+  a property of this stack on these radios, reported as measured, not a
+  general Wi-Fi figure.
+
 ## The rig suite (where the M6 tests live)
 
 The M6 issue asked for a `tests/ran_handover.sh`. The handover tests are

@@ -36,6 +36,17 @@
 //                             its UEs (F1 ChannelSwitch, ChannelSwitch.h)
 //   RAN_HO_TA [1]             carry the UE's TA at its source in the handover
 //                             command (the target's TA loop starts there)
+//   RAN_CHO [0]               1 = conditional handover (HoCommand.h): the A3
+//                             (or RAN_HO_FORCE) PREPARES the move, the UE
+//                             makes it — when its serving beacons have been
+//                             absent RAN_CHO_LOST_SF [4] superframes, or its
+//                             own measurement of the target has led the
+//                             serving cell's by RAN_CHO_MARGIN_DB [3] for
+//                             RAN_CHO_TTT_MS [640]. The preparation lapses
+//                             RAN_CHO_WINDOW_SF [300] superframes after the
+//                             command; the target grants the UE from the
+//                             command on. Set the A3 offset below the margin
+//                             to prepare before the move is due.
 //   RAN_CS_LEAD_SF [20]       a move's instant, this many superframes ahead
 //   RAN_CS_BACKOFF_S [30]     a DU whose move was refused or timed out is not
 //                             asked again before this
@@ -240,6 +251,11 @@ int main() {
   const uint64_t lead_sf = static_cast<uint64_t>(envl("RAN_LEAD_SF", 12, 2, 100000));
   const bool retune_apply = envl("RAN_RETUNE_APPLY", 0, 0, 1) != 0;
   const bool ho_ta = envl("RAN_HO_TA", 1, 0, 1) != 0; /* carry the source's TA in a handover */
+  const bool cho = envl("RAN_CHO", 0, 0, 1) != 0;
+  const uint8_t cho_lost_sf = static_cast<uint8_t>(envl("RAN_CHO_LOST_SF", 4, 1, 255));
+  const int8_t cho_margin_db = static_cast<int8_t>(envl("RAN_CHO_MARGIN_DB", 3, -30, 30));
+  const uint16_t cho_ttt_ms = static_cast<uint16_t>(envl("RAN_CHO_TTT_MS", 640, 0, 60000));
+  const uint64_t cho_window_sf = static_cast<uint64_t>(envl("RAN_CHO_WINDOW_SF", 300, 24, 100000));
   const uint64_t cs_lead_sf = static_cast<uint64_t>(envl("RAN_CS_LEAD_SF", 20, 4, 100000));
   const int cs_backoff_s = static_cast<int>(envl("RAN_CS_BACKOFF_S", 30, 1, 3600));
   const int plan_ms = static_cast<int>(envl("RAN_PLAN_MS", 1000, 50, 60000));
@@ -341,6 +357,9 @@ int main() {
   struct HoFlight {
     devourer::cell::HoCommand cmd;
     bool src_ok = false, tgt_ok = false, switched = false;
+    /* When the command was issued: only a target measurement sampled after
+     * it is the UE (an id's previous holder may still have a live one). */
+    std::chrono::steady_clock::time_point at = std::chrono::steady_clock::now();
   };
   std::map<std::pair<uint16_t, uint16_t>, HoFlight> flights;
   /* The per-cell security context (src/cell/Keys.h): with RAN_MASTER_KEY the
@@ -1121,8 +1140,15 @@ int main() {
                 cmd.target_channel = tr.channel; /* != the source's: inter-frequency */
                 const double age_us =
                     std::chrono::duration<double, std::micro>(now - dit->second.at).count();
+                /* Conditional: the instant is the expiry; the UE moves on its
+                 * own condition before it. */
                 cmd.effective_net_sf =
-                    sr.net_sf + static_cast<uint64_t>(age_us / sr.period_us) + ho_lead_sf;
+                    sr.net_sf + static_cast<uint64_t>(age_us / sr.period_us) + (cho ? cho_window_sf : ho_lead_sf);
+                if (cho) {
+                  cmd.cond_lost_sf = cho_lost_sf;
+                  cmd.cond_margin_db = cho_margin_db;
+                  cmd.cond_ttt_ms = cho_ttt_ms;
+                }
                 cmd.tsf_delta_us = devourer::cell::ho_tsf_delta_us(sr.phase_us, sr.net_off, tr.phase_us,
                                                                    tr.net_off, sr.period_us);
                 std::optional<devourer::cell::HomeId> home;
@@ -1178,10 +1204,11 @@ int main() {
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
                          "\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,\"delta_us\":%lld,"
-                         "\"ctx\":%d,\"home\":\"%s\",\"ta_us\":%d}",
+                         "\"ctx\":%d,\"home\":\"%s\",\"ta_us\":%d,\"cond\":%d}",
                          cmd.id, cmd.ue, cmd.source, cmd.target, cmd.target_ue, cmd.target_pos,
                          (unsigned long long)cmd.effective_net_sf, (long long)cmd.tsf_delta_us,
-                         ctx_ok ? 1 : 0, home ? home_name(*home).c_str() : "none", cmd.ta_us);
+                         ctx_ok ? 1 : 0, home ? home_name(*home).c_str() : "none", cmd.ta_us,
+                         cmd.conditional() ? 1 : 0);
                 emit(b);
               }
             }
@@ -1214,8 +1241,11 @@ int main() {
             tit->second.rep.net_sf + static_cast<uint64_t>(age_us / tit->second.rep.period_us);
         bool there = false;
         for (const f1::UeMeas &q : tit->second.rep.meas)
-          there = there || (q.ue == fl.cmd.target_ue && live(tit->second, q.age_ms));
-        if (there && tnet >= fl.cmd.effective_net_sf) {
+          there = there || (q.ue == fl.cmd.target_ue && live(tit->second, q.age_ms) &&
+                            tit->second.at - std::chrono::milliseconds(q.age_ms) > fl.at);
+        /* A conditional move happens whenever the UE decides (before the
+         * expiry): the target hearing it is the move. */
+        if (there && (fl.cmd.conditional() || tnet >= fl.cmd.effective_net_sf)) {
           char b[220];
           snprintf(b, sizeof b,
                    "{\"ev\":\"ran.ho_done\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"

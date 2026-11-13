@@ -21,6 +21,7 @@
  * The beacon IE (vendor 221, kGrantOui), little-endian:
  *   'H' 'O' ver(1)=2 id(4) cell(2) ue(2) target(2) target_ue(2)
  *   dl_slot(1) ul_slot(1) channel(1) effective_sf(8) tsf_delta(8, signed)
+ *   ctx(24) cond_lost_sf(1) cond_margin_db(1, signed) cond_ttt_ms(2)
  *   crc16(2) tag(8)
  * `channel` is the target's: when it differs from the source's the UE
  * retunes at the switch (inter-frequency; the TSF delta holds regardless,
@@ -29,6 +30,15 @@
  * runs). The CRC detects a torn body; the tag (the cell key's HMAC, as the
  * other scheduling frames, label 'H') makes a forged handover inert. An
  * unkeyed cell writes and ignores a zero tag (development).
+ *
+ * Conditional (v4, `cond_lost_sf` > 0): the CU prepares the handover
+ * before it is needed and the UE decides when. `effective_sf` is then the
+ * EXPIRY. The UE switches at the first superframe in which it has heard no
+ * serving beacon for `cond_lost_sf` superframes (its source is gone), or in
+ * which its own measurement of the target has led the serving cell's by
+ * `cond_margin_db` for `cond_ttt_ms`. The target's grant is in force from
+ * the preparation, so the UE is granted wherever it lands. Neither by the
+ * expiry: the UE stays and the preparation lapses (ChoCondition below).
  *
  * Replay: the tag stops forgery, not replay. HoReceiver (the UE side) acts
  * on an IE only if its id is above every one it accepted and its instant
@@ -54,7 +64,8 @@ namespace devourer::cell {
 
 /* 2: the target's channel (inter-frequency handover, the UE retunes). */
 /* v3: the per-cell security context (src/cell/Keys.h) rides the IE. */
-constexpr uint8_t kHoIeVersion = 3;
+/* v4: the conditional handover (cond_lost_sf, cond_margin_db, cond_ttt_ms). */
+constexpr uint8_t kHoIeVersion = 4;
 constexpr size_t kHoTagLen = 8;
 
 /* target TSF - source TSF, at any instant (see the header). */
@@ -87,6 +98,13 @@ struct HoCommand {
    * corrects the UE's clock and actuation phase, which do not change with
    * the cell. */
   int16_t ta_us = 0;
+  /* Conditional (F1 v18; 0 = an ordinary command): effective_net_sf is the
+   * expiry, and the UE switches on its own condition before it (the IE
+   * header). The target publishes the UE's grant at once. */
+  uint8_t cond_lost_sf = 0;  /* serving beacons absent this many superframes */
+  int8_t cond_margin_db = 0; /* the target's lead over the serving cell, at the UE */
+  uint16_t cond_ttt_ms = 0;  /* held this long */
+  bool conditional() const { return cond_lost_sf != 0; }
   bool operator==(const HoCommand &) const = default;
 };
 
@@ -101,6 +119,10 @@ struct HoIe {
   uint64_t effective_sf = 0;        /* in the source cell's count */
   int64_t tsf_delta_us = 0;
   std::array<uint8_t, 24> ctx{};    /* HoCommand::ctx, relayed */
+  uint8_t cond_lost_sf = 0;         /* HoCommand's conditional fields, relayed */
+  int8_t cond_margin_db = 0;
+  uint16_t cond_ttt_ms = 0;
+  bool conditional() const { return cond_lost_sf != 0; }
   bool operator==(const HoIe &) const = default;
 };
 
@@ -115,7 +137,7 @@ inline uint64_t get(const uint8_t *p, int n) {
     v |= static_cast<uint64_t>(p[i]) << (8 * i);
   return v;
 }
-constexpr size_t kBodyLen = 2 + 1 + 4 + 2 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8 + 24; /* 'H' 'O' .. ctx */
+constexpr size_t kBodyLen = 2 + 1 + 4 + 2 + 2 + 2 + 2 + 1 + 1 + 1 + 8 + 8 + 24 + 1 + 1 + 2; /* 'H' 'O' .. cond */
 inline bool tag(const Mac &mac, const uint8_t *body, size_t n, uint8_t out[kHoTagLen]) {
   if (!mac) {
     std::memset(out, 0, kHoTagLen);
@@ -146,6 +168,9 @@ inline std::vector<uint8_t> encode_ho_ie(const HoIe &h, const Mac &mac) {
   put(b, h.effective_sf, 8);
   put(b, static_cast<uint64_t>(h.tsf_delta_us), 8);
   b.insert(b.end(), h.ctx.begin(), h.ctx.end());
+  b.push_back(h.cond_lost_sf);
+  b.push_back(static_cast<uint8_t>(h.cond_margin_db));
+  put(b, h.cond_ttt_ms, 2);
   put(b, detail::crc16_ccitt(b.data(), b.size()), 2);
   uint8_t t[kHoTagLen];
   if (!tag(mac, b.data(), b.size(), t))
@@ -188,6 +213,9 @@ inline std::optional<HoIe> decode_ho_body(const uint8_t *b, size_t n, const Mac 
   h.effective_sf = get(b + 18, 8);
   h.tsf_delta_us = static_cast<int64_t>(get(b + 26, 8));
   std::copy(b + 34, b + 58, h.ctx.begin());
+  h.cond_lost_sf = b[58];
+  h.cond_margin_db = static_cast<int8_t>(b[59]);
+  h.cond_ttt_ms = static_cast<uint16_t>(get(b + 60, 2));
   return h;
 }
 
@@ -237,6 +265,62 @@ private:
   bool have_ = false;
   uint32_t last_id_ = 0;
 };
+
+/* The UE's side of a conditional handover: when to switch. Fed each pass
+ * with the UE's source superframe, the superframe of the last serving beacon
+ * it heard (its own timestamp; -1 = none yet), whether the serving map in
+ * force still grants it, and its own filtered levels of the serving and
+ * target cells — the target's only while freshly measured (absent = nullopt:
+ * never a lead). In order: at or past the expiry it has lapsed, whatever
+ * else holds; the source silent `lost_sf` superframes, or no longer granting
+ * the UE (it released it), is SourceLost; the target ahead by `margin_db`
+ * for `ttt_ms` (continuously: a pass without the lead restarts the hold) is
+ * TargetBetter. */
+class ChoCondition {
+public:
+  enum class Why { None, Expired, SourceLost, TargetBetter };
+  explicit ChoCondition(const HoIe &h)
+      : expiry_sf_(static_cast<int64_t>(h.effective_sf)), lost_sf_(h.cond_lost_sf), margin_(h.cond_margin_db),
+        ttt_ms_(h.cond_ttt_ms) {}
+  Why update(int64_t sf, int64_t last_serving_sf, bool serving_grants, std::optional<double> serving_dbm,
+             std::optional<double> target_dbm, int64_t now_ms) {
+    if (sf >= expiry_sf_)
+      return Why::Expired;
+    if (!serving_grants || (lost_sf_ > 0 && last_serving_sf >= 0 && sf - last_serving_sf >= lost_sf_))
+      return Why::SourceLost;
+    if (serving_dbm && target_dbm && *target_dbm - *serving_dbm >= margin_) {
+      if (since_ms_ < 0)
+        since_ms_ = now_ms;
+      if (now_ms - since_ms_ >= ttt_ms_)
+        return Why::TargetBetter;
+    } else {
+      since_ms_ = -1;
+    }
+    return Why::None;
+  }
+  /* How long the target has led, so far (ms; -1 = not leading). */
+  int64_t held_ms(int64_t now_ms) const { return since_ms_ < 0 ? -1 : now_ms - since_ms_; }
+
+private:
+  int64_t expiry_sf_;
+  int64_t lost_sf_;
+  int margin_;
+  int64_t ttt_ms_;
+  int64_t since_ms_ = -1;
+};
+
+inline const char *cho_why_name(ChoCondition::Why w) {
+  switch (w) {
+  case ChoCondition::Why::SourceLost:
+    return "source_lost";
+  case ChoCondition::Why::TargetBetter:
+    return "target_better";
+  case ChoCondition::Why::Expired:
+    return "expired";
+  default:
+    return "none";
+  }
+}
 
 } /* namespace devourer::cell */
 

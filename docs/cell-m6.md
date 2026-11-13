@@ -1660,6 +1660,62 @@ a standing difference defaults it to the medians of its passing runs:
 **Result:** on the changed rig every M6 suite passes again: handover,
 measgap, three_ho, daps, daps_dl, daps_xch, crossing3, crossing.
 
+## The 802.11 roam baseline
+
+The M6 issue measured the handover "vs the ~100 ms roam ghost bar", but no
+roam had been measured. testrig `scripts/m6_roam_baseline.sh` measures an
+ordinary roam on the same radios as the M6 handover, through the in-kernel
+Linux stack:
+- **The setup:** rtw89 (the radios moved off vfio for the run), two hostapd
+  APs with one SSID (WPA2-PSK), and a wpa_supplicant client with background
+  scan off.
+- **The roams:** forced, with `wpa_cli roam BSSID`, back and forth, 10 per
+  run.
+- **The KPI:** the M6 one, the DL gap across the switch with a datagram every
+  100 ms from each AP host, on the client's clock.
+
+| channels (AP1/AP2), 10 roams each | DL gap per roam (ms) | on returning to the first AP |
+|---|---|---|
+| 149 / 157 | 379–598 | 5600–5838 |
+| 157 / 149 | 435–663 | 5729–5804 |
+| 149 / 149 | 415–542 | 5671–5865 |
+
+- **An ordinary roam costs 0.38–0.66 s of DL here** (3–6 PDUs). Of that,
+  the supplicant log shows 0.32–0.45 s from its first authentication attempt
+  to connected (authentication, association, four-way handshake). The M6 switch costs 84–123 ms on the same radios, with
+  no scan, no re-association and no clock re-acquisition.
+- **Returning to the AP the client joined first took 5.6–5.9 s, every
+  time.** That AP logs its authentication response three times as not
+  acknowledged, and the supplicant gets in on a retry ~5 s later. It follows
+  the first AP, not a channel or a box. The cause is not established. It is
+  a property of this stack on these radios, reported as measured, not a
+  general Wi-Fi figure.
+
+## The rig suite (where the M6 tests live)
+
+The M6 issue asked for a `tests/ran_handover.sh`. The handover tests are
+the testrig repository's scripts instead: they need the rig (three PTP-locked
+J6412s and the CU host). testrig consumes devourer (its `tests/` and
+`build/`), never the other way round, so devourer holds only the headless
+part (ctest `cell_m6`). Each script asserts its own pass criteria, prints
+`{"ev": "...verdict", "pass": ...}`, and runs on `m5_ran_coord.sh`
+(`M5_MEAS_LEVELS`: the placement-independent levels, see above).
+
+| testrig script | what it asserts |
+|---|---|
+| `m6_handover.sh` | A3-triggered handover, and the fallback when the target DU dies after staging |
+| `m6_measgap.sh` | inter-frequency handover on the UE's own gap measurements |
+| `m6_suspend.sh` | suspend gaps, for directions no idle window reaches |
+| `m6_phaseplan.sh` | the CU's phase planning for a joining cell |
+| `m6_three_cells.sh`, `m6_three_ho.sh` | three cells on three channels, and handover among them |
+| `m6_crossing.sh`, `m6_crossing3.sh` | an emulated crossing (TX ramps), two and three cells |
+| `m6_daps.sh`, `m6_daps_dl.sh`, `m6_daps_xch.sh` | DAPS UL and DL, same channel and across channels, with the source killed |
+| `m6_cellkeys.sh`, `m6_joinerkeys.sh`, `m6_ueareakeys.sh`, `m6_gmauth.sh` | per-cell keys, a joiner's keys, area credentials, grant-map authentication |
+| `m6_nlsign.sh`, `m6_replay.sh` | signed neighbour lists and their replay |
+| `m6_rejoin.sh`, `m6_fitstep.sh` | a joiner across its DU's restart, the UE's clock fit across a TSF jump |
+
+Results are in testrig's `results/` (dated, small text).
+
 ## Bugs the rig found
 
 **A DU with no UE did not pace its main loop.** Its superframe count ran away

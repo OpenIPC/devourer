@@ -278,6 +278,33 @@ int main() {
     CHECK(d && d->meas == r.meas && d->heard == r.heard);
   }
 
+  /* --- F1 v16: EVM, filtered, from the frames that carry one; "none" when
+   * none did, in both directions of the report. --- */
+  {
+    MeasTable t({4, 2000});
+    for (int i = 0; i < 20; ++i) {
+      t.update(2, 1, -55, 30, i * 100, -31.0);            /* own UE: EVM -31 dB */
+      t.update(1, 1, -72, 12, i * 100, i % 2 ? std::optional<double>(-18.0) : std::nullopt);
+      t.update(3, 2, -80, 8, i * 100);                    /* heard, no EVM ever */
+    }
+    f1::Report r;
+    r.du = 2;
+    f1::fill_report_measurements(r, 2, t.snapshot(1900));
+    CHECK(r.meas.size() == 1 && r.meas[0].evm_qdb == -124);
+    const f1::HeardUe *h1 = nullptr, *h3 = nullptr;
+    for (const auto &h : r.heard)
+      (h.cell == 1 ? h1 : h3) = &h;
+    CHECK(h1 && h1->evm_db == -18 && h3 && h3->evm_db == f1::kNoEvm8);
+    const auto w = f1::encode_report(r, {});
+    auto d = f1::decode_report(w.data(), w.size(), {});
+    CHECK(d && d->meas == r.meas && d->heard == r.heard);
+    /* a real EVM never encodes as "none": heard (8-bit dB) clamps at -127 */
+    MeasTable u({4, 2000});
+    u.update(5, 1, -55, 30, 0, -200.0);
+    f1::fill_report_measurements(r, 2, u.snapshot(0));
+    CHECK(r.heard.size() == 1 && r.heard[0].evm_db == f1::kNoEvm8 + 1);
+  }
+
   /* --- F1 v2: the measurement fields round-trip. --- */
   {
     f1::Report r;

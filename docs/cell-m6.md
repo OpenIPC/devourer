@@ -8,8 +8,8 @@ is no scan, no clock re-acquisition and no association exchange.
 
 | piece | where | what |
 |---|---|---|
-| filtered measurements | `src/cell/Handover.h` `L3Filter`, `MeasTable` | 3GPP L3 filter per (cell, UE) over uplink RSSI/SNR. Stale = absent, never weak. |
-| measurement reports | F1 `Report.meas` / `heard` | each DU's own UEs and the other cells' UEs it hears, with sample ages |
+| filtered measurements | `src/cell/Handover.h` `L3Filter`, `MeasTable` | 3GPP L3 filter per (cell, UE) over uplink RSSI/SNR, and EVM from the frames that carry one. Stale = absent, never weak. |
+| measurement reports | F1 `Report.meas` / `heard` | each DU's own UEs and the other cells' UEs it hears, with sample ages; EVM since F1 v16 (none = a sentinel) |
 | A3 (CHO) condition | `Handover.h` `A3Trigger`; `tools/ran-controller` | offset, hysteresis, per-neighbour time-to-trigger, dwell |
 | the command | `src/cell/HoCommand.h` `HoCommand`, F1 `Type::Handover` | UE, target id and position, switch instant, TSF delta |
 | the UE's copy | `HoIe` in the source DU's beacon | CRC and cell-key tag (forgery is inert); `HoReceiver` rejects a replay |
@@ -1741,4 +1741,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   unauthenticated development cell. Their tags were zeros and were not
   checked; F1 was keyed throughout. The testrig scripts now give every cell
   role one key. The suite re-run keyed is in the next section.
-- **EVM:** not in the measurement reports.
+- **EVM is reported, not used by the A3** (F1 v16; the CU logs it last in
+  each `ran.meas` tuple). The A3 compares cells: a neighbour's margin over
+  the serving cell, on RSSI or SNR, which both DUs measure on the same
+  frames. EVM tracks SNR at moderate levels and saturates at high SNR (the
+  rig's uplinks sit at −30 to −33 dB EVM with SNR 38–39 dB), so it adds no
+  ranking between cells there. It is per-link quality for the scheduler
+  and link adaptation, not a handover metric.

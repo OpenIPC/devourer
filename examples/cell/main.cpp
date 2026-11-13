@@ -1544,6 +1544,13 @@ int run_du(IRadio *dev, const Cfg &c) {
     send_f1(devourer::cell::f1::encode_uplink(u, f1_mac));
   };
   const int64_t ho_release_sf = envl("CELL_HO_RELEASE_SF", 20, 3, 100000);
+  /* A frame's EVM (dB, negative), if the radio measured one (raw: dB*2, 0 =
+   * none; the same convention as UeRxAttribution). */
+  auto frame_evm_db = [](const Packet &pk) -> std::optional<double> {
+    if (pk.RxAtrib.evm[0] == 0)
+      return std::nullopt;
+    return static_cast<double>(pk.RxAtrib.evm[0]) / 2.0;
+  };
   auto now_ms = [] {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -1633,7 +1640,8 @@ int run_du(IRadio *dev, const Cfg &c) {
             if (auto ai = arrival_of.find({oc, ou}); ai != arrival_of.end())
               arrival = ai->second;
             meas_tab.update(oc, ou, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
-                            static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+                            static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms(),
+                            frame_evm_db(p));
             fwd = daps_on && daps_ids.count({oc, ou}) > 0;
           }
           if (arrival && ob->dl) {
@@ -1705,7 +1713,8 @@ int run_du(IRadio *dev, const Cfg &c) {
         {
           std::lock_guard<std::mutex> lk(f1_mu);
           meas_tab.update(c.cell, ub->ue, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
-                          static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms());
+                          static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, now_ms(),
+                          frame_evm_db(p));
         }
         forward_ul(c.cell, ub->ue, p); /* the serving path: always (F1 on) */
         if (auto mr = devourer::cell::find_mr_ie(p.Data.data(), p.Data.size(), c.cell, ub->ue, auth)) {

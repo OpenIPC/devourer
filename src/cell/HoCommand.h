@@ -82,6 +82,11 @@ struct HoCommand {
   /* The UE's home identity (Keys.h): the target records it for the id it
    * gives the UE and reports it on, for the UE's next handover. */
   HomeId home{};
+  /* The UE's timing advance at the source (us; F1 v17): the target starts
+   * its TA loop and the UE's first grant there, instead of at 0. The TA
+   * corrects the UE's clock and actuation phase, which do not change with
+   * the cell. */
+  int16_t ta_us = 0;
   bool operator==(const HoCommand &) const = default;
 };
 

@@ -9,7 +9,7 @@ is no scan, no clock re-acquisition and no association exchange.
 | piece | where | what |
 |---|---|---|
 | filtered measurements | `src/cell/Handover.h` `L3Filter`, `MeasTable` | 3GPP L3 filter per (cell, UE) over uplink RSSI/SNR, and EVM from the frames that carry one. Stale = absent, never weak. |
-| measurement reports | F1 `Report.meas` / `heard` | each DU's own UEs and the other cells' UEs it hears, with sample ages; EVM since F1 v16 (none = a sentinel) |
+| measurement reports | F1 `Report.meas` / `heard` | each DU's own UEs and the other cells' UEs it hears, with sample ages; EVM since F1 v16 (none = a sentinel); each own UE's TA since v17 |
 | A3 (CHO) condition | `Handover.h` `A3Trigger`; `tools/ran-controller` | offset, hysteresis, per-neighbour time-to-trigger, dwell |
 | the command | `src/cell/HoCommand.h` `HoCommand`, F1 `Type::Handover` | UE, target id and position, switch instant, TSF delta |
 | the UE's copy | `HoIe` in the source DU's beacon | CRC and cell-key tag (forgery is inert); `HoReceiver` rejects a replay |
@@ -120,10 +120,10 @@ The first runs, single, measured with testrig `scripts/m5_ran_coord.sh` plus
 | source | released the UE at switch + 21 | kept the UE (still heard as its own): 1092 / 1092 uplinks in slot after the switch |
 | CU | `ran.ho_done` 5 superframes after the instant | `ran.ho_timeout` |
 
-- **Timing advance:** the target's TA loop starts from 0 for the new UE.
+- **Timing advance:** the target's TA loop started from 0 for the new UE.
   The first arrivals at the target sat about −418 µs from the UL target, the
-  same offset the source's TA had converged to. Carrying the TA in the
-  command is a possible refinement.
+  same offset the source's TA had converged to. The command now carries the
+  TA (F1 v17, see "The timing advance in the handover command").
 - **The UE's uplink in the fault case:** while no target map is in force,
   the UE does not rebuild its uplink beacon. Its uplink never left the
   source, which is part of why the fallback is seamless.
@@ -1659,6 +1659,42 @@ a standing difference defaults it to the medians of its passing runs:
 
 **Result:** on the changed rig every M6 suite passes again: handover,
 measgap, three_ho, daps, daps_dl, daps_xch, crossing3, crossing.
+
+## The timing advance in the handover command
+
+The UEs on this rig run a TA of about −420 µs: their inherent actuation
+offset, the same at every cell. A target whose TA loop starts from 0 sees
+the arriving UE that far off and halves it every 2 s (`CELL_TA_EVERY_S`,
+gain 0.5). Since F1 v17 the CU carries the TA instead:
+- each DU reports its own UEs' TA in `UeMeas.ta_us`: the TA of each UE's
+  grant in the map on air, taken when a map goes on air (a failed publish,
+  a released ID or a pending loop step never reaches the report);
+- the CU puts the source's value in `HoCommand.ta_us` (`RAN_HO_TA`, on by
+  default; `ran.ho_cmd` logs it);
+- the target starts the arriving UE's TA loop and its first grant there at
+  it (`cell.ho.ta_carried`). The UE's first uplink on the target's grant is
+  already advanced.
+
+Rig, testrig `scripts/m6_ho_ta.sh`: UE1 cell 1 → 2, forced at 70 s once the
+source's TA had converged, three interleaved A/B rounds, measured at the
+target on the arriving UE's in-slot uplinks:
+
+| | TA carried (µs) | arrival error, first 40 uplinks (median, µs) | uplinks until within 50 µs |
+|---|---|---|---|
+| `RAN_HO_TA=1` | −426, −426, −425 | −2, −1, −1 | 0, 0, 0 |
+| `RAN_HO_TA=0` | 0 | −427, −428.5, −425.5 | 98, 84, 79 |
+
+- **Slot hits do not change on this layout:** 38–39 of the first 40
+  uplinks are in slot either way, since 427 µs still lands in the UL slot
+  (the misses are single stale-phase beacons). What the carried TA buys is
+  the guard margin from the first frame. It decides slot hits only where
+  the UL slot and guard are tighter than the UE's offset.
+- **The carried value is only as good as the source's loop.** With the A3
+  on the pinned levels, the handover fired ~4 s after the attach. The
+  command carried −207 to −211 µs (one TA step) or 0 (before the first),
+  and the target's first arrivals were −210 or −420 µs: the value is
+  applied exactly, but a UE handed over soon after attaching carries a
+  half-converged TA.
 
 ## The 802.11 roam baseline
 

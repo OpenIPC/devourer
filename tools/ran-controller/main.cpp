@@ -34,6 +34,8 @@
 //   RAN_SPARE_CHANNELS        channels the planner may propose (advisory)
 //   RAN_RETUNE_APPLY [0]      1: apply a proposal — move that running DU and
 //                             its UEs (F1 ChannelSwitch, ChannelSwitch.h)
+//   RAN_HO_TA [1]             carry the UE's TA at its source in the handover
+//                             command (the target's TA loop starts there)
 //   RAN_CS_LEAD_SF [20]       a move's instant, this many superframes ahead
 //   RAN_CS_BACKOFF_S [30]     a DU whose move was refused or timed out is not
 //                             asked again before this
@@ -237,6 +239,7 @@ int main() {
   const int edge_dbm = static_cast<int>(envl("RAN_EDGE_DBM", -90, -127, 0));
   const uint64_t lead_sf = static_cast<uint64_t>(envl("RAN_LEAD_SF", 12, 2, 100000));
   const bool retune_apply = envl("RAN_RETUNE_APPLY", 0, 0, 1) != 0;
+  const bool ho_ta = envl("RAN_HO_TA", 1, 0, 1) != 0; /* carry the source's TA in a handover */
   const uint64_t cs_lead_sf = static_cast<uint64_t>(envl("RAN_CS_LEAD_SF", 20, 4, 100000));
   const int cs_backoff_s = static_cast<int>(envl("RAN_CS_BACKOFF_S", 30, 1, 3600));
   const int plan_ms = static_cast<int>(envl("RAN_PLAN_MS", 1000, 50, 60000));
@@ -1110,6 +1113,11 @@ int main() {
                 cmd.target = *act;
                 cmd.target_ue = tue;
                 cmd.target_pos = tpos;
+                /* The UE's TA at the source (its report): the target starts there. */
+                if (ho_ta)
+                  for (const f1::UeMeas &m : sr.meas)
+                    if (m.ue == q.ue)
+                      cmd.ta_us = m.ta_us;
                 cmd.target_channel = tr.channel; /* != the source's: inter-frequency */
                 const double age_us =
                     std::chrono::duration<double, std::micro>(now - dit->second.at).count();
@@ -1170,10 +1178,10 @@ int main() {
                 snprintf(b, sizeof b,
                          "{\"ev\":\"ran.ho_cmd\",\"id\":%u,\"ue\":%u,\"from\":%u,\"to\":%u,"
                          "\"target_ue\":%u,\"pos\":%u,\"effective_net_sf\":%llu,\"delta_us\":%lld,"
-                         "\"ctx\":%d,\"home\":\"%s\"}",
+                         "\"ctx\":%d,\"home\":\"%s\",\"ta_us\":%d}",
                          cmd.id, cmd.ue, cmd.source, cmd.target, cmd.target_ue, cmd.target_pos,
                          (unsigned long long)cmd.effective_net_sf, (long long)cmd.tsf_delta_us,
-                         ctx_ok ? 1 : 0, home ? home_name(*home).c_str() : "none");
+                         ctx_ok ? 1 : 0, home ? home_name(*home).c_str() : "none", cmd.ta_us);
                 emit(b);
               }
             }

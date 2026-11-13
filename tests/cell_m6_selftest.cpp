@@ -305,6 +305,16 @@ int main() {
     CHECK(r.heard.size() == 1 && r.heard[0].evm_db == f1::kNoEvm8 + 1);
   }
 
+  /* --- F1 v17: the DU's TA per own UE round-trips in its report. --- */
+  {
+    f1::Report r;
+    r.du = 1;
+    r.meas = {{1, -200, 120, 0, -124, -431}, {2, -220, 100, 5, f1::kNoEvmQ, 37}};
+    const auto w = f1::encode_report(r, {});
+    auto d = f1::decode_report(w.data(), w.size(), {});
+    CHECK(d && d->meas == r.meas && d->meas[0].ta_us == -431 && d->meas[1].ta_us == 37);
+  }
+
   /* --- F1 v2: the measurement fields round-trip. --- */
   {
     f1::Report r;
@@ -850,11 +860,12 @@ int main() {
     HoCommand hc;
     hc.id = 9;
     hc.home = HomeId{true, 0, 0, jm};
+    hc.ta_us = -428; /* v17: the source's TA travels with the UE */
     const auto wh = f1::encode_handover(2, hc, fake_mac(0xF1));
     auto dh = f1::decode_handover(wh.data(), wh.size(), fake_mac(0xF1));
-    CHECK(dh && dh->second.home == hc.home);
+    CHECK(dh && dh->second.home == hc.home && dh->second.ta_us == -428);
     auto badk = wh;
-    badk[badk.size() - 8 - 7] = 2; /* home kind 2: unknown */
+    badk[badk.size() - 8 - 2 - 7] = 2; /* home kind 2: unknown (before the 2-byte TA) */
     CHECK(!f1::decode_handover(badk.data(), badk.size(), Mac{}));
     /* Per-UE area keys: A_u from the UE's key, wrapped for one DU. */
     const auto au = ue_area_key(fake_mac(0x11));

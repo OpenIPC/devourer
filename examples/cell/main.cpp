@@ -1394,7 +1394,9 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint32_t id = 0;
     uint8_t pos = 0;
     uint64_t eff_sf = 0;
+    int16_t ta_us = 0; /* the UE's TA at its source (HoCommand v17) */
   };
+  std::map<uint16_t, int16_t> ta_report; /* f1_mu: each own UE's TA in the map on air */
   struct HoOut {
     uint32_t id = 0;
     uint64_t eff_sf = 0;
@@ -1886,6 +1888,9 @@ int run_du(IRadio *dev, const Cfg &c) {
               if (auto h = ue_home.find(u.ue); h != ue_home.end() && r.homes.size() < f1::kMaxUes)
                 r.homes.push_back({u.ue, h->second});
             f1::fill_report_measurements(r, c.cell, meas_tab.snapshot(now_ms()));
+            for (auto &q : r.meas) /* each own UE's TA now (carried on a handover, v17) */
+              if (auto t = ta_report.find(q.ue); t != ta_report.end())
+                q.ta_us = t->second;
             /* The UEs' own measurements (their MR IEs): each entry's age is its
              * sample's plus the report's since; each UE's serving entry first,
              * whole UEs only against the cap (a truncation is logged). */
@@ -2142,7 +2147,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               const auto eff = static_cast<uint64_t>(static_cast<int64_t>(cmd.effective_net_sf) - off);
               {
                 std::lock_guard<std::mutex> lk(f1_mu);
-                ho_in[cmd.target_ue] = {cmd.id, cmd.target_pos, eff};
+                ho_in[cmd.target_ue] = {cmd.id, cmd.target_pos, eff, cmd.ta_us};
               }
               /* Pre-admit under exactly the id the CU gave it (the registry
                * hands out the lowest free one; the CU chose that one). */
@@ -2682,8 +2687,17 @@ int run_du(IRadio *dev, const Cfg &c) {
                 ho_eff || !synced)
               continue; /* not yet (or another instant is being published, or no clock) */
             set_position(g, hi->second.pos);
+            /* The UE's TA at its source: its clock and actuation phase do not
+             * change with the cell, so the target's loop starts there. */
+            g.ta_us = hi->second.ta_us;
             next.grants.push_back(g);
-            reg.context(u.ue);
+            reg.context(u.ue).ta.set_ta(hi->second.ta_us);
+            if (hi->second.ta_us) {
+              char l[120];
+              snprintf(l, sizeof l, "{\"ev\":\"cell.ho.ta_carried\",\"ue\":%u,\"ta_us\":%d}", u.ue,
+                       hi->second.ta_us);
+              emit(l);
+            }
             /* Fresh DL state (an id reused after another UE left keeps
              * nothing of it); its DL queue is the DAPS buffer: kept. */
             dlue.insert_or_assign(u.ue, make_dlue(u.ue));
@@ -3041,6 +3055,15 @@ int run_du(IRadio *dev, const Cfg &c) {
           }
           prev_map = map;
           map = next;
+          {
+            /* The TA each UE runs is its grant's in the map now on air: the
+             * report carries exactly that (a carried arrival's at once, a
+             * released ID's never, a failed publish's not at all). */
+            std::lock_guard<std::mutex> lk(f1_mu);
+            ta_report.clear();
+            for (const Grant &g : map.grants)
+              ta_report[g.ue] = g.ta_us;
+          }
           if (f1_eff) {
             std::lock_guard<std::mutex> lk(f1_mu);
             /* due() released it this pass and the deadline was checked just

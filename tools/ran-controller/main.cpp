@@ -37,6 +37,9 @@
 //   RAN_CS_LEAD_SF [20]       a move's instant, this many superframes ahead
 //   RAN_CS_BACKOFF_S [30]     a DU whose move was refused or timed out is not
 //                             asked again before this
+// ran.meas: per DU, own [ue, rssi, snr, evm] and heard [cell, ue, rssi, snr,
+// evm] (filtered; evm null when the frames carried none). EVM is reported,
+// not used by the A3.
 // Handover evaluation (M6, #260) — OBSERVE ONLY: for every UE the CU runs the
 // A3 (CHO) condition (src/cell/Handover.h) on the DUs' filtered reports —
 // the serving DU's own measurement against every other DU's heard one — and
@@ -875,16 +878,22 @@ int main() {
         std::string m = "{\"ev\":\"ran.meas\",\"du\":" + std::to_string(kv.first) + ",\"own\":[";
         for (size_t i = 0; i < kv.second.rep.meas.size(); ++i) {
           const auto &q = kv.second.rep.meas[i];
-          char b[64];
-          snprintf(b, sizeof b, "%s[%u,%.2f,%.2f]", i ? "," : "", q.ue, q.rssi_qdbm / 4.0,
-                   q.snr_qdb / 4.0);
+          char b[96];
+          char ev[16] = "null"; /* EVM last (F1 v16): earlier fields keep their places */
+          if (q.evm_qdb != f1::kNoEvmQ)
+            snprintf(ev, sizeof ev, "%.2f", q.evm_qdb / 4.0);
+          snprintf(b, sizeof b, "%s[%u,%.2f,%.2f,%s]", i ? "," : "", q.ue, q.rssi_qdbm / 4.0,
+                   q.snr_qdb / 4.0, ev);
           m += b;
         }
         m += "],\"heard\":[";
         for (size_t i = 0; i < kv.second.rep.heard.size(); ++i) {
           const auto &h = kv.second.rep.heard[i];
-          char b[64];
-          snprintf(b, sizeof b, "%s[%u,%u,%d,%d]", i ? "," : "", h.cell, h.ue, h.rssi_dbm, h.snr_db);
+          char b[96];
+          char ev[16] = "null";
+          if (h.evm_db != f1::kNoEvm8)
+            snprintf(ev, sizeof ev, "%d", h.evm_db);
+          snprintf(b, sizeof b, "%s[%u,%u,%d,%d,%s]", i ? "," : "", h.cell, h.ue, h.rssi_dbm, h.snr_db, ev);
           m += b;
         }
         emit(m + "]}");

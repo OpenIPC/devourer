@@ -163,21 +163,27 @@ private:
 
 /* The filtered uplink quality per (cell, UE) one DU measures: its own UEs
  * (cell = its own id) and the other cells' it hears. RSSI and SNR each go
- * through an L3Filter; snapshot() lists only the valid (fresh) entries. */
+ * through an L3Filter, and so does EVM, from the frames that carry one;
+ * snapshot() lists only the valid (fresh) entries. */
 struct MeasEntry {
   uint16_t cell = 0, ue = 0;
   double rssi_dbm = 0, snr_db = 0;
   int64_t age_ms = 0; /* since the newest sample in it */
+  double evm_db = 0;  /* filtered EVM (dB, negative), when evm_valid */
+  bool evm_valid = false;
 };
 class MeasTable {
 public:
   explicit MeasTable(L3FilterConfig c = {}) : cfg_(c) {}
-  void update(uint16_t cell, uint16_t ue, double rssi_dbm, double snr_db, int64_t now_ms) {
+  void update(uint16_t cell, uint16_t ue, double rssi_dbm, double snr_db, int64_t now_ms,
+              std::optional<double> evm_db = std::nullopt) {
     auto it = m_.find({cell, ue});
     if (it == m_.end())
-      it = m_.emplace(std::make_pair(cell, ue), Pair{L3Filter(cfg_), L3Filter(cfg_)}).first;
+      it = m_.emplace(std::make_pair(cell, ue), Pair{L3Filter(cfg_), L3Filter(cfg_), L3Filter(cfg_)}).first;
     it->second.rssi.update(rssi_dbm, now_ms);
     it->second.snr.update(snr_db, now_ms);
+    if (evm_db)
+      it->second.evm.update(*evm_db, now_ms);
   }
   /* Valid entries now; entries stale for 5x stale_ms are forgotten. */
   std::vector<MeasEntry> snapshot(int64_t now_ms) {
@@ -187,9 +193,15 @@ public:
         it = m_.erase(it);
         continue;
       }
-      if (it->second.rssi.valid(now_ms))
-        v.push_back({it->first.first, it->first.second, it->second.rssi.value(),
-                     it->second.snr.value(), now_ms - it->second.rssi.last_ms()});
+      if (it->second.rssi.valid(now_ms)) {
+        MeasEntry e{it->first.first, it->first.second, it->second.rssi.value(), it->second.snr.value(),
+                    now_ms - it->second.rssi.last_ms()};
+        if (it->second.evm.valid(now_ms)) {
+          e.evm_db = it->second.evm.value();
+          e.evm_valid = true;
+        }
+        v.push_back(e);
+      }
       ++it;
     }
     return v;
@@ -197,7 +209,7 @@ public:
 
 private:
   struct Pair {
-    L3Filter rssi, snr;
+    L3Filter rssi, snr, evm;
   };
   L3FilterConfig cfg_;
   std::map<std::pair<uint16_t, uint16_t>, Pair> m_;

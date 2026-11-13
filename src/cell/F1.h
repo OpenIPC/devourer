@@ -51,6 +51,7 @@
 #include <cmath>
 #include <cstddef>
 #include <array>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -80,7 +81,10 @@ namespace devourer::cell::f1 {
 /* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). 13:
  * Report carries the DU's suspend-gap period. */
 /* 14: Uplink carries its reception instant (net_us). */
-constexpr uint8_t kVersion = 15; /* v14: Uplink.net_us; v15: ChannelSwitch */
+/* v14: Uplink.net_us; v15: ChannelSwitch; v16: EVM in HeardUe and UeMeas */
+constexpr uint8_t kVersion = 16;
+constexpr int8_t kNoEvm8 = INT8_MIN;    /* HeardUe.evm_db: none measured */
+constexpr int16_t kNoEvmQ = INT16_MIN;  /* UeMeas.evm_qdb: none measured */
 constexpr size_t kTagLen = 8;
 constexpr size_t kMaxFixed = 8;
 constexpr size_t kMaxPositions = kMaxUesPerCell;
@@ -120,6 +124,7 @@ struct HeardUe {
   int8_t rssi_dbm = 0; /* filtered (src/cell/Handover.h L3Filter), dBm */
   int8_t snr_db = 0;   /* filtered, dB */
   uint16_t age_ms = 0; /* since its newest sample, at report time (saturates) */
+  int8_t evm_db = kNoEvm8; /* filtered EVM, dB (negative); kNoEvm8: none */
   bool operator==(const HeardUe &) const = default;
 };
 /* What a UE measured itself (its MR IE, src/cell/MeasGap.h): `cell`'s
@@ -138,6 +143,7 @@ struct UeMeas {
   int16_t rssi_qdbm = 0;
   int16_t snr_qdb = 0;
   uint16_t age_ms = 0; /* since its newest sample, at report time (saturates) */
+  int16_t evm_qdb = kNoEvmQ; /* filtered EVM, quarter dB; kNoEvmQ: none */
   bool operator==(const UeMeas &) const = default;
 };
 
@@ -340,9 +346,11 @@ inline void fill_report_measurements(Report &r, uint16_t own, const std::vector<
   for (const MeasEntry &e : snap) {
     if (e.cell == own) {
       if (r.meas.size() < kMaxUes)
-        r.meas.push_back({e.ue, clampq(e.rssi_dbm), clampq(e.snr_db), age16(e.age_ms)});
+        r.meas.push_back({e.ue, clampq(e.rssi_dbm), clampq(e.snr_db), age16(e.age_ms),
+                          e.evm_valid ? std::max<int16_t>(clampq(e.evm_db), kNoEvmQ + 1) : kNoEvmQ});
     } else if (r.heard.size() < kMaxHeard) {
-      r.heard.push_back({e.cell, e.ue, clamp8(e.rssi_dbm), clamp8(e.snr_db), age16(e.age_ms)});
+      r.heard.push_back({e.cell, e.ue, clamp8(e.rssi_dbm), clamp8(e.snr_db), age16(e.age_ms),
+                         e.evm_valid ? std::max<int8_t>(clamp8(e.evm_db), kNoEvm8 + 1) : kNoEvm8});
     }
   }
 }
@@ -393,6 +401,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
     m.push_back(static_cast<uint8_t>(h.rssi_dbm));
     m.push_back(static_cast<uint8_t>(h.snr_db));
     put(m, h.age_ms, 2);
+    m.push_back(static_cast<uint8_t>(h.evm_db));
   }
   m.push_back(static_cast<uint8_t>(r.meas.size()));
   for (const UeMeas &q : r.meas) {
@@ -400,6 +409,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
     put(m, static_cast<uint16_t>(q.rssi_qdbm), 2);
     put(m, static_cast<uint16_t>(q.snr_qdb), 2);
     put(m, q.age_ms, 2);
+    put(m, static_cast<uint16_t>(q.evm_qdb), 2);
   }
   m.push_back(static_cast<uint8_t>(r.ue_meas.size()));
   for (const UeCellMeas &q : r.ue_meas) {
@@ -469,6 +479,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     h.rssi_dbm = static_cast<int8_t>(r.get(1));
     h.snr_db = static_cast<int8_t>(r.get(1));
     h.age_ms = static_cast<uint16_t>(r.get(2));
+    h.evm_db = static_cast<int8_t>(r.get(1));
     x.heard.push_back(h);
   }
   const size_t nm = r.get(1);
@@ -480,6 +491,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     q.rssi_qdbm = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     q.snr_qdb = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     q.age_ms = static_cast<uint16_t>(r.get(2));
+    q.evm_qdb = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     x.meas.push_back(q);
   }
   const size_t nu = r.get(1);

@@ -53,6 +53,7 @@ struct UeRxWindow {
   int rssi_max_dbm = 0;
   double snr_mean_db = 0.0;
   double snr_min_db = 0.0;
+  bool snr_valid = false;   /* the SNR fields, folded only from frames that carried one */
   double evm_mean_db = 0.0; /* 0 when evm_valid is false */
   bool evm_valid = false;
   double noise_floor_dbm = 0.0; /* passive: mean rssi_dbm - snr_db */
@@ -93,9 +94,12 @@ public:
     e->rssi_sum += rssi_raw;
     if (rssi_raw > e->rssi_max)
       e->rssi_max = rssi_raw;
-    e->snr_sum += snr_raw;
-    if (snr_raw < e->snr_min)
-      e->snr_min = snr_raw;
+    if (snr_raw != 0) { /* 0 = no SNR measured: not a sample */
+      e->snr_sum += snr_raw;
+      ++e->snr_n;
+      if (snr_raw < e->snr_min)
+        e->snr_min = snr_raw;
+    }
     if (evm_raw != 0) {
       e->evm_sum += evm_raw;
       ++e->evm_n;
@@ -130,8 +134,11 @@ public:
       if (e.n) {
         w.rssi_mean_dbm = static_cast<int>(e.rssi_sum / static_cast<int64_t>(e.n)) - 110;
         w.rssi_max_dbm = e.rssi_max - 110;
-        w.snr_mean_db = (e.snr_sum / static_cast<double>(e.n)) / 2.0;
+      }
+      if (e.snr_n) {
+        w.snr_mean_db = (e.snr_sum / static_cast<double>(e.snr_n)) / 2.0;
         w.snr_min_db = e.snr_min / 2.0;
+        w.snr_valid = true;
       }
       if (e.evm_n) {
         w.evm_mean_db = (e.evm_sum / static_cast<double>(e.evm_n)) / 2.0;
@@ -157,6 +164,7 @@ private:
     int64_t rssi_sum = 0;
     int rssi_max = -128;
     int64_t snr_sum = 0;
+    uint32_t snr_n = 0;
     int snr_min = 127;
     int64_t evm_sum = 0;
     uint32_t evm_n = 0;

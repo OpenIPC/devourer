@@ -899,6 +899,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     positions.push_back({static_cast<uint8_t>(*grid->find(SlotKind::Downlink, static_cast<uint16_t>(i))),
                          static_cast<uint8_t>(*grid->find(SlotKind::Uplink, static_cast<uint16_t>(i)))});
   devourer::cell::UeRegistry reg(positions);
+  reg.set_ta_config(ta_gain, P / 4); /* each UE's TA loop (its UeContext) */
   /* Each UE's home identity (src/cell/Keys.h), recorded at its admission —
    * static, a RACH joiner's MAC, or the home a handover command carries —
    * and reported to the CU (F1 Report.homes) for the UE's handover context.
@@ -1232,11 +1233,10 @@ int run_du(IRadio *dev, const Cfg &c) {
     emit(l);
   }
 
-  std::mutex mu;  // guards ta, ue_epoch
-  std::map<uint16_t, TaLoop> ta;
+  std::mutex mu;  // guards reg's per-UE contexts (TA, uplink window), ue_epoch
   std::map<uint16_t, uint32_t> ue_epoch;
   for (uint16_t ue : ues)
-    ta.emplace(ue, TaLoop(ta_gain, P / 4));
+    reg.context(ue);
   /* Per-UE DL reliability state (guarded by mu): HARQ sender, link
    * adaptation, the UE-reported DL SNR over the current window, and the
    * HARQ counts at the last adaptation window. */
@@ -1748,12 +1748,14 @@ int run_du(IRadio *dev, const Cfg &c) {
       int64_t ta_now = 0;
       {
         std::lock_guard<std::mutex> lk(mu);
-        auto it = ta.find(ub->ue);
-        if (it != ta.end()) {
+        if (const auto *cx = reg.find_context(ub->ue)) {
           if (ta_on) /* CELL_TA=0: no loop to feed */
-            it->second.sample(err);
-          ta_now = it->second.ta();
+            reg.context(ub->ue).ta.sample(err);
+          ta_now = cx->ta.ta();
         }
+        /* its uplink quality, attributed to it (UeRegistry's window) */
+        reg.rx_frame(p.Data.data(), p.Data.size(), p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0],
+                     p.RxAtrib.tsfl);
         ue_epoch[ub->ue] = ub->epoch;
         last_ul_sf[ub->ue] = pos.superframe;
         heard_ul_sf[ub->ue] = pos.superframe;
@@ -1824,6 +1826,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     emit(l);
   }
   auto next_ta = std::chrono::steady_clock::now() + std::chrono::seconds(ta_every_s);
+  auto next_rxw = next_ta; /* the per-UE uplink windows' cadence */
   auto next_sync = std::chrono::steady_clock::now() + std::chrono::milliseconds(sync_loop_ms);
   int64_t sf = grid->at(static_cast<int64_t>(dev->ReadTsf())).superframe + 1;
   bool cu_alive_prev = !f1_on;
@@ -2671,7 +2674,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               continue; /* not yet (or another instant is being published, or no clock) */
             set_position(g, hi->second.pos);
             next.grants.push_back(g);
-            ta.emplace(u.ue, TaLoop(ta_gain, P / 4));
+            reg.context(u.ue);
             /* Fresh DL state (an id reused after another UE left keeps
              * nothing of it); its DL queue is the DAPS buffer: kept. */
             dlue.insert_or_assign(u.ue, make_dlue(u.ue));
@@ -2691,7 +2694,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               break;
             }
           next.grants.push_back(g);
-          ta.emplace(u.ue, TaLoop(ta_gain, P / 4));
+          reg.context(u.ue);
           /* Fresh DL state; a joiner has no DL stream yet (the CU starts
            * one once this DU reports it): a queue left under its id is
            * another UE's. */
@@ -2776,7 +2779,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       {
         std::lock_guard<std::mutex> lk(mu);
         for (Grant &g : next.grants) {
-          TaLoop &l = ta.at(g.ue);
+          TaLoop &l = reg.context(g.ue).ta;
           // Only judge a UE running the newest map: its arrivals reflect it.
           const bool current = ue_epoch.count(g.ue) && ue_epoch[g.ue] == map.epoch;
           if (!current)
@@ -2823,6 +2826,27 @@ int run_du(IRadio *dev, const Cfg &c) {
             }
           }
         }
+      }
+    }
+    /* Each UE's uplink quality over the window, from its own frames
+     * (UeRegistry; the SA is 02:ce:11:<cell>:<ue>): closed on the TA cadence,
+     * whether or not the TA loop runs (CELL_TA=0). */
+    if (std::chrono::steady_clock::now() >= next_rxw) {
+      next_rxw += std::chrono::seconds(ta_every_s);
+      std::lock_guard<std::mutex> lk(mu);
+      const auto wins = reg.close_rx_window([&](const std::array<uint8_t, 6> &ta) -> uint16_t {
+        const bool ours = ta[0] == 0x02 && ta[1] == 0xce && ta[2] == 0x11 &&
+                          static_cast<uint16_t>(ta[3] << 8 | ta[4]) == c.cell;
+        return ours ? ta[5] : 0;
+      });
+      for (const auto &[ue, w] : wins) {
+        char l[220];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.ue_rx\",\"ue\":%u,\"frames\":%u,\"rssi_dbm\":%d,\"snr_db\":%.1f,"
+                 "\"snr_min_db\":%.1f,\"snr_ok\":%d,\"evm_db\":%.1f,\"evm_ok\":%d}",
+                 ue, w.frames, w.rssi_mean_dbm, w.snr_mean_db, w.snr_min_db, w.snr_valid ? 1 : 0, w.evm_mean_db,
+                 w.evm_valid ? 1 : 0);
+        emit(l);
       }
     }
     /* A due F1 schedule: every UE's position, on its network-wide instant. */
@@ -2878,7 +2902,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     if (changed && static_cast<uint64_t>(sf) < map.effective_sf) {
       std::lock_guard<std::mutex> lk(mu);
       for (const Grant &g : map.grants)
-        ta.at(g.ue).set_ta(g.ta_us);
+        reg.context(g.ue).ta.set_ta(g.ta_us);
       next = map;
       changed = false;
       to_release.clear();
@@ -2903,7 +2927,7 @@ int run_du(IRadio *dev, const Cfg &c) {
         }
       {
         std::lock_guard<std::mutex> lk(mu);
-        ta.erase(ho_eff_ue);
+        reg.reset_context(ho_eff_ue);
         dlue.erase(ho_eff_ue);
         last_ul_sf.erase(ho_eff_ue);
       }
@@ -3062,7 +3086,7 @@ int run_du(IRadio *dev, const Cfg &c) {
            * next TA pass retries. */
           std::lock_guard<std::mutex> lk(mu);
           for (const Grant &g : map.grants)
-            ta.at(g.ue).set_ta(g.ta_us);
+            reg.context(g.ue).ta.set_ta(g.ta_us);
         }
         const GrantMap &shown = ok ? map : next;
         char l[320];

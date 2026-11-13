@@ -142,6 +142,23 @@ int main() {
           "evicted TA admitted in the next window");
   }
 
+  // A frame without an SNR (0) is not an SNR sample: it neither drags the
+  // mean down nor sets the minimum to 0.
+  {
+    devourer::cell::UeRxAttribution attr;
+    const uint8_t ta[6] = {0x02, 0xce, 0x11, 0x00, 0x05, 0x01};
+    attr.add(ta, 60, 40, 0, 1); // 20 dB
+    attr.add(ta, 60, 0, 0, 2);  // no SNR
+    attr.add(ta, 60, 30, 0, 3); // 15 dB
+    auto s = attr.snapshot();
+    CHECK(s.ues.size() == 1 && s.ues[0].frames == 3, "three frames");
+    CHECK(s.ues[0].snr_valid && std::fabs(s.ues[0].snr_mean_db - 17.5) < 1e-9, "snr mean over the two that had one");
+    CHECK(std::fabs(s.ues[0].snr_min_db - 15.0) < 1e-9, "snr min not 0");
+    attr.add(ta, 60, 0, 0, 4);
+    auto s2 = attr.snapshot();
+    CHECK(s2.ues.size() == 1 && !s2.ues[0].snr_valid && s2.ues[0].snr_min_db == 0.0, "no SNR at all: not valid");
+  }
+
   std::printf(g_fail ? "ue_rx_attribution_selftest: %d FAILURE(S)\n"
                      : "ue_rx_attribution_selftest: all passed\n",
               g_fail);

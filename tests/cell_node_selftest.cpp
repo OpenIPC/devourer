@@ -275,6 +275,24 @@ int main() {
       CHECK(gf.size() == 32 && std::find(gf.begin(), gf.end(), 101u) != gf.end() && gf.front() == 1 &&
             gq == std::deque<uint32_t>({32}));
     }
+    /* A bench's placement emulated (CELL_UE_MEAS_LEVEL): a listed cell held
+     * back for its calibration, then shifted to the target median; others
+     * unchanged; a malformed item ignored. */
+    {
+      MeasLevelPin pin("2:-53,1:-63,x:5,3:-40", 3);
+      CHECK(pin.active() && !pin.offset(3).has_value());
+      CHECK(pin.adjust(7, -70.0) == -70.0); /* unlisted */
+      CHECK(!pin.adjust(2, -50.0) && !pin.adjust(2, -52.0)); /* calibrating */
+      CHECK(pin.adjust(2, -48.0) == -53.0 + 2.0);             /* median -50 -> offset -3 */
+      CHECK(pin.offset(2) && *pin.offset(2) == -3.0 && pin.adjust(2, -60.0) == -63.0);
+      CHECK(!MeasLevelPin("").active() && !MeasLevelPin("2:abc").active());
+      /* malformed items are reported, not silently dropped */
+      CHECK(MeasLevelPin("2:-53x,1:-63,3,4:").bad() == std::vector<std::string>({"2:-53x", "3", "4:"}));
+      /* a fade in the calibration window slides it on (spread > 6 dB) */
+      MeasLevelPin fp("2:-50", 3);
+      CHECK(!fp.adjust(2, -40.0) && !fp.adjust(2, -60.0) && !fp.adjust(2, -61.0)); /* 21 dB spread */
+      CHECK(fp.adjust(2, -60.0) == -50.0 && fp.adjust(2, -62.0) == -52.0); /* -60,-61,-60 steady: offset +10 */
+    }
     /* A DAPS-visit DL answer: broadcast RA, the target identity in the body,
      * tagged with the target cell's key; not a unicast DL frame. */
     {

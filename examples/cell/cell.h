@@ -40,14 +40,17 @@
 #define DEVOURER_EXAMPLES_CELL_H
 
 #include <algorithm>
-#include <deque>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <map>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -430,6 +433,93 @@ inline std::optional<DlFrame> parse_dl_frame(const uint8_t *p, size_t len, uint1
     d.pdus.push_back(static_cast<uint32_t>(detail::get(b + 32 + 4 * i, 4)));
   return d;
 }
+
+// A test bench's placement, emulated at the UE (CELL_UE_MEAS_LEVEL): for
+// each listed cell, the median of its first `calib` beacon measurements is
+// taken as where the bench put it, and every measurement after is shifted by
+// (target - that median). The fluctuations and any TX ramp still come
+// through; only the standing level is the bench's choice, so a suite's
+// handover geometry does not depend on where the radios stand. The radio
+// links themselves are not touched. A listed cell's measurements are held
+// back while calibrating; an unlisted cell's pass unchanged. Calibration
+// settles only on a steady window (its `calib` samples within `spread_db`):
+// a fade or ramp in it slides the window on instead of fixing a wrong
+// offset. Malformed items are kept in bad() (the node refuses to start).
+//   "2:-53,1:-63"  cell 2 at -53 dBm, cell 1 at -63 dBm
+class MeasLevelPin {
+public:
+  explicit MeasLevelPin(const std::string &spec = {}, size_t calib = 8, double spread_db = 6.0)
+      : calib_(calib), spread_db_(spread_db) {
+    size_t i = 0;
+    while (i < spec.size()) {
+      const size_t comma = spec.find(',', i);
+      const std::string item = spec.substr(i, comma == std::string::npos ? std::string::npos : comma - i);
+      const size_t colon = item.find(':');
+      if (colon != std::string::npos) {
+        char *e1 = nullptr, *e2 = nullptr;
+        const long c = std::strtol(item.c_str(), &e1, 10);
+        const double v = std::strtod(item.c_str() + colon + 1, &e2);
+        if (e1 == item.c_str() + colon && e2 && e2 != item.c_str() + colon + 1 && *e2 == 0 && c > 0 && c < 65536)
+          cells_[static_cast<uint16_t>(c)] = Cell{v, {}, std::nullopt};
+        else
+          bad_.push_back(item);
+      } else if (!item.empty()) {
+        bad_.push_back(item);
+      }
+      if (comma == std::string::npos)
+        break;
+      i = comma + 1;
+    }
+  }
+  bool active() const { return !cells_.empty(); }
+  // The measurement to use for `cell`: nullopt while that cell calibrates.
+  std::optional<double> adjust(uint16_t cell, double rssi) {
+    auto it = cells_.find(cell);
+    if (it == cells_.end())
+      return rssi;
+    Cell &c = it->second;
+    if (!c.offset) {
+      c.seen.push_back(rssi);
+      if (c.seen.size() > calib_)
+        c.seen.erase(c.seen.begin()); /* slide: the newest calib_ samples */
+      if (c.seen.size() < calib_)
+        return std::nullopt;
+      const auto [lo, hi] = std::minmax_element(c.seen.begin(), c.seen.end());
+      if (*hi - *lo > spread_db_)
+        return std::nullopt; /* not steady yet */
+      std::vector<double> v = c.seen;
+      std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+      c.offset = c.target - v[v.size() / 2];
+      c.seen.clear();
+    }
+    return rssi + *c.offset;
+  }
+  // Items of the spec that did not parse ("cell:dBm").
+  const std::vector<std::string> &bad() const { return bad_; }
+  // The cells pinned and their targets (logged at start).
+  std::string describe() const {
+    std::string o;
+    for (const auto &kv : cells_)
+      o += (o.empty() ? "" : ",") + std::to_string(kv.first) + ":" + std::to_string(static_cast<int>(kv.second.target));
+    return o;
+  }
+  // The offset fixed for `cell` (logged), once calibrated.
+  std::optional<double> offset(uint16_t cell) const {
+    auto it = cells_.find(cell);
+    return it == cells_.end() ? std::nullopt : it->second.offset;
+  }
+
+private:
+  struct Cell {
+    double target = 0;
+    std::vector<double> seen;
+    std::optional<double> offset;
+  };
+  size_t calib_;
+  double spread_db_;
+  std::map<uint16_t, Cell> cells_;
+  std::vector<std::string> bad_;
+};
 
 // A handover target's queue against the UE's DL status: an sn goes only if
 // the UE has it (its top, or within `window` below it and not pending) or it

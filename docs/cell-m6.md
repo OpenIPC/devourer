@@ -1621,6 +1621,45 @@ Regression with the checks on, 1 run of each, all pass:
 Apart from the replay runs, refusals were only the ~16 at the start of each
 UE (before its serving phase was known) plus the dead-serving case above.
 
+## Rig suites independent of placement
+
+**What happened.** On 2026-11-12, between 11:20 and 16:00, the rig's RF
+levels changed with no code change in between. UE1 now heard cell 1 at −50
+dBm (−63 before) and cell 2 at −51 (−53); UE2 heard cell 1 2 dB louder and
+cell 2 5 dB quieter. The cause is not established. The suites that hand
+over on a standing difference between cells lost their margin (+10 to +13
+dB at UE1): handover, measgap, three_ho, daps, daps_dl, daps_xch. They
+failed alike on master and on a branch (an A/B run), correctly: with those
+levels the A3 has nothing to fire on. The ramp-driven crossings still
+passed.
+
+**The pin** (`CELL_UE_MEAS_LEVEL`, `MeasLevelPin` in `examples/cell/cell.h`):
+for each listed cell the UE takes the median of its first 8 beacon
+measurements as where the bench put it, then shifts every measurement after
+by (target − that median). The cell is held back from its measurement table
+while it calibrates (`cell.ue.meas_pin`: the offset). Calibration settles
+only on a steady window (8 samples within 6 dB), so a fade at the start
+slides it on instead of fixing a wrong offset. A malformed spec stops the UE
+at start, and the pinned levels are logged then (`cell.ue.meas_pin_cfg`).
+**What the pin gives up:** a pinned suite tests the handover machinery on
+its designed geometry, not the bench's actual levels; `M5_MEAS_LEVELS=""`
+still runs those. The fluctuations and
+any TX ramp still come through; only the standing level is the suite's.
+The radio links themselves are untouched, so the bench still has to carry
+the frames.
+
+**The suites** (testrig): `m5_ran_coord.sh` passes `M5_MEAS_LEVELS`
+("UE=cell:dBm,...;UE=...") to each UE, and every M6 suite whose geometry is
+a standing difference defaults it to the medians of its passing runs:
+- two cells: UE1 at −63 dBm (cell 1) and −52 dBm (cell 2); UE2 at −53 and
+  −38;
+- three cells: UE1 −64/−51/−34, UE2 −53/−38/−38, UE3 −32/−50/−47;
+- the crossings (TX ramps) are not pinned. `M5_MEAS_LEVELS=""` runs on the
+  bench's own levels.
+
+**Result:** on the changed rig every M6 suite passes again: handover,
+measgap, three_ho, daps, daps_dl, daps_xch, crossing3, crossing.
+
 ## Bugs the rig found
 
 **A DU with no UE did not pace its main loop.** Its superframe count ran away

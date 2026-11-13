@@ -1696,6 +1696,78 @@ target on the arriving UE's in-slot uplinks:
   applied exactly, but a UE handed over soon after attaching carries a
   half-converged TA.
 
+## The conditional handover (a source lost before the command)
+
+A handover command reaches the UE only through its source's beacon. A
+source that fades or dies before the command leaves the UE with nothing to
+act on. On the rig, with cell 2 on another channel and DU1 killed before any
+command, UE1 was stranded: no switch, and no DL for the rest of the run
+(31.5 % of the PDUs UE2 got over the same run). As a static UE it never
+re-joins, and a re-join would go to its own cell anyway.
+
+**The conditional handover** (`RAN_CHO=1`; F1 v18, HoIe v4,
+`HoCommand.h` `ChoCondition`):
+- **The CU prepares early.** The A3, or `RAN_HO_FORCE`, issues the command
+  as before, but conditional:
+  - its instant is the expiry, `RAN_CHO_WINDOW_SF` [300] superframes on;
+  - it carries the UE's switch condition: `RAN_CHO_LOST_SF` [4],
+    `RAN_CHO_MARGIN_DB` [3] and `RAN_CHO_TTT_MS` [640].
+
+  Set the A3 offset below the margin to prepare before the move is due.
+- **The target grants the UE from the command on,** not from an instant.
+  It publishes the arriving UE's grant as soon as it can be announced, so
+  the UE is granted whenever it lands. The silence clock starts at the
+  expiry: a UE that never came is released after it.
+- **The UE decides.** Each pass, it switches at once if either holds:
+  - **`source_lost`:** it has heard no serving beacon for `cond_lost_sf`
+    superframes;
+  - **`target_better`:** its own filtered level of the target has led the
+    serving cell's by `cond_margin_db` for `cond_ttt_ms`
+    (`cell.ue.cho_exec`).
+
+  The switch itself is the ordinary one: the TSF delta, the retune and the
+  target's identity. By the expiry without either, the UE stays and the
+  preparation lapses (`cell.ue.cho_expired`).
+- **The preparation carries the DAPS work.** Across channels, the visits
+  and the target's DL answers run from the preparation, so the fade before
+  the move is covered. The measurement gaps go on through a conditional
+  preparation, since the UE's own measurement of the target is its
+  condition. The two share the UE's thread, and a gap whose start went by
+  is retried.
+- **The source** relays the conditional IE until the expiry. It releases a
+  UE that went silent after the expiry, as after an ordinary instant.
+- **The CU** concludes the move (`ran.ho_done`) when the target hears the
+  UE, at any time before the expiry. A flight is not dropped when its
+  source goes silent: the CU keeps every DU it has heard.
+
+**Rig result** (testrig `scripts/m6_cho.sh`): 2 runs per case, all pass.
+- **The layout:** cell 1 on ch149, cell 2 on ch157 at phase 60000, the
+  CU's DL stream on, and the levels pinned, so cell 2 leads at UE1 by
+  ~11 dB.
+- **The trigger:** the preparation is forced at 40 s, with the A3 held off.
+- **Lost uplinks** are seq gaps at the CU. A stranded UE's uplinks just
+  stop, so the count does not apply to the baseline.
+
+| case | the move | DL new PDUs vs UE2 (same run) | longest DL silence | uplinks lost |
+|---|---|---|---|---|
+| prepared, then the source killed (margin 20 dB: never met) | `source_lost`, 4 superframes after its last serving beacon | 1.007, 1.008 | 248, 205 ms | 1, 0 |
+| no preparation, the source killed | none: stranded | 0.304, 0.328 | — | — |
+| prepared, no fault (margin 3 dB) | `target_better`, 8–9 superframes after the preparation | 1.006, 0.999 | 167, 205 ms | 0, 0 |
+| prepared, margin never met, 150-superframe window | none: lapsed; the target released its reservation, cell 1 kept the UE | 1.008, 1.003 | 205 ms | 1, 0 |
+
+- **A lost source costs nothing measurable.** The UE moved at the 4th
+  silent superframe. In between, its visits put every uplink on the target
+  (145–149 visits per run, all sent), and the target's answers carried the
+  DL. The longest DL silence (205–248 ms) is the stream's own cadence: a
+  PDU every 100 ms against one DL frame per 102.4 ms superframe.
+- **`target_better`** fired on the UE's own gap measurements: serving
+  −62 to −63 dBm, target −52 dBm, held the 640 ms.
+- **The lapsed preparation** ran 131–132 visits and 95–96 gaps beside them
+  without a fault. Cell 1 heard the UE 629–647 times after the expiry.
+- **The cost of preparing early** is the target's reserved position and,
+  across channels, the visit every superframe for as long as the
+  preparation stands.
+
 ## The 802.11 roam baseline
 
 The M6 issue measured the handover "vs the ~100 ms roam ghost bar", but no
@@ -1812,8 +1884,13 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
 
 - **DAPS across channels, beyond one visit per superframe:** the uplink and
   the downlink are duplicated through the visits, one per superframe from
-  the accept to the switch. A UE whose source fades before the command still
-  loses what it misses before the visits begin.
+  the accept to the switch. A source that fades before an ordinary command
+  still costs what is missed before the visits begin. The conditional
+  handover moves the accept to the preparation (see "The conditional
+  handover").
+- **When to prepare a conditional handover:** the rig forces the
+  preparation. On the A3 it is the offset below the margin; no policy
+  for that offset, or for re-preparing after a lapse, has been tuned.
 - **More than three cells, and a full tour:** the rig runs three cells,
   with handovers among them and a UE crossing 1 → 2 → 3. The way back into
   cell 1 is out of reach of the DUs' 20 dB TX range on this rig. Re-phasing

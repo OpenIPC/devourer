@@ -11,6 +11,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "cell/F1.h"
@@ -377,7 +378,7 @@ int main() {
     mpdu[0] = 0x80;
     for (const HoIe &x : {a, newer, someone_else}) {
       auto ie = encode_ho_ie(x, k);
-      CHECK(ie.size() == 2 + 3 + 58 + 2 + kHoTagLen);
+      CHECK(ie.size() == 2 + 3 + 62 + 2 + kHoTagLen);
       mpdu.insert(mpdu.end(), ie.begin(), ie.end());
     }
     auto got = find_ho_ie(mpdu.data(), mpdu.size(), 1, 1, k);
@@ -398,6 +399,47 @@ int main() {
     auto not_bcn = mpdu;
     not_bcn[0] = 0x08; /* a data frame carrying the same bytes */
     CHECK(!find_ho_ie(not_bcn.data(), not_bcn.size(), 1, 1, k));
+    /* v4: the conditional fields ride the IE (covered by CRC and tag). */
+    HoIe cond = a;
+    cond.cond_lost_sf = 4;
+    cond.cond_margin_db = -3;
+    cond.cond_ttt_ms = 640;
+    std::vector<uint8_t> m3(36, 0);
+    m3[0] = 0x80;
+    const auto cie = encode_ho_ie(cond, k);
+    m3.insert(m3.end(), cie.begin(), cie.end());
+    auto gc = find_ho_ie(m3.data(), m3.size(), 1, 1, k);
+    CHECK(gc && *gc == cond && gc->conditional() && !a.conditional());
+    m3[m3.size() - kHoTagLen - 2 - 3] ^= 0x01; /* the margin, tampered */
+    CHECK(!find_ho_ie(m3.data(), m3.size(), 1, 1, k));
+  }
+
+  /* --- ChoCondition: the UE's own switch decision. --- */
+  {
+    HoIe h;
+    h.cond_lost_sf = 4;
+    h.cond_margin_db = 3;
+    h.cond_ttt_ms = 600;
+    using W = ChoCondition::Why;
+    ChoCondition c(h);
+    /* Serving heard, the target not measured: never. */
+    CHECK(c.update(100, 99, -60.0, std::nullopt, 0) == W::None);
+    /* The target 2 dB ahead: below the margin. */
+    CHECK(c.update(101, 100, -60.0, -58.0, 100) == W::None && c.held_ms(100) == -1);
+    /* 3 dB ahead from t=200: fires only after 600 ms of it. */
+    CHECK(c.update(102, 101, -60.0, -57.0, 200) == W::None && c.held_ms(200) == 0);
+    CHECK(c.update(103, 102, -60.0, -57.0, 700) == W::None);
+    /* A pass without the lead restarts the hold. */
+    CHECK(c.update(104, 103, -60.0, -59.0, 750) == W::None && c.held_ms(750) == -1);
+    CHECK(c.update(105, 104, -60.0, -56.0, 800) == W::None);
+    CHECK(c.update(111, 110, -60.0, -56.0, 1400) == W::TargetBetter);
+    /* The source silent: 3 superframes is not enough, 4 is. */
+    ChoCondition d(h);
+    CHECK(d.update(203, 200, -60.0, -70.0, 0) == W::None);
+    CHECK(d.update(204, 200, -60.0, -70.0, 100) == W::SourceLost);
+    /* No serving beacon heard yet (-1): not a loss. */
+    CHECK(d.update(500, -1, std::nullopt, std::nullopt, 200) == W::None);
+    CHECK(std::string(cho_why_name(W::SourceLost)) == "source_lost");
   }
 
   /* --- Replay across beacons: the UE acts once, on a fresh command. --- */
@@ -861,11 +903,15 @@ int main() {
     hc.id = 9;
     hc.home = HomeId{true, 0, 0, jm};
     hc.ta_us = -428; /* v17: the source's TA travels with the UE */
+    hc.cond_lost_sf = 4; /* v18: a conditional command */
+    hc.cond_margin_db = -2;
+    hc.cond_ttt_ms = 640;
     const auto wh = f1::encode_handover(2, hc, fake_mac(0xF1));
     auto dh = f1::decode_handover(wh.data(), wh.size(), fake_mac(0xF1));
     CHECK(dh && dh->second.home == hc.home && dh->second.ta_us == -428);
+    CHECK(dh && dh->second == hc && dh->second.conditional());
     auto badk = wh;
-    badk[badk.size() - 8 - 2 - 7] = 2; /* home kind 2: unknown (before the 2-byte TA) */
+    badk[badk.size() - 8 - 4 - 2 - 7] = 2; /* home kind 2: unknown (before the TA and cond) */
     CHECK(!f1::decode_handover(badk.data(), badk.size(), Mac{}));
     /* Per-UE area keys: A_u from the UE's key, wrapped for one DU. */
     const auto au = ue_area_key(fake_mac(0x11));

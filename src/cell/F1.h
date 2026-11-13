@@ -82,8 +82,10 @@ namespace devourer::cell::f1 {
  * Report carries the DU's suspend-gap period. */
 /* 14: Uplink carries its reception instant (net_us). */
 /* v14: Uplink.net_us; v15: ChannelSwitch; v16: EVM in HeardUe and UeMeas;
- * v17: UeMeas.ta_us and HoCommand.ta_us (the TA carried in a handover) */
-constexpr uint8_t kVersion = 17;
+ * v17: UeMeas.ta_us and HoCommand.ta_us (the TA carried in a handover);
+ * v18: HoCommand's conditional fields (cond_lost_sf, cond_margin_db,
+ * cond_ttt_ms: the conditional handover) */
+constexpr uint8_t kVersion = 18;
 constexpr int8_t kNoEvm8 = INT8_MIN;    /* HeardUe.evm_db: none measured */
 constexpr int16_t kNoEvmQ = INT16_MIN;  /* UeMeas.evm_qdb: none measured */
 constexpr size_t kTagLen = 8;
@@ -604,6 +606,9 @@ inline std::vector<uint8_t> encode_handover(uint16_t du, const HoCommand &h, con
   m.insert(m.end(), h.ctx.begin(), h.ctx.end());
   put_home(m, h.home);
   put(m, static_cast<uint16_t>(h.ta_us), 2);
+  m.push_back(h.cond_lost_sf);
+  m.push_back(static_cast<uint8_t>(h.cond_margin_db));
+  put(m, h.cond_ttt_ms, 2);
   return seal(std::move(m), mac);
 }
 
@@ -631,6 +636,9 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
     b = static_cast<uint8_t>(r.get(1));
   h.home = get_home(r);
   h.ta_us = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
+  h.cond_lost_sf = static_cast<uint8_t>(r.get(1));
+  h.cond_margin_db = static_cast<int8_t>(static_cast<uint8_t>(r.get(1)));
+  h.cond_ttt_ms = static_cast<uint16_t>(r.get(2));
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return std::make_pair(du, h);

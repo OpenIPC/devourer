@@ -1660,6 +1660,31 @@ a standing difference defaults it to the medians of its passing runs:
 **Result:** on the changed rig every M6 suite passes again: handover,
 measgap, three_ho, daps, daps_dl, daps_xch, crossing3, crossing.
 
+## The rig suite (where the M6 tests live)
+
+The M6 issue asked for a `tests/ran_handover.sh`. The handover tests are
+the testrig repository's scripts instead: they need the rig (three PTP-locked
+J6412s and the CU host). testrig consumes devourer (its `tests/` and
+`build/`), never the other way round, so devourer holds only the headless
+part (ctest `cell_m6`). Each script asserts its own pass criteria, prints
+`{"ev": "...verdict", "pass": ...}`, and runs on `m5_ran_coord.sh`
+(`M5_MEAS_LEVELS`: the placement-independent levels, see above).
+
+| testrig script | what it asserts |
+|---|---|
+| `m6_handover.sh` | A3-triggered handover, and the fallback when the target DU dies after staging |
+| `m6_measgap.sh` | inter-frequency handover on the UE's own gap measurements |
+| `m6_suspend.sh` | suspend gaps, for directions no idle window reaches |
+| `m6_phaseplan.sh` | the CU's phase planning for a joining cell |
+| `m6_three_cells.sh`, `m6_three_ho.sh` | three cells on three channels, and handover among them |
+| `m6_crossing.sh`, `m6_crossing3.sh` | an emulated crossing (TX ramps), two and three cells |
+| `m6_daps.sh`, `m6_daps_dl.sh`, `m6_daps_xch.sh` | DAPS UL and DL, same channel and across channels, with the source killed |
+| `m6_cellkeys.sh`, `m6_joinerkeys.sh`, `m6_ueareakeys.sh`, `m6_gmauth.sh` | per-cell keys, a joiner's keys, area credentials, grant-map authentication |
+| `m6_nlsign.sh`, `m6_replay.sh` | signed neighbour lists and their replay |
+| `m6_rejoin.sh`, `m6_fitstep.sh` | a joiner across its DU's restart, the UE's clock fit across a TSF jump |
+
+Results are in testrig's `results/` (dated, small text).
+
 ## Bugs the rig found
 
 **A DU with no UE did not pace its main loop.** Its superframe count ran away

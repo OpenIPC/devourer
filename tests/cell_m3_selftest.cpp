@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <set>
 #include <vector>
 
@@ -381,6 +382,47 @@ int main() {
     std::printf("cell_m3: 8 joiners, 7 positions free: %d joined, %d denied in %llu superframes "
                 "(%llu collided msgA)\n",
                 joined, denied, (unsigned long long)sf, (unsigned long long)collisions);
+  }
+
+  /* --- M1 per-UE contexts: TA loop and uplink window, with the binding. --- */
+  {
+    UeRegistry r({{1, 5}, {2, 6}});
+    r.set_ta_config(0.5, 1000);
+    const std::array<uint8_t, 6> a{2, 0, 0, 0, 0, 1}, b{2, 0, 0, 0, 0, 2};
+    CHECK(r.admit(a) && !r.find_context(2));
+    UeContext &ca = r.context(1);
+    for (int i = 0; i < 3; ++i)
+      ca.ta.sample(400); /* arrivals 400 us late */
+    CHECK(ca.ta.update(3) && r.context(1).ta.ta() == 200); /* 0.5 * median */
+    CHECK(r.admit(a) && r.context(1).ta.ta() == 200);       /* a re-join keeps it */
+    CHECK(r.release(a) && !r.find_context(1));               /* a release drops it */
+    CHECK(r.admit(b) && r.context(1).ta.ta() == 0);          /* the id reused: fresh */
+    r.context(7).ta.set_ta(5);                               /* scheduled otherwise: created */
+    r.reset_context(7);
+    CHECK(r.context(7).ta.ta() == 0);
+    /* the uplink window, attributed per transmitter, mapped to UE ids */
+    uint8_t f1[24] = {0x80}, f2[24] = {0x80};
+    const uint8_t sa1[6] = {0x02, 0xce, 0x11, 0, 5, 1}, sa9[6] = {0x02, 0xce, 0x11, 0, 9, 3};
+    std::memcpy(f1 + 10, sa1, 6);
+    std::memcpy(f2 + 10, sa9, 6);
+    /* the first window after the context began is skipped (it may mix holders) */
+    CHECK(r.rx_frame(f1, sizeof f1, 50, 30, -30, 0));
+    CHECK(r.close_rx_window([](const std::array<uint8_t, 6> &t) -> uint16_t { return t[4] == 5 ? t[5] : 0; })
+              .empty() &&
+          !r.find_context(1)->have_rx);
+    CHECK(r.rx_frame(f1, sizeof f1, 60, 40, -30, 1) && r.rx_frame(f1, sizeof f1, 70, 50, -30, 2));
+    CHECK(r.rx_frame(f2, sizeof f2, 80, 50, 0, 3)); /* another cell's UE */
+    auto wins = r.close_rx_window([](const std::array<uint8_t, 6> &t) -> uint16_t {
+      return t[4] == 5 ? t[5] : 0; /* cell 5's UEs only */
+    });
+    CHECK(wins.size() == 1 && wins[0].first == 1 && wins[0].second.frames == 2);
+    CHECK(r.find_context(1)->have_rx && r.find_context(1)->rx.rssi_mean_dbm == 65 - 110 &&
+          r.find_context(1)->rx.evm_valid);
+    CHECK(r.close_rx_window([](const std::array<uint8_t, 6> &) -> uint16_t { return 1; }).empty()); /* drained */
+    /* a UE released before the window closes is not recreated by its frames */
+    CHECK(r.rx_frame(f1, sizeof f1, 60, 40, -30, 4) && r.release(b) && !r.find_context(1));
+    CHECK(r.close_rx_window([](const std::array<uint8_t, 6> &t) -> uint16_t { return t[5]; }).empty() &&
+          !r.find_context(1));
   }
 
   if (failures == 0)

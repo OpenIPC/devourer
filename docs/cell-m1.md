@@ -90,6 +90,36 @@ clock. On the rig it is driven by testrig `scripts/m1_cell_2ue.sh`.
   schedule (Kestrel's TBTT behaviour after a TSF step), which is at most one
   step-size off.
 
+## Per-UE state (`UeRegistry`)
+
+Each UE id the cell schedules has a `UeContext` in the registry
+(`src/cell/UeRegistry.h`). It holds the UE's timing-advance loop
+(`src/cell/TimingAdvance.h`, moved from the example) and its latest
+uplink-quality window: RSSI, SNR and EVM of its own frames, attributed per
+transmitter (`UeRxAttribution`, M0), not the device-wide `GetRxQuality`.
+- A context comes with a bind or an admission, and is dropped with a
+  release. An id reused by another UE starts fresh; before, the DU's TA map
+  kept a departed UE's TA for the next holder.
+- The DU closes the uplink window on its TA cadence (`CELL_TA_EVERY_S`) and
+  logs it per UE (`cell.ue_rx`). Link adaptation still steers on the SNR the
+  UE reports for the downlink; the uplink window is the per-UE measurement
+  the DU has of each UE, for whoever needs it (#566: EVM over F1).
+
+**Rig** (one run each, on this code):
+- `m1_cell_2ue` passes: both UEs in slot both ways, no overlaps. The DU
+  logged 60 uplink windows per UE (2 s each). Full windows held 20 frames,
+  the median for both UEs; the edge windows were partial (UE1 9 at the end,
+  UE2 4 at the start), from a UE starting or stopping mid-window. Last full
+  windows: RSSI −51 / −53 dBm, SNR 38 / 39 dB, EVM −33 / −31 dB.
+- `m3_cell_rach --leave-at` passes: the joiner's context was created at its
+  join and dropped with its release, 51 superframes after its last uplink.
+- `m6_handover` passes (arrivals, and an aborted arrival's reset).
+- **A reused id:** its frames carry the same transmitter address
+  (02:ce:11:cell:ue) as the previous holder's, so the first window after a
+  context begins may mix both; it is skipped (`rx_fresh`), at the cost of a
+  new UE's first window. Not run on the rig: a UE leaving and another taking
+  its id within one window.
+
 ## QoS classes (`CellScheduler`)
 
 M1's grid is fixed (one DL and one UL opportunity per UE per superframe),

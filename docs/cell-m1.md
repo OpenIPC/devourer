@@ -90,6 +90,42 @@ clock. On the rig it is driven by testrig `scripts/m1_cell_2ue.sh`.
   schedule (Kestrel's TBTT behaviour after a TSF step), which is at most one
   step-size off.
 
+## QoS classes (`CellScheduler`)
+
+M1's grid is fixed (one DL and one UL opportunity per UE per superframe),
+so a class can't buy a UE airtime. It decides how the UE is served: its 5QI
+sets the HARQ budget, a DL discard timer (also applied to a retransmission
+past it), link adaptation, and admission priority. `src/cell/CellScheduler.h`
+holds the mechanism and the class table. The DU takes `CELL_QOS="ue:5qi,..."`
+and logs each UE's policy (`cell.qos`) and its discards (`cell.dl.discard`).
+A UE not listed is served as before.
+
+**Rig** (testrig `scripts/m1_qos.sh`): UE1's DL at a fixed 54 Mb/s, link
+adaptation off and −15 dB of per-packet attenuation, so about half the
+first transmissions are lost; the CU sends one PDU per 100 ms. Two rounds,
+interleaved. Each class's policy was logged as derived, and no PDU arrived on
+a later attempt than its class allows.
+
+| class (2 runs) | PDUs lost | delivered on attempt 1 / 2 / 3 / 4 |
+|---|---|---|
+| none (the cell's HARQ: 4 attempts, 3-superframe round trip) | 8.1 % | 53 / 31 / 11 / 4 % |
+| 5QI 9 (PDB 300 ms: no retry fits a 3-superframe round trip, 1 attempt) | 52 % | 100 % |
+| 5QI 9 with a 1-superframe round trip (`CELL_HARQ_TIMEOUT_SF=1`, 2 attempts) | 33 % | 67 / 33 % |
+| 5QI 1 (1 attempt, `pdb_unmet`) | 54 % | 100 % |
+
+- **The HARQ round trip decides what a budget buys.** On this rig every
+  retransmission comes from the timeout: the HARQ stats showed 0 NACKs,
+  because the UE's feedback reaches the DU a superframe or two late. So a
+  retry lands one round trip (3 superframes, ~307 ms) after the attempt
+  before it. A first version counted retries a superframe apart: 5QI 9 got 2
+  attempts, and its second came after its 300 ms budget (sent late, then
+  discarded once retransmissions were checked against the timer). The
+  policy now counts the configured round trip.
+- **The cost is delivery:** a tighter budget bounds the delay (each retry is
+  a round trip) and pays in delivery on this deliberately lossy link. The
+  attenuation sits on a steep edge (−14 dB lost nothing at four attempts,
+  −17 dB lost everything), so losses vary between runs.
+
 ## Running it
 
 ```sh

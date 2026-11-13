@@ -140,6 +140,17 @@ int main() {
     CHECK(t && !t->retx && t->seq == 3 && t->low == 3);
   }
 
+  /* --- abandon(seq): one expired frame given up, the rest untouched. --- */
+  {
+    HarqConfig c;
+    c.timeout_sf = 10;
+    HarqSender s(c);
+    for (int i = 0; i < 3; ++i)
+      s.next(static_cast<uint64_t>(i), true);
+    CHECK(s.abandon(1) && !s.abandon(1) && s.inflight() == 2 && s.stats().abandoned == 1);
+    CHECK(s.low() == 0);
+  }
+
   /* --- Implausible feedback (claims seqs never sent) is ignored whole. --- */
   {
     HarqSender s;

@@ -100,6 +100,11 @@
 //   CELL_CS_RETUNE_US [26000] a channel move's retune budget (DU and UE):
 //                             the move needs it, + 2 ms, after every slot and
 //                             before the next beacon (ChannelSwitch.h)
+//   CELL_UE_MEAS_LEVEL [""]   UE, test benches: "cell:dBm,..." — each listed
+//                             cell's beacon measurements shifted so their
+//                             median after calibration (8 beacons) is that
+//                             level (MeasLevelPin): a suite's geometry
+//                             independent of where the radios stand
 //   CELL_RELEASE_SF [50]      DU: release a JOINED UE whose uplink has been
 //                             absent this many superframes (static UEs stay)
 //   CELL_GAP_SUSPEND_SF [0]   DU and UEs alike: suspend gaps (MeasGap.h). A
@@ -3283,6 +3288,18 @@ int run_ue(IRadio *dev, const Cfg &c) {
   int64_t gap_retune_us = gap_retune_floor_us;
   std::map<uint16_t, int64_t> gap_parked;
   int64_t no_step_until_sf = -1; /* hold TSF steps until this superframe (after a gap) */
+  /* CELL_UE_MEAS_LEVEL: a test bench's placement, emulated (MeasLevelPin). */
+  MeasLevelPin meas_pin(std::getenv("CELL_UE_MEAS_LEVEL") ? std::getenv("CELL_UE_MEAS_LEVEL") : "");
+  if (!meas_pin.bad().empty()) { /* a typo must not leave a cell on its real level unnoticed */
+    fprintf(stderr, "CELL_UE_MEAS_LEVEL: cannot parse \"%s\" (want cell:dBm,...)\n", meas_pin.bad().front().c_str());
+    return 2;
+  }
+  if (meas_pin.active()) { /* everything this UE measures of these cells is shifted: say so */
+    const std::string d = meas_pin.describe();
+    char l[200];
+    snprintf(l, sizeof l, "{\"ev\":\"cell.ue.meas_pin_cfg\",\"levels\":\"%.150s\"}", d.c_str());
+    emit(l);
+  }
   devourer::cell::MeasTable ue_meas(devourer::cell::L3FilterConfig{
       static_cast<int>(envl("CELL_MEAS_L3_K", 4, 0, 19)), envl("CELL_MEAS_STALE_MS", 3000, 100, 60000)});
   const int64_t gap_every_sf = envl("CELL_UE_GAP_SF", 10, 0, 100000); /* 0 = no gaps */
@@ -3456,9 +3473,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
               }
             }
           }
-          if (nl) {
-            ue_meas.update(bc, 0, static_cast<double>(p.RxAtrib.rssi[0]) - 110.0,
-                           static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, ue_ms());
+          std::optional<double> lvl = static_cast<double>(p.RxAtrib.rssi[0]) - 110.0;
+          if (nl && meas_pin.active()) {
+            const bool was = meas_pin.offset(bc).has_value();
+            lvl = meas_pin.adjust(bc, *lvl);
+            if (!was && meas_pin.offset(bc)) {
+              char l[120];
+              snprintf(l, sizeof l, "{\"ev\":\"cell.ue.meas_pin\",\"ue\":%d,\"cell\":%u,\"offset_db\":%.1f}",
+                       me_a.load(), bc, *meas_pin.offset(bc));
+              emit(l);
+            }
+          }
+          if (nl && lvl) {
+            ue_meas.update(bc, 0, *lvl, static_cast<double>(p.RxAtrib.snr[0]) / 2.0 /* raw dB*2 */, ue_ms());
             /* The serving cell's list: only a generation not older than the
              * one accepted (a replayed older list is refused). */
             if (bc == cell_a.load() && (!have_nbrs_gen || nl->gen >= nbrs_gen)) {

@@ -251,6 +251,18 @@ public:
     return out;
   }
 
+  /* Give up one frame in flight (its content expired: a QoS discard timer).
+   * Counted as abandoned; false if `seq` is not in flight. */
+  bool abandon(uint32_t seq) {
+    for (auto it = q_.begin(); it != q_.end(); ++it)
+      if (it->seq == seq) {
+        q_.erase(it);
+        ++st_.abandoned;
+        return true;
+      }
+    return false;
+  }
+
   /* Window low edge: the oldest unresolved seq, or the next new one. */
   uint32_t low() const { return q_.empty() ? next_seq_ : q_.front().seq; }
   size_t inflight() const { return q_.size(); }

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "cell/CellScheduler.h"
 #include "cell/GrantMap.h"
 #include "cell/SlotGrid.h"
 
@@ -275,6 +276,41 @@ int main() {
     CHECK(r.cell_id() == 2 && r.current(1) == nullptr);
     CHECK(r.offer(other)); /* a lower epoch is fine in the new cell */
     CHECK(r.current(1)->cell_id == 2 && r.current(1)->epoch == 3);
+  }
+
+  /* --- CellScheduler: 5QI classes -> per-UE policy, admission. --- */
+  {
+    using namespace devourer::cell;
+    CHECK(qos_class(9) && qos_class(9)->priority == 90 && !qos_class(9)->gbr && qos_class(9)->pdb_ms == 300);
+    CHECK(qos_class(1) && qos_class(1)->gbr && qos_class(1)->per == 1e-2);
+    CHECK(!qos_class(42));
+    const int64_t P = 102400; /* 100 TU */
+    /* best effort, 300 ms, a 3-superframe HARQ round trip: (300 - 102.4) /
+     * 307.2 -> no retry fits; with a 1-superframe round trip one does */
+    auto be = policy_for(*qos_class(9), P);
+    CHECK(be.harq_attempts == 1 && be.discard_ms == 300 && !be.pdb_unmet);
+    CHECK(policy_for(*qos_class(9), P, {}, 4, 5, 1).harq_attempts == 2);
+    CHECK(be.la.down_loss == 0.1 && be.la.up_loss == 0.01 && be.la.hysteresis_db == LinkAdaptConfig{}.hysteresis_db + 1);
+    /* voice, 100 ms < one superframe: one attempt, flagged, discard not
+     * below a superframe + the slot wait; tolerant PER */
+    auto vo = policy_for(*qos_class(1), P);
+    CHECK(vo.harq_attempts == 1 && vo.pdb_unmet && vo.discard_ms == 102 + 5);
+    CHECK(vo.la.down_loss == 0.3 && vo.la.up_loss == 0.05);
+    /* the same class on a 20 TU superframe: (100 - 20.48) / 61.44 -> 1
+     * retry (2 attempts); with a 1-superframe round trip, 4 (capped) */
+    auto vo20 = policy_for(*qos_class(1), 20480, {}, 4);
+    CHECK(vo20.harq_attempts == 2 && !vo20.pdb_unmet && vo20.discard_ms == 100);
+    CHECK(policy_for(*qos_class(1), 20480, {}, 4, 5, 1).harq_attempts == 4);
+    /* 1e-3: the cell's own link adaptation */
+    CHECK(policy_for(*qos_class(7), P).la.down_loss == LinkAdaptConfig{}.down_loss);
+    /* admission: priority, GBR first at a tie, then first come */
+    QosClass g{100, true, 50, 100, 1e-3}, n{101, false, 50, 100, 1e-3};
+    CHECK(admission_order({*qos_class(9), *qos_class(5), n, g, *qos_class(1)}) ==
+          std::vector<size_t>({1, 4, 3, 2, 0}));
+    /* preemption: only a strictly lower priority, the lowest (latest of equals) */
+    CHECK(preempt_for(*qos_class(5), {*qos_class(9), *qos_class(7), *qos_class(9)}) == 2u);
+    CHECK(!preempt_for(*qos_class(9), {*qos_class(9), *qos_class(7)}));
+    CHECK(!preempt_for(*qos_class(7), {*qos_class(5)}));
   }
 
   if (failures == 0)

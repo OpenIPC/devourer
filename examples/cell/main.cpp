@@ -97,6 +97,10 @@
 //   CELL_JOINER_MAC           the joiner's MAC (default: derived from the host
 //                             name + DEVOURER_PCIE_BDF, so a restart re-joins
 //                             into the same position instead of a new one)
+//   CELL_QOS [""]             DU: "ue:5qi,..." — a UE's QoS class (5QI 1 2 3
+//                             5 7 9, CellScheduler.h): its HARQ budget, DL
+//                             discard timer and link adaptation. Unlisted:
+//                             the cell's HARQ and link adaptation, no discard
 //   CELL_CS_RETUNE_US [26000] a channel move's retune budget (DU and UE):
 //                             the move needs it, + 2 ms, after every slot and
 //                             before the next beacon (ChannelSwitch.h)
@@ -251,6 +255,7 @@
 #include "cell/SlotGrid.h"
 #include "logger.h"
 #include "radio_open.h"
+#include "cell/CellScheduler.h"
 #include "cell/ChannelSwitch.h"
 #include "cell/Coord.h"
 #include "cell/F1.h"
@@ -656,7 +661,31 @@ int run_du(IRadio *dev, const Cfg &c) {
   const uint16_t atten_ue = static_cast<uint16_t>(envl("CELL_ATTEN_UE", 0, 0, 254));
   const int8_t atten_db = static_cast<int8_t>(envl("CELL_ATTEN_DB", 0, -40, 0));
   const int64_t P = grid->period_us();
-  if (atten_ue != 0 && atten_db != 0 && !dev->GetAdapterCaps().per_packet_txpower) {
+  /* M1 QoS (CellScheduler.h): CELL_QOS="ue:5qi,..." gives a UE a 5QI class,
+   * and with it its HARQ budget, DL discard timer and link adaptation. A UE
+   * not listed is served as before (the cell's HARQ and link adaptation, no
+   * discard): DAPS's buffered PDUs, for one, are older than any budget. */
+  std::map<uint16_t, devourer::cell::UePolicy> qos_pol;
+  if (const char *q = std::getenv("CELL_QOS")) {
+    std::string spec(q);
+    for (size_t i = 0; i < spec.size();) {
+      const size_t comma = spec.find(',', i);
+      const std::string item = spec.substr(i, comma == std::string::npos ? std::string::npos : comma - i);
+      unsigned ue = 0, qi = 0;
+      char tail = 0;
+      const auto cls = sscanf(item.c_str(), "%u:%u%c", &ue, &qi, &tail) == 2 && ue >= 1 && ue <= 254 && qi <= 255
+                           ? devourer::cell::qos_class(static_cast<uint8_t>(qi))
+                           : std::nullopt;
+      if (!cls) {
+        fprintf(stderr, "CELL_QOS: \"%s\" is not ue:5qi with a known 5QI (1 2 3 5 7 9)\n", item.c_str());
+        return 2;
+      }
+      qos_pol[static_cast<uint16_t>(ue)] = devourer::cell::policy_for(*cls, P, {}, hc.max_attempts, 5, hc.timeout_sf);
+      if (comma == std::string::npos)
+        break;
+      i = comma + 1;
+    }
+  }   if (atten_ue != 0 && atten_db != 0 && !dev->GetAdapterCaps().per_packet_txpower) {
     fprintf(stderr, "CELL_ATTEN_DB needs per-packet TX power (per_packet_txpower=0): the "
                     "attenuation would silently not apply\n");
     return 2;
@@ -1227,6 +1256,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     /* The CU DL PDUs each HARQ seq in flight carries, and their stream (a
      * retransmission re-airs the same ones). */
     std::map<uint32_t, std::pair<uint64_t, std::vector<uint32_t>>> pdus;
+    std::map<uint32_t, int64_t> first_ms; /* each seq's first attempt (QoS discard) */
     /* A handover arrival not heard yet: the frames aired to it so far may
      * have gone out before the UE switched (see the uplink handler). */
     bool arriving = false;
@@ -1245,6 +1275,8 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint32_t last_sn = 0; /* the newest sn taken in it */
     std::chrono::steady_clock::time_point last_push;
     uint64_t dropped = 0, refused = 0;
+    std::map<uint32_t, int64_t> at_ms; /* when each sn came (the QoS discard timer) */
+    uint64_t discarded = 0;
   };
   constexpr size_t kDlQueueMax = 64;
   /* A contiguous queue's out-of-window PDUs (at most kDlQueueMax - 33) and the
@@ -1298,8 +1330,24 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
     return {gone.size(), requeued};
   };
+  /* A UE's DL state, from its QoS class if it has one (qos_pol). */
+  auto make_dlue = [&](uint16_t ue) {
+    auto it = qos_pol.find(ue);
+    if (it == qos_pol.end())
+      return DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)};
+    HarqConfig h = hc;
+    h.max_attempts = it->second.harq_attempts;
+    char l[220];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.qos\",\"ue\":%u,\"qi\":%u,\"harq_attempts\":%d,\"discard_ms\":%lld,"
+             "\"pdb_unmet\":%d,\"la_down\":%.2f,\"la_up\":%.2f}",
+             ue, it->second.qi, h.max_attempts, (long long)it->second.discard_ms, it->second.pdb_unmet ? 1 : 0,
+             it->second.la.down_loss, it->second.la.up_loss);
+    emit(l);
+    return DlUe{HarqSender(h), LinkAdapt(it->second.la, dl_rate0)};
+  };
   for (uint16_t ue : ues)
-    dlue.emplace(ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
+    dlue.emplace(ue, make_dlue(ue));
   std::vector<uint8_t> rar_on_air;                 /* the RACH answers in the live beacon */
   std::vector<uint8_t> ho_on_air;                  /* the handover IEs in the live beacon */
   std::vector<devourer::cell::RachResponse> rar_on_air_set; /* ... as answers, for accounting */
@@ -1891,6 +1939,16 @@ int run_du(IRadio *dev, const Cfg &c) {
           q.last_sn = dp->sn;
           q.sns.push_back(dp->sn);
           q.last_push = std::chrono::steady_clock::now();
+          q.at_ms[dp->sn] = now_ms();
+          if (q.at_ms.size() > 4 * kDlQueueMax) {
+            /* Forget the old: a PDU in HARQ flight may come back to the
+             * queue (an arrival's abandon), so recent ones are kept too. */
+            const int64_t nq = now_ms();
+            for (auto a = q.at_ms.begin(); a != q.at_ms.end();)
+              a = nq - a->second > 10000 && std::find(q.sns.begin(), q.sns.end(), a->first) == q.sns.end()
+                      ? q.at_ms.erase(a)
+                      : std::next(a);
+          }
           const auto du_it = dlue.find(dp->ue);
           if (q.offered || du_it == dlue.end() || du_it->second.arriving) {
             /* a DAPS target's queue (staged, arriving, or answering visits):
@@ -2278,6 +2336,28 @@ int run_du(IRadio *dev, const Cfg &c) {
           if (d.arriving)
             arrival_abandon(d, ue);
           tx = d.harq.next(static_cast<uint64_t>(sf), true);
+          /* A classed UE's retransmission past its discard timer (counted
+           * from the first attempt) is given up, not aired late. */
+          if (auto pol = qos_pol.find(ue); pol != qos_pol.end())
+            for (int k = 0; k < 32 && tx && tx->retx; ++k) {
+              auto f = d.first_ms.find(tx->seq);
+              const int64_t age = f == d.first_ms.end() ? 0 : now_ms() - f->second;
+              if (age <= pol->second.discard_ms)
+                break;
+              size_t n = 0;
+              if (auto pi = d.pdus.find(tx->seq); pi != d.pdus.end()) {
+                n = pi->second.second.size();
+                d.pdus.erase(pi);
+              }
+              d.first_ms.erase(tx->seq);
+              d.harq.abandon(tx->seq);
+              char l[160];
+              snprintf(l, sizeof l,
+                       "{\"ev\":\"cell.dl.discard\",\"ue\":%u,\"sf\":%lld,\"n\":%zu,\"oldest_ms\":%lld,\"retx\":1}",
+                       ue, (long long)sf, n, (long long)age);
+              emit(l);
+              tx = d.harq.next(static_cast<uint64_t>(sf), true);
+            }
         } else {
           const uint32_t s = d.plain_seq++;
           tx = devourer::cell::HarqTx{s, s % devourer::cell::kHarqProcesses, s, 1, false};
@@ -2296,13 +2376,43 @@ int run_du(IRadio *dev, const Cfg &c) {
              * rest, still sent in case an answer was lost — the UE takes a
              * late copy within its reorder window. Without answers this is
              * plain queue order. */
+            /* The QoS discard timer: a PDU queued past its UE's budget is
+             * dropped, not sent late (counted, logged per frame). */
+            if (auto pol = qos_pol.find(ue); pol != qos_pol.end()) {
+              const int64_t now_q = now_ms();
+              size_t n = 0;
+              int64_t oldest = 0;
+              auto &dq = qi->second.sns;
+              for (auto it = dq.begin(); it != dq.end();) {
+                auto a = qi->second.at_ms.find(*it);
+                if (a != qi->second.at_ms.end() && now_q - a->second > pol->second.discard_ms) {
+                  oldest = std::max(oldest, now_q - a->second);
+                  qi->second.at_ms.erase(a);
+                  it = dq.erase(it);
+                  ++n;
+                } else {
+                  ++it;
+                }
+              }
+              if (n) {
+                qi->second.discarded += n;
+                char l[140];
+                snprintf(l, sizeof l, "{\"ev\":\"cell.dl.discard\",\"ue\":%u,\"sf\":%lld,\"n\":%zu,\"oldest_ms\":%lld}",
+                         ue, (long long)sf, n, (long long)oldest);
+                emit(l);
+              }
+            }
             pdus = pick_dl_pdus(qi->second.sns, qi->second.offered, kDlMaxPdus);
             if (harq_on && !pdus.empty())
               d.pdus[tx->seq] = {pdu_epoch, pdus};
+            if (harq_on)
+              d.first_ms[tx->seq] = now_ms();
           }
           /* Resolved seqs (below the window's low edge) carry nothing more. */
           for (auto pi = d.pdus.begin(); pi != d.pdus.end();)
             pi = devourer::cell::seq_lt(pi->first, tx->low) ? d.pdus.erase(pi) : std::next(pi);
+          for (auto fi = d.first_ms.begin(); fi != d.first_ms.end();)
+            fi = devourer::cell::seq_lt(fi->first, tx->low) ? d.first_ms.erase(fi) : std::next(fi);
           if (auto qi = dlq.find(ue); qi != dlq.end())
             q_left = qi->second.sns.size();
         }
@@ -2564,7 +2674,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             ta.emplace(u.ue, TaLoop(ta_gain, P / 4));
             /* Fresh DL state (an id reused after another UE left keeps
              * nothing of it); its DL queue is the DAPS buffer: kept. */
-            dlue.insert_or_assign(u.ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
+            dlue.insert_or_assign(u.ue, make_dlue(u.ue));
             dlue.at(u.ue).arriving = true;
             last_ul_sf[u.ue] = static_cast<int64_t>(hi->second.eff_sf); /* silence clock at the switch */
             ho_eff = hi->second.eff_sf;
@@ -2585,7 +2695,7 @@ int run_du(IRadio *dev, const Cfg &c) {
           /* Fresh DL state; a joiner has no DL stream yet (the CU starts
            * one once this DU reports it): a queue left under its id is
            * another UE's. */
-          dlue.insert_or_assign(u.ue, DlUe{HarqSender(hc), LinkAdapt({}, dl_rate0)});
+          dlue.insert_or_assign(u.ue, make_dlue(u.ue));
           dlq.erase(u.ue);
           last_ul_sf[u.ue] = sf; /* its silence clock starts at admission */
           changed = true;

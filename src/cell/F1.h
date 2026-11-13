@@ -81,8 +81,9 @@ namespace devourer::cell::f1 {
 /* 12: Downlink (CU -> DU, the CU's DL PDUs; DAPS duplicates them). 13:
  * Report carries the DU's suspend-gap period. */
 /* 14: Uplink carries its reception instant (net_us). */
-/* v14: Uplink.net_us; v15: ChannelSwitch; v16: EVM in HeardUe and UeMeas */
-constexpr uint8_t kVersion = 16;
+/* v14: Uplink.net_us; v15: ChannelSwitch; v16: EVM in HeardUe and UeMeas;
+ * v17: UeMeas.ta_us and HoCommand.ta_us (the TA carried in a handover) */
+constexpr uint8_t kVersion = 17;
 constexpr int8_t kNoEvm8 = INT8_MIN;    /* HeardUe.evm_db: none measured */
 constexpr int16_t kNoEvmQ = INT16_MIN;  /* UeMeas.evm_qdb: none measured */
 constexpr size_t kTagLen = 8;
@@ -144,6 +145,7 @@ struct UeMeas {
   int16_t snr_qdb = 0;
   uint16_t age_ms = 0; /* since its newest sample, at report time (saturates) */
   int16_t evm_qdb = kNoEvmQ; /* filtered EVM, quarter dB; kNoEvmQ: none */
+  int16_t ta_us = 0;         /* the DU's timing advance for this UE now */
   bool operator==(const UeMeas &) const = default;
 };
 
@@ -410,6 +412,7 @@ inline std::vector<uint8_t> encode_report(const Report &r, const Mac &mac) {
     put(m, static_cast<uint16_t>(q.snr_qdb), 2);
     put(m, q.age_ms, 2);
     put(m, static_cast<uint16_t>(q.evm_qdb), 2);
+    put(m, static_cast<uint16_t>(q.ta_us), 2);
   }
   m.push_back(static_cast<uint8_t>(r.ue_meas.size()));
   for (const UeCellMeas &q : r.ue_meas) {
@@ -492,6 +495,7 @@ inline std::optional<Report> decode_report(const uint8_t *p, size_t n, const Mac
     q.snr_qdb = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     q.age_ms = static_cast<uint16_t>(r.get(2));
     q.evm_qdb = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
+    q.ta_us = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
     x.meas.push_back(q);
   }
   const size_t nu = r.get(1);
@@ -599,6 +603,7 @@ inline std::vector<uint8_t> encode_handover(uint16_t du, const HoCommand &h, con
   put(m, h.seq, 8);
   m.insert(m.end(), h.ctx.begin(), h.ctx.end());
   put_home(m, h.home);
+  put(m, static_cast<uint16_t>(h.ta_us), 2);
   return seal(std::move(m), mac);
 }
 
@@ -625,6 +630,7 @@ inline std::optional<std::pair<uint16_t, HoCommand>> decode_handover(const uint8
   for (auto &b : h.ctx)
     b = static_cast<uint8_t>(r.get(1));
   h.home = get_home(r);
+  h.ta_us = static_cast<int16_t>(static_cast<uint16_t>(r.get(2)));
   if (!r.ok || r.i != r.n)
     return std::nullopt;
   return std::make_pair(du, h);

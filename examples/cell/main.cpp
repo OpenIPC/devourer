@@ -1396,7 +1396,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint64_t eff_sf = 0;
     int16_t ta_us = 0; /* the UE's TA at its source (HoCommand v17) */
   };
-  std::map<uint16_t, int16_t> ta_report; /* f1_mu: each own UE's TA, for the report */
+  std::map<uint16_t, int16_t> ta_report; /* f1_mu: each own UE's TA in the map on air */
   struct HoOut {
     uint32_t id = 0;
     uint64_t eff_sf = 0;
@@ -2799,7 +2799,6 @@ int run_du(IRadio *dev, const Cfg &c) {
     }
     if (ta_on && std::chrono::steady_clock::now() >= next_ta) {
       next_ta += std::chrono::seconds(ta_every_s);
-      std::map<uint16_t, int16_t> tas; /* published to the report after mu (no nesting) */
       {
         std::lock_guard<std::mutex> lk(mu);
         for (Grant &g : next.grants) {
@@ -2850,11 +2849,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             }
           }
         }
-        for (const Grant &g : next.grants)
-          tas[g.ue] = static_cast<int16_t>(reg.context(g.ue).ta.ta());
       }
-      std::lock_guard<std::mutex> lk(f1_mu);
-      ta_report = std::move(tas);
     }
     /* Each UE's uplink quality over the window, from its own frames
      * (UeRegistry; the SA is 02:ce:11:<cell>:<ue>): closed on the TA cadence,
@@ -3060,6 +3055,15 @@ int run_du(IRadio *dev, const Cfg &c) {
           }
           prev_map = map;
           map = next;
+          {
+            /* The TA each UE runs is its grant's in the map now on air: the
+             * report carries exactly that (a carried arrival's at once, a
+             * released ID's never, a failed publish's not at all). */
+            std::lock_guard<std::mutex> lk(f1_mu);
+            ta_report.clear();
+            for (const Grant &g : map.grants)
+              ta_report[g.ue] = g.ta_us;
+          }
           if (f1_eff) {
             std::lock_guard<std::mutex> lk(f1_mu);
             /* due() released it this pass and the deadline was checked just

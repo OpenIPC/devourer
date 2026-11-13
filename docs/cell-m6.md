@@ -1666,8 +1666,9 @@ The UEs on this rig run a TA of about −420 µs: their inherent actuation
 offset, the same at every cell. A target whose TA loop starts from 0 sees
 the arriving UE that far off and halves it every 2 s (`CELL_TA_EVERY_S`,
 gain 0.5). Since F1 v17 the CU carries the TA instead:
-- each DU reports its own UEs' TA in `UeMeas.ta_us`, refreshed on the TA
-  cadence;
+- each DU reports its own UEs' TA in `UeMeas.ta_us`: the TA of each UE's
+  grant in the map on air, taken when a map goes on air (a failed publish,
+  a released ID or a pending loop step never reaches the report);
 - the CU puts the source's value in `HoCommand.ta_us` (`RAN_HO_TA`, on by
   default; `ran.ho_cmd` logs it);
 - the target starts the arriving UE's TA loop and its first grant there at

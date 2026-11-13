@@ -1680,9 +1680,9 @@ Linux stack:
 | 157 / 149 | 435–663 | 5729–5804 |
 | 149 / 149 | 415–542 | 5671–5865 |
 
-- **An ordinary roam costs 0.38–0.66 s of DL here** (3–6 PDUs): about 250 ms
-  for the supplicant's authentication, association and four-way handshake,
-  then the data path. The M6 switch costs 84–123 ms on the same radios, with
+- **An ordinary roam costs 0.38–0.66 s of DL here** (3–6 PDUs). Of that,
+  the supplicant log shows 0.32–0.45 s from its first authentication attempt
+  to connected (authentication, association, four-way handshake). The M6 switch costs 84–123 ms on the same radios, with
   no scan, no re-association and no clock re-acquisition.
 - **Returning to the AP the client joined first took 5.6–5.9 s, every
   time.** That AP logs its authentication response three times as not

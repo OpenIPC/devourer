@@ -1403,6 +1403,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint64_t eff_sf = 0;
     uint16_t target = 0, target_ue = 0;
     std::vector<uint8_t> ie;
+    bool cond = false; /* conditional: eff_sf is the expiry; the UE may leave any time before it */
   };
   std::map<uint16_t, HoIn> ho_in;   /* by target UE id */
   std::set<uint16_t> ho_cancel;     /* published arrivals the CU cancelled */
@@ -2209,7 +2210,7 @@ int run_du(IRadio *dev, const Cfg &c) {
               auto bytes = devourer::cell::encode_ho_ie(ie, auth);
               if (!bytes.empty()) {
                 std::lock_guard<std::mutex> lk(f1_mu);
-                ho_out[cmd.ue] = {cmd.id, ie.effective_sf, cmd.target, cmd.target_ue, bytes};
+                ho_out[cmd.ue] = {cmd.id, ie.effective_sf, cmd.target, cmd.target_ue, bytes, cmd.conditional()};
                 /* DAPS: its target identity, heard here after the switch. */
                 daps_ids[{cmd.target, cmd.target_ue}] =
                     static_cast<int64_t>(ie.effective_sf) + ho_release_sf;
@@ -2768,18 +2769,25 @@ int run_du(IRadio *dev, const Cfg &c) {
       for (const auto &kv : ho_out_snap) {
         const uint16_t ue = kv.first;
         const HoOut &ho = kv.second;
-        if (static_cast<uint64_t>(sf) <= ho.eff_sf + 2) {
+        auto h = heard_ul_sf.find(ue);
+        /* Conditional: the UE leaves whenever its condition holds, so a UE
+         * silent here release_sf superframes has gone (or is lost to this
+         * cell either way): released now, not held to the expiry — its grant,
+         * the IE on air and the CU's view of it go with it. Once out of the
+         * live map, the entry concludes. */
+        const bool cond_gone = ho.cond && (!map.find(ue) || (h != heard_ul_sf.end() &&
+                                                            sf - h->second > static_cast<int64_t>(ho_release_sf)));
+        if (!cond_gone && static_cast<uint64_t>(sf) <= ho.eff_sf + 2) {
           if (synced)
             ho_ies.insert(ho_ies.end(), ho.ie.begin(), ho.ie.end());
           continue;
         }
-        if (static_cast<uint64_t>(sf) < ho.eff_sf + static_cast<uint64_t>(ho_release_sf))
+        if (!cond_gone && static_cast<uint64_t>(sf) < ho.eff_sf + static_cast<uint64_t>(ho_release_sf))
           continue;
         /* Its last uplink as ours in the switch superframe itself (+2: the
          * UE's poll and its beacon update) is still the old identity. */
-        auto h = heard_ul_sf.find(ue);
-        const bool switched =
-            h == heard_ul_sf.end() || h->second <= static_cast<int64_t>(ho.eff_sf) + 2;
+        const bool switched = cond_gone || h == heard_ul_sf.end() ||
+                              h->second <= static_cast<int64_t>(ho.eff_sf) + 2;
         if (switched && map.find(ue)) {
           /* Released through the normal publish; this entry concludes once
            * the live map no longer has the UE (a deferred publish retries). */
@@ -3426,8 +3434,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
   /* A conditional handover's switch decision (HoCommand.h), and the last
    * source superframe a serving beacon was heard in (-1 = none yet). */
   std::optional<devourer::cell::ChoCondition> cho;
-  int64_t serv_bcn_sf = -1;
-  uint64_t serv_bcn_seen = 0;
+  /* The serving superframe of the last serving beacon heard, from the
+   * beacon's own departure TSF (the RX path): a late loop pass does not
+   * delay a loss. -1 = none since the last switch. */
+  std::atomic<int64_t> serv_bcn_sf{-1};
   /* M5: the serving cell's channel move (ChannelSwitch.h), as seen in its
    * beacon, accepted (CsReceiver), and after it the way back if the cell is
    * not heard on the new channel. */
@@ -3510,6 +3520,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
     int64_t delta_us = 0;
     int64_t deadline_sf = 0; /* in the target's count */
     uint32_t id = 0;
+    uint64_t bcn_at = 0; /* serving beacons heard at the switch: commit only after a newer one */
   };
   std::optional<HoBack> ho_back;
   std::optional<GrantMapReceiver> rxr_source;
@@ -3706,6 +3717,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
         if (auto cs = devourer::cell::find_cs_ie(p.Data.data(), p.Data.size(), cell_a.load(), auth))
           cs_seen = cs;
         ++serv_bcn_n;
+        serv_bcn_sf.store(static_cast<int64_t>(*eg) / P);
         wrap.feed(p.RxAtrib.tsfl);
         if (reattach_sf > 0 && sync.Steps() != reattach_armed_steps) {
           reattach_armed_steps = sync.Steps();
@@ -4107,34 +4119,27 @@ int run_ue(IRadio *dev, const Cfg &c) {
         }
         ho_seen.reset();
       }
-      /* The serving cell heard: its beacons, counted by the RX path. */
-      if (const uint64_t nb = serv_bcn_n.load(); nb != serv_bcn_seen) {
-        serv_bcn_seen = nb;
-        serv_bcn_sf = sfn;
-      }
-      /* Conditional: the UE's own decision (its source silent, or the target
-       * ahead on its own measurements); none by the expiry = it stays. */
+      /* Conditional: the UE's own decision (its source silent or no longer
+       * granting it, or the target ahead on its own measurements); at the
+       * expiry it has lapsed and the UE stays. */
       bool cho_go = false;
       if (ho_pending && ho_pending->conditional() && cho) {
+        /* The target's level only while freshly measured: a target that went
+         * quiet must not finish the hold on a cached value (its gap revisit
+         * period, twice, and never under a second). */
+        const int64_t fresh_ms = std::max<int64_t>(1000, 2 * gap_every_sf * P / 1000);
         std::optional<double> sv, tg;
         for (const auto &e : ue_meas.snapshot(ue_ms())) {
           if (e.cell == ho_pending->cell)
             sv = e.rssi_dbm;
-          if (e.cell == ho_pending->target)
+          if (e.cell == ho_pending->target && e.age_ms <= fresh_ms)
             tg = e.rssi_dbm;
         }
-        const auto why = cho->update(sfn, serv_bcn_sf, sv, tg, ue_ms());
+        const GrantMap *cm = rxr.current(static_cast<uint64_t>(sfn));
+        const bool grants = !cm || cm->find(static_cast<uint16_t>(me_a.load()));
+        const auto why = cho->update(sfn, serv_bcn_sf.load(), grants, sv, tg, ue_ms());
         char l[260];
-        if (why != devourer::cell::ChoCondition::Why::None) {
-          cho_go = true;
-          snprintf(l, sizeof l,
-                   "{\"ev\":\"cell.ue.cho_exec\",\"id\":%u,\"why\":\"%s\",\"sf\":%lld,"
-                   "\"expiry_sf\":%llu,\"serving_heard_sf\":%lld,\"serving_dbm\":%.1f,\"target_dbm\":%.1f}",
-                   ho_pending->id, devourer::cell::cho_why_name(why), (long long)sfn,
-                   (unsigned long long)ho_pending->effective_sf, (long long)serv_bcn_sf,
-                   sv ? *sv : 0.0, tg ? *tg : 0.0);
-          emit(l);
-        } else if (static_cast<uint64_t>(sfn) >= ho_pending->effective_sf) {
+        if (why == devourer::cell::ChoCondition::Why::Expired) {
           snprintf(l, sizeof l, "{\"ev\":\"cell.ue.cho_expired\",\"id\":%u,\"sf\":%lld}",
                    ho_pending->id, (long long)sfn);
           emit(l);
@@ -4142,6 +4147,15 @@ int run_ue(IRadio *dev, const Cfg &c) {
           rxr_target.reset();
           visit_tgt_cell = 0;
           cho.reset();
+        } else if (why != devourer::cell::ChoCondition::Why::None) {
+          cho_go = true;
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.cho_exec\",\"id\":%u,\"why\":\"%s\",\"sf\":%lld,"
+                   "\"expiry_sf\":%llu,\"serving_heard_sf\":%lld,\"serving_dbm\":%.1f,\"target_dbm\":%.1f}",
+                   ho_pending->id, devourer::cell::cho_why_name(why), (long long)sfn,
+                   (unsigned long long)ho_pending->effective_sf, (long long)serv_bcn_sf.load(),
+                   sv ? *sv : 0.0, tg ? *tg : 0.0);
+          emit(l);
         }
       }
       if (ho_pending && (cho_go || (!ho_pending->conditional() &&
@@ -4177,7 +4191,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
         force_beacon = true;
         listen_from = -1;     /* DL accounting restarts on the target's count */
         sfn = du_now >= 0 ? du_now / P : 0;
-        serv_bcn_sf = -1; /* another serving count */
+        serv_bcn_sf.store(-1); /* another serving count */
         char l[300];
         snprintf(l, sizeof l,
                  "{\"ev\":\"cell.ue.ho\",\"id\":%u,\"from\":%u,\"ue\":%u,\"to\":%u,"
@@ -4187,7 +4201,8 @@ int run_ue(IRadio *dev, const Cfg &c) {
                  (long long)h.tsf_delta_us, (long long)before, (long long)du_now);
         emit(l);
         rearm_ack = true;
-        ho_back = HoBack{source_key, cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id};
+        ho_back = HoBack{source_key, cur_ch, h.cell, h.ue, h.tsf_delta_us, sfn + ho_fallback_sf, h.id,
+                         serv_bcn_n.load()};
         if (du_now >= 0) {
           restart_du = (sfn + 1) * P + 1000;
           next_pass_at = std::chrono::steady_clock::now() + std::chrono::microseconds(restart_du - du_now);
@@ -4203,7 +4218,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
        * with neither cell). */
       if (ho_back) {
         const GrantMap *tm = rxr.current(static_cast<uint64_t>(sfn));
-        if (tm && tm->find(static_cast<uint16_t>(me_a.load()))) {
+        /* ... and a beacon of the new serving cell heard since the switch: a
+         * map cached from before it proves nothing about the target now. */
+        if (tm && tm->find(static_cast<uint16_t>(me_a.load())) && serv_bcn_n.load() > ho_back->bcn_at) {
           ho_back.reset();
           rxr_source.reset();
         } else if (sfn >= ho_back->deadline_sf) {
@@ -4231,7 +4248,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
           listen_from = -1;
           rearm_ack = true;
           sfn = du_now >= 0 ? du_now / P : 0;
-          serv_bcn_sf = -1; /* another serving count */
+          serv_bcn_sf.store(-1); /* another serving count */
           char l[200];
           snprintf(l, sizeof l,
                    "{\"ev\":\"cell.ue.ho_fallback\",\"id\":%u,\"to\":%u,\"ue\":%u,\"sf\":%lld}",

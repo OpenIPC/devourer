@@ -357,6 +357,9 @@ int main() {
   struct HoFlight {
     devourer::cell::HoCommand cmd;
     bool src_ok = false, tgt_ok = false, switched = false;
+    /* When the command was issued: only a target measurement sampled after
+     * it is the UE (an id's previous holder may still have a live one). */
+    std::chrono::steady_clock::time_point at = std::chrono::steady_clock::now();
   };
   std::map<std::pair<uint16_t, uint16_t>, HoFlight> flights;
   /* The per-cell security context (src/cell/Keys.h): with RAN_MASTER_KEY the
@@ -1238,7 +1241,8 @@ int main() {
             tit->second.rep.net_sf + static_cast<uint64_t>(age_us / tit->second.rep.period_us);
         bool there = false;
         for (const f1::UeMeas &q : tit->second.rep.meas)
-          there = there || (q.ue == fl.cmd.target_ue && live(tit->second, q.age_ms));
+          there = there || (q.ue == fl.cmd.target_ue && live(tit->second, q.age_ms) &&
+                            tit->second.at - std::chrono::milliseconds(q.age_ms) > fl.at);
         /* A conditional move happens whenever the UE decides (before the
          * expiry): the target hearing it is the move. */
         if (there && (fl.cmd.conditional() || tnet >= fl.cmd.effective_net_sf)) {

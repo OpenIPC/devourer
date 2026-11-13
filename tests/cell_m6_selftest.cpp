@@ -417,29 +417,38 @@ int main() {
   /* --- ChoCondition: the UE's own switch decision. --- */
   {
     HoIe h;
+    h.effective_sf = 1000; /* the expiry */
     h.cond_lost_sf = 4;
     h.cond_margin_db = 3;
     h.cond_ttt_ms = 600;
     using W = ChoCondition::Why;
     ChoCondition c(h);
     /* Serving heard, the target not measured: never. */
-    CHECK(c.update(100, 99, -60.0, std::nullopt, 0) == W::None);
+    CHECK(c.update(100, 99, true, -60.0, std::nullopt, 0) == W::None);
     /* The target 2 dB ahead: below the margin. */
-    CHECK(c.update(101, 100, -60.0, -58.0, 100) == W::None && c.held_ms(100) == -1);
+    CHECK(c.update(101, 100, true, -60.0, -58.0, 100) == W::None && c.held_ms(100) == -1);
     /* 3 dB ahead from t=200: fires only after 600 ms of it. */
-    CHECK(c.update(102, 101, -60.0, -57.0, 200) == W::None && c.held_ms(200) == 0);
-    CHECK(c.update(103, 102, -60.0, -57.0, 700) == W::None);
-    /* A pass without the lead restarts the hold. */
-    CHECK(c.update(104, 103, -60.0, -59.0, 750) == W::None && c.held_ms(750) == -1);
-    CHECK(c.update(105, 104, -60.0, -56.0, 800) == W::None);
-    CHECK(c.update(111, 110, -60.0, -56.0, 1400) == W::TargetBetter);
+    CHECK(c.update(102, 101, true, -60.0, -57.0, 200) == W::None && c.held_ms(200) == 0);
+    CHECK(c.update(103, 102, true, -60.0, -57.0, 700) == W::None);
+    /* A pass without the lead (or without a fresh target level) restarts the hold. */
+    CHECK(c.update(104, 103, true, -60.0, std::nullopt, 750) == W::None && c.held_ms(750) == -1);
+    CHECK(c.update(105, 104, true, -60.0, -56.0, 800) == W::None);
+    CHECK(c.update(111, 110, true, -60.0, -56.0, 1400) == W::TargetBetter);
     /* The source silent: 3 superframes is not enough, 4 is. */
     ChoCondition d(h);
-    CHECK(d.update(203, 200, -60.0, -70.0, 0) == W::None);
-    CHECK(d.update(204, 200, -60.0, -70.0, 100) == W::SourceLost);
+    CHECK(d.update(203, 200, true, -60.0, -70.0, 0) == W::None);
+    CHECK(d.update(204, 200, true, -60.0, -70.0, 100) == W::SourceLost);
     /* No serving beacon heard yet (-1): not a loss. */
-    CHECK(d.update(500, -1, std::nullopt, std::nullopt, 200) == W::None);
-    CHECK(std::string(cho_why_name(W::SourceLost)) == "source_lost");
+    CHECK(d.update(500, -1, true, std::nullopt, std::nullopt, 200) == W::None);
+    /* The serving map no longer grants it (the source released it): lost. */
+    CHECK(d.update(501, 500, false, -60.0, -70.0, 300) == W::SourceLost);
+    /* At the expiry it has lapsed, even where a condition first holds there. */
+    ChoCondition e(h);
+    CHECK(e.update(999, 998, true, -60.0, -70.0, 0) == W::None);
+    CHECK(e.update(1000, 990, true, -60.0, -70.0, 100) == W::Expired); /* silent 10 sf, but lapsed */
+    CHECK(e.update(1001, 1000, false, -60.0, -50.0, 200) == W::Expired);
+    CHECK(std::string(cho_why_name(W::SourceLost)) == "source_lost" &&
+          std::string(cho_why_name(W::Expired)) == "expired");
   }
 
   /* --- Replay across beacons: the UE acts once, on a fresh command. --- */

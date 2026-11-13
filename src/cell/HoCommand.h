@@ -267,18 +267,26 @@ private:
 };
 
 /* The UE's side of a conditional handover: when to switch. Fed each pass
- * with the UE's source superframe, the last one it heard a serving beacon
- * in, and its own filtered levels of the serving and target cells (absent =
- * nullopt: never a lead). Fires once: the source silent `lost_sf`
- * superframes, or the target ahead by `margin_db` for `ttt_ms`
- * (continuously: a pass without the lead restarts the hold). */
+ * with the UE's source superframe, the superframe of the last serving beacon
+ * it heard (its own timestamp; -1 = none yet), whether the serving map in
+ * force still grants it, and its own filtered levels of the serving and
+ * target cells — the target's only while freshly measured (absent = nullopt:
+ * never a lead). In order: at or past the expiry it has lapsed, whatever
+ * else holds; the source silent `lost_sf` superframes, or no longer granting
+ * the UE (it released it), is SourceLost; the target ahead by `margin_db`
+ * for `ttt_ms` (continuously: a pass without the lead restarts the hold) is
+ * TargetBetter. */
 class ChoCondition {
 public:
-  enum class Why { None, SourceLost, TargetBetter };
-  explicit ChoCondition(const HoIe &h) : lost_sf_(h.cond_lost_sf), margin_(h.cond_margin_db), ttt_ms_(h.cond_ttt_ms) {}
-  Why update(int64_t sf, int64_t last_serving_sf, std::optional<double> serving_dbm,
+  enum class Why { None, Expired, SourceLost, TargetBetter };
+  explicit ChoCondition(const HoIe &h)
+      : expiry_sf_(static_cast<int64_t>(h.effective_sf)), lost_sf_(h.cond_lost_sf), margin_(h.cond_margin_db),
+        ttt_ms_(h.cond_ttt_ms) {}
+  Why update(int64_t sf, int64_t last_serving_sf, bool serving_grants, std::optional<double> serving_dbm,
              std::optional<double> target_dbm, int64_t now_ms) {
-    if (lost_sf_ > 0 && last_serving_sf >= 0 && sf - last_serving_sf >= lost_sf_)
+    if (sf >= expiry_sf_)
+      return Why::Expired;
+    if (!serving_grants || (lost_sf_ > 0 && last_serving_sf >= 0 && sf - last_serving_sf >= lost_sf_))
       return Why::SourceLost;
     if (serving_dbm && target_dbm && *target_dbm - *serving_dbm >= margin_) {
       if (since_ms_ < 0)
@@ -294,6 +302,7 @@ public:
   int64_t held_ms(int64_t now_ms) const { return since_ms_ < 0 ? -1 : now_ms - since_ms_; }
 
 private:
+  int64_t expiry_sf_;
   int64_t lost_sf_;
   int margin_;
   int64_t ttt_ms_;
@@ -306,6 +315,8 @@ inline const char *cho_why_name(ChoCondition::Why w) {
     return "source_lost";
   case ChoCondition::Why::TargetBetter:
     return "target_better";
+  case ChoCondition::Why::Expired:
+    return "expired";
   default:
     return "none";
   }

@@ -1718,27 +1718,41 @@ re-joins, and a re-join would go to its own cell anyway.
   It publishes the arriving UE's grant as soon as it can be announced, so
   the UE is granted whenever it lands. The silence clock starts at the
   expiry: a UE that never came is released after it.
-- **The UE decides.** Each pass, it switches at once if either holds:
+- **The UE decides.** Each pass, the expiry comes first: at or past it the
+  preparation has lapsed, whatever else holds, and the UE stays
+  (`cell.ue.cho_expired`). Before it, the UE switches at once if either
+  holds (`cell.ue.cho_exec`):
   - **`source_lost`:** it has heard no serving beacon for `cond_lost_sf`
-    superframes;
+    superframes, or the serving map in force no longer grants it. The
+    beacon's own departure TSF times it, so a late loop pass does not
+    delay it.
   - **`target_better`:** its own filtered level of the target has led the
-    serving cell's by `cond_margin_db` for `cond_ttt_ms`
-    (`cell.ue.cho_exec`).
+    serving cell's by `cond_margin_db` for `cond_ttt_ms`. The target's
+    level counts only while fresh: within twice the gap revisit period,
+    and never under a second. A target that went quiet cannot finish the
+    hold on a cached value.
 
   The switch itself is the ordinary one: the TSF delta, the retune and the
-  target's identity. By the expiry without either, the UE stays and the
-  preparation lapses (`cell.ue.cho_expired`).
+  target's identity. Any switch, conditional or not, now commits on the
+  target's grant only once a beacon of the new serving cell has been heard
+  since the switch. A map cached from before the switch proves nothing
+  about the target now.
 - **The preparation carries the DAPS work.** Across channels, the visits
   and the target's DL answers run from the preparation, so the fade before
   the move is covered. The measurement gaps go on through a conditional
   preparation, since the UE's own measurement of the target is its
   condition. The two share the UE's thread, and a gap whose start went by
   is retried.
-- **The source** relays the conditional IE until the expiry. It releases a
-  UE that went silent after the expiry, as after an ordinary instant.
+- **The source** relays the conditional IE until the UE leaves. It
+  releases the UE (its grant, the IE on air, and its place in the CU's
+  view) once it has been silent `CELL_HO_RELEASE_SF` superframes, not at
+  the expiry. A UE still there but released by the source is no longer
+  granted, which is a `source_lost` of its own.
 - **The CU** concludes the move (`ran.ho_done`) when the target hears the
-  UE, at any time before the expiry. A flight is not dropped when its
-  source goes silent: the CU keeps every DU it has heard.
+  UE, at any time before the expiry. The sample must be taken after the
+  command was issued: an id's previous holder at the target may still have
+  a live measurement. A flight is not dropped when its source goes silent:
+  the CU keeps every DU it has heard.
 
 **Rig result** (testrig `scripts/m6_cho.sh`): 2 runs per case, all pass.
 - **The layout:** cell 1 on ch149, cell 2 on ch157 at phase 60000, the

@@ -5295,14 +5295,16 @@ int run_witness(IRadio *dev, const Cfg &c) {
         } else if (auto m = devourer::cell::find_grant_map(d, p.Data.size(), wauth)) {
           ep = m->epoch;
         }
-        /* Per-path RSSI (dBm, as the DU reads it: raw - 110): what this frame
-         * arrived at, for a TX power sweep read at a second receiver. */
+        /* Per-path RSSI (dBm, as the DU reads it: raw - 110) and SNR (dB,
+         * raw / 2): what this frame arrived at, for a TX power sweep read at
+         * a second receiver. */
         snprintf(l, sizeof l,
                  "{\"ev\":\"cell.w\",\"k\":\"%s\",\"st\":%d,\"tsfl\":%u,\"egress\":%llu,"
-                 "\"epoch\":%u,\"len\":%zu,\"cell\":%u,\"rssi\":[%d,%d]}",
+                 "\"epoch\":%u,\"len\":%zu,\"cell\":%u,\"rssi\":[%d,%d],\"snr\":[%.1f,%.1f]}",
                  st == 0 ? "bcn" : "ul", st, p.RxAtrib.tsfl,
                  (unsigned long long)(eg ? *eg : 0), ep, p.Data.size(), cell,
-                 static_cast<int>(p.RxAtrib.rssi[0]) - 110, static_cast<int>(p.RxAtrib.rssi[1]) - 110);
+                 static_cast<int>(p.RxAtrib.rssi[0]) - 110, static_cast<int>(p.RxAtrib.rssi[1]) - 110,
+                 p.RxAtrib.snr[0] / 2.0, p.RxAtrib.snr[1] / 2.0);
         emit(l);
         return;
       } else if (auto rf = parse_rach_frame(

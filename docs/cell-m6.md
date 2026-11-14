@@ -431,33 +431,32 @@ neighbours, stays wherever it started.
 **The move** (`RAN_REPHASE=1`; F1 v19 `ChannelSwitchCmd.phase_us`;
 `ChannelSwitch.h` IE v2, `rephase_plan`). It is the channel switch with a
 TSF step instead of a retune:
-- **The CU** scores each running DU's phase against the plan it would get
-  where it stands, with the others left where they are. The DU that would
+- **The CU** scores each running DU's phase against the best phase it could
+  be moved to (one with a move instant, see below), with the others left
+  where they are. The DU that would
   gain at least `RAN_REPHASE_MIN_GAIN` [1.0] is moved, the largest gain
   first. On equal gains the highest id moves: the oldest cell stays the
   reference. One DU at a time, never during a handover, and not before
   `RAN_REPHASE_AT_S`.
-- **The instant** is idle in both grids. The DU steps its TSF at `at_us`
-  into the last old superframe: after the old active span, landing after
-  the new one and before the next TBTT. No slot is cut or aired twice, and
-  the superframe count runs on. Kestrel fires the beacon once more at the
-  old phase after the write. The plan prefers a negative step, which keeps
-  that stale beacon in the old superframe's idle time. Phases closer than
-  about the active span have no such instant; the DU refuses
-  (`no_window`) and they need two moves.
+- **The instant:** `rephase_plan()` in `src/cell/ChannelSwitch.h` picks
+  it (its comment has the idle-window and stale-beacon rules). A DU
+  refuses a move with no such instant (`no_window`); phases closer than
+  about the active span need two moves.
 - **The DU** announces the move in its beacon for ≥ 3 superframes, as for a
-  channel switch, then makes it:
-  - it steps the TSF and its discipline takes the new phase (the fit is on
-    the free-running counter, which a TSF write does not move);
-  - the network-superframe offset follows;
-  - the neighbours' offsets, which are relative to its own phase, are
-    recomputed at once.
+  channel switch, then steps its TSF. Its discipline takes the new phase
+  (`TsfDiscipline::set_phase` and `stepped()`), the network-superframe
+  offset follows, and the neighbours' offsets (relative to its phase) are
+  recomputed at once (`cell.cs.rephase`).
 - **Its UEs** shift their view of the DU's clock by the same step at the
   same instant (`cell.ue.cs_rephase`). They stop their uplink beacon,
-  re-place their TSF for their slot on the moved grid and restart it, as
-  after a handover switch. A UE whose DU did not make the move after all
-  sees a TSF jump, which its clock fit survives (see "The UE's clock fit
-  across a jump of its DU's TSF").
+  re-place it for their slot on the moved grid and restart it, as after a
+  handover switch.
+- **A move the DU did not make** (missed, refused, or a failed write)
+  leaves its UEs shifted while the cell is not. Their clock fit then
+  confirms the opposite step from the next beacons and absorbs it, and the
+  UE re-places its beacon on the grid that stands
+  (`cell.ue.cs_rephase_undone`). `CELL_DU_TEST_REPHASE_FAIL=1` makes a DU
+  announce and not move, to test exactly that.
 
 **Rig result** (testrig `scripts/m6_rephase.sh`): 2 runs per case, all
 pass.

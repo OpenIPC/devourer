@@ -1511,9 +1511,13 @@ int main() {
         for (const auto &e : ex)
           if (e.period_us == 0 || e.period_us == r.period_us)
             cur += devourer::cell::mg_detail::pair_score(me, r.phase_us, e, pp);
-        const auto plan = devourer::cell::plan_phase(me, ex, pp);
-        if (plan.score - cur < rephase_min_gain || plan.phase_us == r.phase_us ||
-            !devourer::cell::rephase_plan(r.phase_us, plan.phase_us, me.span_us, 1000, r.period_us))
+        /* The best phase it can be MOVED to (an instant idle in both grids),
+         * not the best phase overall: an unreachable optimum must not hide a
+         * reachable gain. */
+        const auto plan = devourer::cell::plan_phase(me, ex, pp, [&](int64_t ph) {
+          return devourer::cell::rephase_plan(r.phase_us, ph, me.span_us, 1000, r.period_us).has_value();
+        });
+        if (plan.score - cur < rephase_min_gain || plan.phase_us == r.phase_us)
           continue;
         /* Ties: the highest id (the latest to join) moves; the oldest cell
          * stays the reference. */

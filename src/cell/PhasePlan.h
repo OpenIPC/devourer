@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -127,8 +128,12 @@ inline double pair_score(const PhaseCell &joining, int64_t phase, const PhaseCel
 }
 } /* namespace mg_detail */
 
+/* `allowed` (optional): only phases it accepts are candidates (a live
+ * move: those reachable from where the cell is, ChannelSwitch.h
+ * rephase_plan). None accepted: score 0 at phase 0. */
 inline PhasePlan plan_phase(const PhaseCell &joining, const std::vector<PhaseCell> &existing,
-                            const PhaseParams &pp = {}) {
+                            const PhaseParams &pp = {},
+                            const std::function<bool(int64_t)> &allowed = {}) {
   using namespace mg_detail;
   PhasePlan best;
   const int64_t P = pp.period_us;
@@ -146,13 +151,19 @@ inline PhasePlan plan_phase(const PhaseCell &joining, const std::vector<PhaseCel
   std::vector<double> score;
   for (int64_t ph = 0; ph < P; ph += step) {
     double sc = 0;
-    for (const PhaseCell *e : same)
-      sc += pair_score(joining, ph, *e, pp);
+    if (allowed && !allowed(ph)) {
+      sc = -1; /* not a candidate */
+    } else {
+      for (const PhaseCell *e : same)
+        sc += pair_score(joining, ph, *e, pp);
+    }
     score.push_back(sc);
   }
   if (score.empty())
     return best;
   const double top = *std::max_element(score.begin(), score.end());
+  if (top < 0)
+    return best; /* no phase allowed */
   /* The widest run of `top` (circular), and its middle. */
   const size_t n = score.size();
   size_t best_len = 0, best_start = 0;

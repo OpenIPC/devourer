@@ -364,6 +364,9 @@ int main() {
     CHECK(r && r->at_us == 21500 && r->step_us == 22000);
     CHECK(!rephase_plan(0, 90000, span, g, P)); /* 12.4 ms apart: inside the span, move twice */
     CHECK(!rephase_plan(5000, 5000, span, g, P)); /* no move */
+    /* Forward by 500: the stale old-phase beacon would fire 500 us before the
+     * new TBTT (inside the guard): refused. */
+    CHECK(!rephase_plan(0, 500, span, g, P));
     const f1::ChannelSwitchCmd pc{2, 80, 157, 17523900000ull, 10, 51200};
     auto pm = f1::encode_channel_switch(pc, k1);
     CHECK(f1::decode_channel_switch(pm.data(), pm.size(), k1) == pc);

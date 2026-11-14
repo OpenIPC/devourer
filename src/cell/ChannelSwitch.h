@@ -210,8 +210,10 @@ inline std::optional<Rephase> rephase_plan(int64_t old_phase, int64_t new_phase,
   if (d == 0)
     return std::nullopt;
   const int64_t lo = span_us + guard_us, hi = P - guard_us; /* the idle part of a superframe */
-  /* Negative step d - P: land at at + d - P >= lo, so at >= lo + P - d. */
-  if (const int64_t at = lo + P - d; at >= lo && at < hi)
+  /* Negative step d - P: land at at + d - P >= lo, so at >= lo + P - d; the
+   * stale old-phase beacon then fires d into the lengthened last superframe,
+   * which must clear the guard before the next TBTT too (d < hi). */
+  if (const int64_t at = lo + P - d; at >= lo && at < hi && d < hi)
     return Rephase{at, d - P};
   /* Positive step d: land at lo + d < hi; the stale TBTT at d into the next
    * superframe, clear of its active span. */

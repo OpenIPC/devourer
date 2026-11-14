@@ -5295,11 +5295,27 @@ int run_witness(IRadio *dev, const Cfg &c) {
         } else if (auto m = devourer::cell::find_grant_map(d, p.Data.size(), wauth)) {
           ep = m->epoch;
         }
+        /* Per-path RSSI (dBm, as the DU reads it: raw - 110) and SNR (dB,
+         * raw / 2): what this frame arrived at, for a TX power sweep read at
+         * a second receiver. */
+        /* Raw 0 = the path was not measured: null, never -110 dBm / 0 dB. */
+        auto rssi_s = [&](int i) {
+          return p.RxAtrib.rssi[i] ? std::to_string(static_cast<int>(p.RxAtrib.rssi[i]) - 110)
+                                   : std::string("null");
+        };
+        auto snr_s = [&](int i) {
+          char b[16];
+          if (!p.RxAtrib.snr[i])
+            return std::string("null");
+          snprintf(b, sizeof b, "%.1f", p.RxAtrib.snr[i] / 2.0);
+          return std::string(b);
+        };
         snprintf(l, sizeof l,
                  "{\"ev\":\"cell.w\",\"k\":\"%s\",\"st\":%d,\"tsfl\":%u,\"egress\":%llu,"
-                 "\"epoch\":%u,\"len\":%zu,\"cell\":%u}",
+                 "\"epoch\":%u,\"len\":%zu,\"cell\":%u,\"rssi\":[%s,%s],\"snr\":[%s,%s]}",
                  st == 0 ? "bcn" : "ul", st, p.RxAtrib.tsfl,
-                 (unsigned long long)(eg ? *eg : 0), ep, p.Data.size(), cell);
+                 (unsigned long long)(eg ? *eg : 0), ep, p.Data.size(), cell, rssi_s(0).c_str(),
+                 rssi_s(1).c_str(), snr_s(0).c_str(), snr_s(1).c_str());
         emit(l);
         return;
       } else if (auto rf = parse_rach_frame(

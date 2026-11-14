@@ -997,9 +997,18 @@ channel, with one UE (UE1, starting in cell 1).
 15 s while cell 2 rises by as much. They hold, then reverse.
 - **The UE's measured margin** (the other cell against the serving one)
   sweeps from about −13 to +24 dB and back.
-- **The rig's power-to-RSSI curve** is not linear: −8 dB of offset reads
-  about −9 dB at the UE, and −9 dB about −12 dB. Its cause is not
-  established; the tests use the measured margins, not the offsets.
+- **The rig's power-to-RSSI curve** is not linear here: −8 dB of offset
+  reads about −9 dB at the UE, and −9 dB about −12 dB. That is one radio,
+  DU1's (j6412-1 09:00), in both directions (testrig
+  `scripts/m6_txpwr_sweep.sh`, `results/2026-11-14-m6-causes.txt`):
+  - as a transmitter it steps down at 8 dBm commanded (offset −12 dB), with
+    the receivers' SNR falling 13–15 dB with it;
+  - as a receiver it collapses below about −62 dBm;
+  - every link without it is linear within about 1 dB over 20 dB. A
+    roles-swapped sweep moves the effect with the radio.
+
+  The mechanism inside that unit is not established. The tests use the
+  measured margins, not the offsets.
 
 **Crossing, there and back** (3 runs, all pass: exactly 1 → 2 then 2 → 1 in
 each).
@@ -1882,11 +1891,24 @@ Linux stack:
   to connected (authentication, association, four-way handshake). The M6 switch costs 84–123 ms on the same radios, with
   no scan, no re-association and no clock re-acquisition.
 - **Returning to the AP the client joined first took 5.6–5.9 s, every
-  time.** That AP logs its authentication response three times as not
-  acknowledged, and the supplicant gets in on a retry ~5 s later. It follows
-  the first AP, not a channel or a box. The cause is not established. It is
-  a property of this stack on these radios, reported as measured, not a
-  general Wi-Fi figure.
+  time.** The cause is a stale station at the AP the client left. An SME
+  roam tells the old AP nothing, so it keeps the client:
+  - on the return, hostapd first deletes that station, and `DEL_STATION`
+    took 428–443 ms on every removal on these radios (mac80211 + rtw89);
+  - the client's authentication wait runs out first. It falls back to the
+    AP it was leaving, which pays the same deletion, and ignores both for
+    ~4.5 s;
+  - each fallback deletes the station at the AP being left (hostapd logs
+    its `DEL_STATION` there). In every run (4 runs, 40 roams), every roam
+    into one AP was slow and every roam into the other fast; which AP is
+    slow follows where the cycle started (the AP joined first), not a radio
+    or a channel.
+
+  With the old AP dropping the client as it leaves (`hostapd_cli
+  deauthenticate STA tx=0`, testrig `m6_roam_baseline.sh --drop-left 1`),
+  every roam took 0.41–0.57 s (10/10, against 5/5 slow returns without it in
+  the same session; testrig `results/2026-11-14-m6-causes.txt`). Which part
+  of the 430 ms deletion is spent where in the kernel was not traced.
 
 ## The rig suite (where the M6 tests live)
 

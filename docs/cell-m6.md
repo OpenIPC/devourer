@@ -299,8 +299,8 @@ measurement-gap run.
 
 A gap fits only where the neighbour's beacon falls in an idle part of the
 UE's grid, so the phase layout decides who can measure whom. The CU places
-a **joining** DU's TBTT; running cells keep theirs (re-phasing a live cell
-would move every UE's clock).
+a **joining** DU's TBTT. A running cell keeps its phase unless the CU
+moves it with its UEs (`RAN_REPHASE`, see "Re-phasing a live cell" below).
 - **The scoring:** see `plan_phase` in `src/cell/PhasePlan.h`.
 - **The exchange:** a DU with `CELL_PHASE_AUTO=1` asks before it starts its
   beacon (a Report with phase −1) and gets F1 `Phase` (v8). The settings are
@@ -419,6 +419,81 @@ gaps run one in 20 superframes.
 - **Handover on suspend gaps alone:** in both handover runs UE1 handed over
   to cell 2 on measurements only suspend gaps gave it (A3 at defaults,
   metric `ue_rssi`). The target heard it in slot 99.7–100 %.
+
+### Re-phasing a live cell
+
+A cell that started at a phase where its UEs and its neighbours' cannot
+measure each other in idle gaps keeps paying for it: suspend gaps cost 1–2
+uplinks in 20 for as long as it runs. The planner places only joining cells,
+so a running cell on a fixed `CELL_PHASE_US`, or one that joined before its
+neighbours, stays wherever it started.
+
+**The move** (`RAN_REPHASE=1`; F1 v19 `ChannelSwitchCmd.phase_us`;
+`ChannelSwitch.h` IE v2, `rephase_plan`). It is the channel switch with a
+TSF step instead of a retune:
+- **The CU** scores each running DU's phase against the best phase it could
+  be moved to (one with a move instant, see below), with the others left
+  where they are. The DU that would
+  gain at least `RAN_REPHASE_MIN_GAIN` [1.0] is moved, the largest gain
+  first. On equal gains the highest id moves: the oldest cell stays the
+  reference. One DU at a time, never during a handover, and not before
+  `RAN_REPHASE_AT_S`.
+- **The instant:** `rephase_plan()` in `src/cell/ChannelSwitch.h` picks
+  it (its comment has the idle-window and stale-beacon rules). A DU
+  refuses a move with no such instant (`no_window`); phases closer than
+  about the active span need two moves.
+- **The DU** announces the move in its beacon for ≥ 3 superframes, as for a
+  channel switch, then steps its TSF. Its discipline takes the new phase
+  (`TsfDiscipline::set_phase` and `stepped()`), the network-superframe
+  offset follows, and the neighbours' offsets (relative to its phase) are
+  recomputed at once (`cell.cs.rephase`).
+- **Its UEs** shift their view of the DU's clock by the same step at the
+  same instant (`cell.ue.cs_rephase`). They stop their uplink beacon,
+  re-place it for their slot on the moved grid and restart it, as after a
+  handover switch.
+- **A move the DU did not make** (missed, refused, or a failed write)
+  leaves its UEs shifted while the cell is not. Their clock fit then
+  confirms the opposite step from the next beacons and absorbs it, and the
+  UE re-places its beacon on the grid that stands
+  (`cell.ue.cs_rephase_undone`). `CELL_DU_TEST_REPHASE_FAIL=1` makes a DU
+  announce and not move, to test exactly that.
+
+**Rig result** (testrig `scripts/m6_rephase.sh`): 2 runs per case, all
+pass.
+- **The layout:** cell 1 on ch149 at phase 0; cell 2 on ch157 started at
+  phase 20000, where neither UE has an idle window for the other cell's
+  beacon.
+- **The settings:** suspend gaps one in 20 (`CELL_GAP_SUSPEND_SF=20`,
+  `RAN_GAP_SUSPEND=1`), the CU's DL stream on, and the move allowed from
+  50 s.
+
+| | moves | each DU hears its UE's uplink (superframes) | suspend gaps per UE | idle gaps hearing the other cell |
+|---|---|---|---|---|
+| re-phased: before the move | — | 0.898–0.952 | 12–14 | 0 |
+| re-phased: after the move | 1 per run: cell 2, 20000 → 51200 (score 0.5 → 2.0) | 0.997–1.000 | 0 | 78–81 per UE |
+| baseline (`RAN_REPHASE=0`) | none | 0.90–0.95 | 53 per UE | 0 |
+
+- **The move itself:** DU2 stepped −31200 µs at 52700 µs into its last old
+  superframe, 6–9 µs late. UE2 shifted 70–74 µs after it.
+- **What it cost the moved UE:**
+  - 1–2 of its 21 uplinks around the move were out of slot: the one already
+    in flight at the old phase, and Kestrel's one stale beacon after the
+    TSF write before the re-placement takes. From then on it was 100 % in
+    slot.
+  - Its DL gap across the move was 133 ms, the stream's own cadence. The
+    longest DL silences in these runs (410 ms) are the suspend gaps' DL
+    skips before the move; the baseline has the same.
+- **A move announced and not made** (`CELL_DU_TEST_REPHASE_FAIL=1` on DU2,
+  2 runs): UE2 shifted at the instant. Its fit confirmed the opposite step
+  (+31199 µs) 6 beacons later, and it re-placed its beacon
+  (`cell.ue.cs_rephase_undone`). That cost 8 uplinks out of slot (the 6
+  beacons the fit needs to confirm a step, then the re-placement), and it
+  was in slot from then on. The CU held DU2 off and moved cell 1 instead
+  (0 → 71200), which completed.
+- **A first run** with ties going to the lower id moved cell 1 instead
+  (0 → 71200, step −71200 at 92700 µs) with the same outcome: 2 uplinks out
+  of slot, then 100 %, and no suspend gap after. Ties now move the higher
+  id.
 
 ### Three cells on the rig
 
@@ -1907,8 +1982,10 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   for that offset, or for re-preparing after a lapse, has been tuned.
 - **More than three cells, and a full tour:** the rig runs three cells,
   with handovers among them and a UE crossing 1 → 2 → 3. The way back into
-  cell 1 is out of reach of the DUs' 20 dB TX range on this rig. Re-phasing
-  live cells is still open; it is not needed for measurability.
+  cell 1 is out of reach of the DUs' 20 dB TX range on this rig. A fourth
+  cell needs a seventh radio. Re-phasing a live cell is done (see
+  "Re-phasing a live cell"); a chain of moves, where moving one cell makes
+  another's move worthwhile, has only been run as one move.
 - **A real moving UE:** the crossing below is emulated by the DUs' TX
   power. The uplink path loss stays the same, there is one UE, and the ramp
   rate is one setting (~2 dB/s of margin). No over-the-air motion,

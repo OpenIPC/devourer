@@ -151,6 +151,13 @@ public:
     integ_ = 0;
   }
   double phase() const { return cfg_.phase_us; }
+  /* A TSF step the caller made itself (M6 a phase move, with set_phase):
+   * booked as the loop's own steps are, for the ledger fit (a free-running
+   * counter fit needs nothing: TSF steps never move it). */
+  void stepped(int64_t us) {
+    if (cfg_.ledger)
+      booked_ += static_cast<double>(us);
+  }
   /* Drop the fit (re-anchor from fresh samples). */
   void reset() {
     pts_.clear();

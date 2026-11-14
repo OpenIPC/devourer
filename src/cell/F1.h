@@ -84,8 +84,9 @@ namespace devourer::cell::f1 {
 /* v14: Uplink.net_us; v15: ChannelSwitch; v16: EVM in HeardUe and UeMeas;
  * v17: UeMeas.ta_us and HoCommand.ta_us (the TA carried in a handover);
  * v18: HoCommand's conditional fields (cond_lost_sf, cond_margin_db,
- * cond_ttt_ms: the conditional handover) */
-constexpr uint8_t kVersion = 18;
+ * cond_ttt_ms: the conditional handover);
+ * v19: ChannelSwitchCmd.phase_us (a live cell's phase move) */
+constexpr uint8_t kVersion = 19;
 constexpr int8_t kNoEvm8 = INT8_MIN;    /* HeardUe.evm_db: none measured */
 constexpr int16_t kNoEvmQ = INT16_MIN;  /* UeMeas.evm_qdb: none measured */
 constexpr size_t kTagLen = 8;
@@ -656,6 +657,9 @@ struct ChannelSwitchCmd {
   uint8_t channel = 0;
   uint64_t effective_net_sf = 0;
   uint64_t seq = 0;
+  /* v19: >= 0 = move the cell's TBTT to this phase (us, < its period) on
+   * its channel, with its UEs (ChannelSwitch.h v2); -1 = a channel move. */
+  int32_t phase_us = -1;
   bool operator==(const ChannelSwitchCmd &) const = default;
 };
 
@@ -667,6 +671,7 @@ inline std::vector<uint8_t> encode_channel_switch(const ChannelSwitchCmd &c, con
   m.push_back(c.channel);
   put(m, c.effective_net_sf, 8);
   put(m, c.seq, 8);
+  put(m, static_cast<uint32_t>(c.phase_us), 4);
   return seal(std::move(m), mac);
 }
 
@@ -682,7 +687,8 @@ inline std::optional<ChannelSwitchCmd> decode_channel_switch(const uint8_t *p, s
   c.channel = static_cast<uint8_t>(r.get(1));
   c.effective_net_sf = r.get(8);
   c.seq = r.get(8);
-  if (!r.ok || r.i != r.n || c.channel == 0)
+  c.phase_us = static_cast<int32_t>(static_cast<uint32_t>(r.get(4)));
+  if (!r.ok || r.i != r.n || c.channel == 0 || c.phase_us < -1)
     return std::nullopt;
   return c;
 }

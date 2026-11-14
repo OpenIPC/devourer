@@ -753,6 +753,13 @@ int main() {
     wide.retune_us = 30000;
     wide.guard_us = 3000;
     CHECK(plan_phase(b, {a}, wide).score < 2);
+    /* A live move (`allowed`): the best phase among those it may take — here
+     * not 51200 (refused) but the next best reachable; none allowed: 0. */
+    auto pr = plan_phase(b, {a}, pp, [](int64_t ph) { return ph < 48500 || ph > 53900; });
+    CHECK(pr.phase_us < 48500 || pr.phase_us > 53900);
+    CHECK(pr.score < 2 && pr.score == mg_detail::pair_score(b, pr.phase_us, a, pp));
+    auto none = plan_phase(b, {a}, pp, [](int64_t) { return false; });
+    CHECK(none.score == 0 && none.pairs.empty());
     /* The same channel: disjoint active spans. */
     b.channel = 149;
     p = plan_phase(b, {a}, pp);

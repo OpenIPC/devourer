@@ -50,6 +50,14 @@
 //   RAN_CS_LEAD_SF [20]       a move's instant, this many superframes ahead
 //   RAN_CS_BACKOFF_S [30]     a DU whose move was refused or timed out is not
 //                             asked again before this
+//   RAN_REPHASE [0]           1 = re-phase live cells (ChannelSwitch.h v2): a
+//                             running DU whose phase plan (PhasePlan.h, the
+//                             others where they are) would score at least
+//                             RAN_REPHASE_MIN_GAIN [1.0] more than its phase
+//                             now is moved there with its UEs, at
+//                             RAN_CS_LEAD_SF; one DU at a time, none during a
+//                             handover; ran.rephase, then ran.cs_done. Not
+//                             before RAN_REPHASE_AT_S [0] s after the start
 // ran.meas: per DU, own [ue, rssi, snr, evm] and heard [cell, ue, rssi, snr,
 // evm] (filtered; evm null when the frames carried none). EVM is reported,
 // not used by the A3.
@@ -155,6 +163,7 @@
 #include <openssl/hmac.h>
 #endif
 
+#include "cell/ChannelSwitch.h"
 #include "cell/Coord.h"
 #include "cell/F1.h"
 #include "cell/Handover.h"
@@ -281,6 +290,9 @@ int main() {
   };
   devourer::cell::A3Config a3c;
   a3c.offset_db = envd("RAN_A3_OFFSET_DB", 3.0, -30.0, 30.0);
+  const bool rephase_on = envl("RAN_REPHASE", 0, 0, 1) != 0;
+  const double rephase_min_gain = envd("RAN_REPHASE_MIN_GAIN", 1.0, 0.01, 100.0);
+  const int rephase_at_s = static_cast<int>(envl("RAN_REPHASE_AT_S", 0, 0, 86400));
   a3c.hysteresis_db = envd("RAN_A3_HYST_DB", 1.0, 0.0, 20.0);
   a3c.ttt_ms = static_cast<int64_t>(envl("RAN_A3_TTT_MS", 640, 0, 60000));
   const bool ho_exec = envl("RAN_HO_EXECUTE", 0, 0, 1) != 0;
@@ -1446,10 +1458,17 @@ int main() {
      * reports the new channel at or after the instant. */
     if (cs_flight) {
       const DuState &d = dus.at(cs_flight->cmd.du);
-      if (d.rep.channel == cs_flight->cmd.channel && d.rep.net_sf >= cs_flight->cmd.effective_net_sf) {
+      /* A phase move is done once the report shows the phase (the channel
+       * never changed). */
+      const bool there = cs_flight->cmd.phase_us >= 0 ? d.rep.phase_us == cs_flight->cmd.phase_us
+                                                      : d.rep.channel == cs_flight->cmd.channel;
+      if (there && d.rep.net_sf >= cs_flight->cmd.effective_net_sf) {
         emit("{\"ev\":\"ran.cs_done\",\"id\":" + std::to_string(cs_flight->cmd.id) + ",\"du\":" +
              std::to_string(cs_flight->cmd.du) + ",\"from\":" + std::to_string(cs_flight->from) + ",\"to\":" +
-             std::to_string(cs_flight->cmd.channel) + ",\"net_sf\":" + std::to_string(d.rep.net_sf) + "}");
+             std::to_string(cs_flight->cmd.channel) + ",\"phase_us\":" + std::to_string(cs_flight->cmd.phase_us) +
+             ",\"net_sf\":" + std::to_string(d.rep.net_sf) + "}");
+        if (cs_flight->cmd.phase_us >= 0) /* not moved again at once on a plan that drifts */
+          cs_hold[cs_flight->cmd.du] = now + std::chrono::seconds(cs_backoff_s);
         cs_flight.reset();
       } else if (net_now > cs_flight->cmd.effective_net_sf + 50) {
         emit("{\"ev\":\"ran.cs_timeout\",\"id\":" + std::to_string(cs_flight->cmd.id) + "}");
@@ -1460,6 +1479,67 @@ int main() {
          * staging lost the move, and re-stages it from this. */
         cs_flight->cmd.seq = next_seq();
         send(d, f1::encode_channel_switch(cs_flight->cmd, mac));
+      }
+    }
+    /* Re-phasing live cells (RAN_REPHASE): the DU whose own phase plan, the
+     * others where they are, gains the most over where it is — moved there
+     * with its UEs, if the move has an instant idle in both grids. */
+    if (rephase_on && !cs_flight && flights.empty() && now >= t0 + std::chrono::seconds(rephase_at_s)) {
+      struct Cand {
+        uint16_t du = 0;
+        int64_t to = 0;
+        double now_score = 0, new_score = 0;
+      };
+      std::optional<Cand> pick;
+      for (const auto &kv : dus) {
+        const f1::Report &r = kv.second.rep;
+        if (!fresh(kv.second.at, now) || r.phase_us < 0 || r.net_sf == 0 ||
+            (cs_hold.count(kv.first) && now < cs_hold.at(kv.first)))
+          continue;
+        std::vector<devourer::cell::PhaseCell> ex;
+        for (const auto &o : dus)
+          if (o.first != kv.first && o.second.rep.phase_us >= 0 && fresh(o.second.at, now))
+            ex.push_back(devourer::cell::phase_cell(o.first, o.second.rep.channel, o.second.rep.phase_us,
+                                                    o.second.rep.period_us, o.second.rep.fixed,
+                                                    o.second.rep.positions));
+        if (ex.empty())
+          continue;
+        devourer::cell::PhaseParams pp = phase_pp;
+        pp.period_us = r.period_us;
+        const auto me = devourer::cell::phase_cell(kv.first, r.channel, r.phase_us, r.period_us, r.fixed, r.positions);
+        double cur = 0;
+        for (const auto &e : ex)
+          if (e.period_us == 0 || e.period_us == r.period_us)
+            cur += devourer::cell::mg_detail::pair_score(me, r.phase_us, e, pp);
+        /* The best phase it can be MOVED to (an instant idle in both grids),
+         * not the best phase overall: an unreachable optimum must not hide a
+         * reachable gain. */
+        const auto plan = devourer::cell::plan_phase(me, ex, pp, [&](int64_t ph) {
+          return devourer::cell::rephase_plan(r.phase_us, ph, me.span_us, 1000, r.period_us).has_value();
+        });
+        if (plan.score - cur < rephase_min_gain || plan.phase_us == r.phase_us)
+          continue;
+        /* Ties: the highest id (the latest to join) moves; the oldest cell
+         * stays the reference. */
+        if (!pick || plan.score - cur >= pick->new_score - pick->now_score)
+          pick = Cand{kv.first, plan.phase_us, cur, plan.score};
+      }
+      if (pick) {
+        const DuState &d = dus.at(pick->du);
+        CsFlight f;
+        cs_last_id = std::max(cs_last_id + 1, version_base);
+        f.cmd = {pick->du, cs_last_id, d.rep.channel, net_now + cs_lead_sf, next_seq(),
+                 static_cast<int32_t>(pick->to)};
+        f.from = d.rep.channel;
+        cs_flight = f;
+        send(d, f1::encode_channel_switch(f.cmd, mac));
+        char b[260];
+        snprintf(b, sizeof b,
+                 "{\"ev\":\"ran.rephase\",\"id\":%u,\"du\":%u,\"from_us\":%lld,\"to_us\":%lld,"
+                 "\"score_now\":%.2f,\"score_new\":%.2f,\"effective_net_sf\":%llu}",
+                 f.cmd.id, pick->du, (long long)d.rep.phase_us, (long long)pick->to, pick->now_score,
+                 pick->new_score, (unsigned long long)f.cmd.effective_net_sf);
+        emit(b);
       }
     }
     const size_t before = devourer::cell::coord_conflicts(view);

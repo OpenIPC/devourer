@@ -684,6 +684,15 @@ if(DEVOURER_KESTREL)
     target_include_directories(kestrelprobe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 endif()
 
+# cellcaps — print the AdapterCaps that gate a cell node (USB or, with
+# DEVOURER_PCIE, vfio PCIe). examples/common/radio_open.h selects the radio;
+# a POSIX bench tool (libusb + _exit), like the other radio_open probes.
+if(NOT WIN32)
+    add_executable(cellcaps examples/cellcaps/main.cpp examples/common/env_config.cpp)
+    target_link_libraries(cellcaps PUBLIC devourer PRIVATE PkgConfig::libusb)
+    target_include_directories(cellcaps PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+endif()
+
 # rtl8733bprobe — staged USB bring-up prober for the RTL8733B (HALMAC 87xx),
 # the pcieprobe/kestrelprobe sibling: identity -> power-on + EFUSE -> firmware
 # -> MAC/PHY -> TSSI audit stages, used alongside normal factory dispatch. It

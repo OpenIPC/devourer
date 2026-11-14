@@ -73,6 +73,10 @@
 //                             and the area CA's signature over its public key
 //                             (128 hex): the NL rides with its signature and
 //                             the certificate (src/cell/MeasGap.h).
+//   CELL_NL_WINDOW_SF [64]    DU, signing: the signature's freshness window in
+//                             superframes (signed with it, NS IE v3); 1 = re-
+//                             signed every superframe, so a re-aired copy is
+//                             fresh for about one superframe, not one window
 //   CELL_CA_PUB               UE: the area CA's public key (64 hex): a beacon
 //                             counts as a cell's (measured, its NL taken) only
 //                             through CA -> cell key -> NL.
@@ -83,11 +87,20 @@
 //                             CELL_UE_NBR_PHASE_US [300] of the TBTT offset the
 //                             serving list names. Else it is not measured
 //                             (cell.ue.nbr_refused, the first 20 per reason;
-//                             counts in cell.ue.done).
+//                             counts in cell.ue.done, with the phase error of
+//                             the neighbour beacons it took: nbr_phase_err_us).
+//   CELL_UE_NBR_PHASE_LOG [0] UE, test: 1 = log every neighbour beacon's
+//                             phase error and verdict (cell.ue.nbr_phase).
 //   CELL_ROLE=replayer        test only: records cell CELL_REPLAY_CELL [2]'s
 //                             DU beacons for CELL_REPLAY_FREEZE_S [30] s, then
 //                             re-airs the last one every CELL_REPLAY_EVERY_MS
 //                             [100] ms (cell.replay.frozen, cell.replay.done).
+//                             CELL_REPLAY_MODE=relay: instead, re-airs each
+//                             genuine beacon as soon as it has it (a live
+//                             store-and-forward relay), or with
+//                             CELL_REPLAY_DELAY_SF=N the one captured N
+//                             beacons earlier (an on-phase replay N
+//                             superframes old); cell.replay.relay per frame.
 //   CELL_UE_KEY               UE, per-cell keys: its own key K_(c,u) (home
 //                             cell and id), which unwraps the target cell's
 //                             key a handover carries. Without it, or for a
@@ -601,7 +614,7 @@ bool du_budget_ok(const Cfg &c, const std::vector<uint16_t> &ues) {
         c.cell, 0, std::vector<devourer::cell::Neighbour>(devourer::cell::kMaxNeighbours), {});
     if (const char *sk = std::getenv("CELL_NL_SIGN_KEY"); sk && *sk) {
       const auto sig = devourer::cell::encode_nl_sig_ie(
-          c.cell, 0, 0, extra, [](const uint8_t *, size_t, uint8_t s[64]) { std::memset(s, 0, 64); return true; });
+          c.cell, 0, 0, 1, extra, [](const uint8_t *, size_t, uint8_t s[64]) { std::memset(s, 0, 64); return true; });
       const auto cert = devourer::cell::encode_nl_cert_ie(c.cell, {}, {});
       extra.insert(extra.end(), sig.begin(), sig.end());
       extra.insert(extra.end(), cert.begin(), cert.end());
@@ -725,6 +738,7 @@ int run_du(IRadio *dev, const Cfg &c) {
   }
   std::vector<uint8_t> nl_signed_for, nl_sig_ie; /* the last NL signed, and its NS IE */
   bool nl_sign_failed = false, nl_unsigned_no_net = false;
+  const int64_t nl_win_sf = envl("CELL_NL_WINDOW_SF", devourer::cell::kNlWindowSf, 1, 64);
   uint32_t nl_signed_win = 0;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
   /* Suspend gaps (MeasGap.h): a UE some neighbour leaves no idle window
@@ -3036,11 +3050,9 @@ int run_du(IRadio *dev, const Cfg &c) {
         ho_ies.insert(ho_ies.end(), cie.begin(), cie.end());
       }
       /* Signed once per list and network window (its freshness: the
-       * network superframe / kNlWindowSf, on the shared timebase). */
+       * network superframe / CELL_NL_WINDOW_SF, on the shared timebase). */
       const int64_t net_sf_now = net_ok.load() ? sf + net_off.load() : -1;
-      const uint32_t win = net_sf_now >= 0
-                               ? static_cast<uint32_t>(net_sf_now / devourer::cell::kNlWindowSf)
-                               : 0;
+      const uint32_t win = net_sf_now >= 0 ? static_cast<uint32_t>(net_sf_now / nl_win_sf) : 0;
       if (nl_sign && !nl.empty() && net_sf_now < 0 && !nl_unsigned_no_net) {
         /* No network superframe (no PTP service mode, or sync lost): no
          * window to sign, so the list airs unsigned and signed UEs refuse it. */
@@ -3053,7 +3065,8 @@ int run_du(IRadio *dev, const Cfg &c) {
           emit("{\"ev\":\"cell.nl.signed_again\"}");
         }
         if (nl != nl_signed_for || win != nl_signed_win) {
-          auto sig = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, win, nl, nl_sign);
+          auto sig = devourer::cell::encode_nl_sig_ie(c.cell, nl_gen_snap, win, static_cast<uint16_t>(nl_win_sf),
+                                                       nl, nl_sign);
           if (!sig.empty()) {
             nl_sig_ie = std::move(sig);
             nl_signed_for = nl;
@@ -3471,6 +3484,11 @@ int run_ue(IRadio *dev, const Cfg &c) {
    * checks off (a test's counterfactual). */
   const bool nbr_fresh = envl("CELL_UE_NBR_FRESH", 1, 0, 1) != 0;
   const int64_t nbr_phase_tol_us = envl("CELL_UE_NBR_PHASE_US", 300, 10, 50000);
+  const bool nbr_phase_log = envl("CELL_UE_NBR_PHASE_LOG", 0, 0, 1) != 0;
+  /* |phase error| of the neighbour beacons taken (us, bounded): how tightly
+   * genuine beacons land, against CELL_UE_NBR_PHASE_US. */
+  std::vector<int64_t> nbr_phase_errs;
+  uint16_t serv_win_sf = devourer::cell::kNlWindowSf; /* the serving signature's window length */
   bool have_serv_win = false, have_serv_phase = false;
   /* A cell switch: the new serving cell's first window may be one behind
    * (both sit on the one network superframe, but not at the same instant). */
@@ -3728,9 +3746,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
                 if (phase >= 0 && have_serv_phase && serv_off_run >= 20)
                   have_serv_phase = false; /* re-taken below */
                 serv_off_run = 0;
-                if (!have_serv_win || sn->win > serv_win || serv_switched)
+                if (!have_serv_win || sn->win > serv_win || serv_switched || sn->win_sf != serv_win_sf)
                   serv_win_ms = ue_ms();
                 serv_win = sn->win;
+                serv_win_sf = sn->win_sf;
                 have_serv_win = true;
                 serv_switched = false;
                 if (phase >= 0) { /* where serving beacons land: the reference */
@@ -3752,9 +3771,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
               /* The serving window itself must be current: one that has not
                * advanced for two windows' time is no "now" to compare with. */
               const bool serv_current =
-                  have_serv_win && ue_ms() - serv_win_ms <=
-                                       static_cast<uint64_t>(2 * devourer::cell::kNlWindowSf * P / 1000);
-              if (!serv_current || dw < -1 || dw > 1) {
+                  have_serv_win && ue_ms() - serv_win_ms <= static_cast<uint64_t>(2 * serv_win_sf * P / 1000);
+              /* Windows of different lengths are not comparable: stale. */
+              if (!serv_current || sn->win_sf != serv_win_sf || dw < -1 || dw > 1) {
                 why = "stale";
               } else if (it == nbrs.end()) {
                 why = "unlisted";
@@ -3764,6 +3783,23 @@ int run_ue(IRadio *dev, const Cfg &c) {
                 want = (serv_phase + it->offset_us) % P;
                 if (phase_off(phase, want) > nbr_phase_tol_us)
                   why = "phase";
+              }
+              int64_t err = 0;
+              if (want >= 0 && phase >= 0) {
+                err = (phase - want) % P;
+                if (err > P / 2) err -= P;
+                if (err < -P / 2) err += P;
+                if (!why && nbr_phase_errs.size() < 50000)
+                  nbr_phase_errs.push_back(std::llabs(err));
+              }
+              if (nbr_phase_log && (want >= 0 || why)) {
+                char l[200];
+                snprintf(l, sizeof l,
+                         "{\"ev\":\"cell.ue.nbr_phase\",\"cell\":%u,\"err_us\":%lld,\"ok\":%d,\"why\":\"%s\","
+                         "\"win\":%u,\"serving_win\":%u,\"rssi\":%d,\"tsfl\":%u}",
+                         bc, want >= 0 ? (long long)err : 0LL, why ? 0 : 1, why ? why : "", sn->win, serv_win,
+                         static_cast<int>(p.RxAtrib.rssi[0]) - 110, p.RxAtrib.tsfl);
+                emit(l);
               }
             }
             if (why) {
@@ -5248,6 +5284,21 @@ int run_ue(IRadio *dev, const Cfg &c) {
            (unsigned long long)susp_heard, (unsigned long long)susp_fail, (unsigned long long)visits,
            (unsigned long long)visits_ok, (unsigned long long)visit_dl_rx, (unsigned long long)steps_held);
   emit(l);
+  /* How tightly the neighbour beacons it took landed (|phase error|, us),
+   * against CELL_UE_NBR_PHASE_US. */
+  if (!nbr_phase_errs.empty()) {
+    std::sort(nbr_phase_errs.begin(), nbr_phase_errs.end());
+    auto q = [&](double f) {
+      return nbr_phase_errs[std::min(nbr_phase_errs.size() - 1, static_cast<size_t>(f * nbr_phase_errs.size()))];
+    };
+    char l2[220];
+    snprintf(l2, sizeof l2,
+             "{\"ev\":\"cell.ue.nbr_phase_stats\",\"ue\":%u,\"n\":%zu,\"p50_us\":%lld,\"p99_us\":%lld,"
+             "\"p999_us\":%lld,\"max_us\":%lld,\"tol_us\":%lld}",
+             me_a.load(), nbr_phase_errs.size(), (long long)q(0.5), (long long)q(0.99), (long long)q(0.999),
+             (long long)nbr_phase_errs.back(), (long long)nbr_phase_tol_us);
+    emit(l2);
+  }
   return 0;
 }
 
@@ -5354,8 +5405,11 @@ int run_witness(IRadio *dev, const Cfg &c) {
  * cell CELL_REPLAY_CELL's genuine DU beacons until CELL_REPLAY_FREEZE_S, then
  * keeps re-airing the last one every CELL_REPLAY_EVERY_MS [100] until the end
  * — signature, certificate and all, never on the cell's TBTT phase. */
+int run_relay(IRadio *dev, const Cfg &c, uint16_t cell);
 int run_replayer(IRadio *dev, const Cfg &c) {
   const auto cell = static_cast<uint16_t>(envl("CELL_REPLAY_CELL", 2, 1, 65535));
+  if (const char *md = std::getenv("CELL_REPLAY_MODE"); md && std::strcmp(md, "relay") == 0)
+    return run_relay(dev, c, cell);
   const int freeze_s = static_cast<int>(envl("CELL_REPLAY_FREEZE_S", 30, 1, 86400));
   const int every_ms = static_cast<int>(envl("CELL_REPLAY_EVERY_MS", 100, 10, 60000));
   uint8_t du[6];
@@ -5399,6 +5453,81 @@ int run_replayer(IRadio *dev, const Cfg &c) {
   char l[120];
   snprintf(l, sizeof l, "{\"ev\":\"cell.replay.done\",\"cell\":%u,\"sent\":%llu}", cell,
            (unsigned long long)sent);
+  emit(l);
+  dev->StopRxLoop();
+  rx.join();
+  return 0;
+}
+
+/* CELL_REPLAY_MODE=relay (test only): a live store-and-forward relay of cell
+ * `cell`'s genuine DU beacons — each re-aired as soon as the RX path has it
+ * (whole, CRC-good: what any radio that decodes before it re-airs has), or,
+ * with CELL_REPLAY_DELAY_SF=N, the one captured N beacons earlier (an
+ * on-phase replay N superframes old). Never sent from the RX callback (a DU
+ * froze doing that): a sender thread waits on it. */
+int run_relay(IRadio *dev, const Cfg &c, uint16_t cell) {
+  const int delay = static_cast<int>(envl("CELL_REPLAY_DELAY_SF", 0, 0, 1000));
+  uint8_t du[6];
+  cell_mac(du, cell, 0);
+  std::mutex m;
+  std::condition_variable cv;
+  std::deque<std::vector<uint8_t>> ring; /* the last delay + 1 genuine beacons */
+  std::optional<std::vector<uint8_t>> pending;
+  uint32_t pending_tsfl = 0;
+  uint64_t heard = 0;
+  std::atomic<bool> stop{false};
+  dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
+  std::thread rx([&] {
+    dev->StartRxLoop([&](const Packet &p) {
+      if (p.RxAtrib.crc_err || p.Data.size() < 36 || p.Data[0] != 0x80 ||
+          std::memcmp(p.Data.data() + 10, du, 6) != 0)
+        return;
+      std::lock_guard<std::mutex> lk(m);
+      ++heard;
+      ring.emplace_back(p.Data.begin(), p.Data.end());
+      while (ring.size() > static_cast<size_t>(delay) + 1)
+        ring.pop_front();
+      if (ring.size() == static_cast<size_t>(delay) + 1) {
+        pending = ring.front();
+        pending_tsfl = p.RxAtrib.tsfl;
+        cv.notify_one();
+      }
+    });
+  });
+  uint64_t sent = 0;
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(c.secs);
+  while (std::chrono::steady_clock::now() < end) {
+    std::vector<uint8_t> frame;
+    uint32_t rx_tsfl = 0;
+    {
+      std::unique_lock<std::mutex> lk(m);
+      cv.wait_for(lk, std::chrono::milliseconds(200), [&] { return pending.has_value(); });
+      if (!pending)
+        continue;
+      frame = std::move(*pending);
+      pending.reset();
+      rx_tsfl = pending_tsfl;
+    }
+    auto pkt = build_dl_radiotap(6);
+    pkt.insert(pkt.end(), frame.begin(), frame.end());
+    const bool ok = dev->send_packet(pkt.data(), pkt.size());
+    sent += ok ? 1 : 0;
+    uint64_t t = 0, f = 0;
+    const bool rd = dev->ReadTsfAndFreeRun(t, f);
+    char l[200];
+    snprintf(l, sizeof l,
+             "{\"ev\":\"cell.replay.relay\",\"cell\":%u,\"ok\":%d,\"len\":%zu,\"rx_tsfl\":%u,"
+             "\"queued_tsfl\":%u,\"delay_sf\":%d}",
+             cell, ok ? 1 : 0, frame.size(), rx_tsfl, rd ? static_cast<uint32_t>(t) : 0u, delay);
+    emit(l);
+  }
+  stop = true;
+  char l[140];
+  {
+    std::lock_guard<std::mutex> lk(m);
+    snprintf(l, sizeof l, "{\"ev\":\"cell.replay.done\",\"cell\":%u,\"mode\":\"relay\",\"heard\":%llu,\"sent\":%llu}",
+             cell, (unsigned long long)heard, (unsigned long long)sent);
+  }
   emit(l);
   dev->StopRxLoop();
   rx.join();

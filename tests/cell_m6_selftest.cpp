@@ -1039,7 +1039,7 @@ int main() {
       const auto nl = encode_nl_ie(cell, gen, list, Mac{});
       b.insert(b.end(), nl.begin(), nl.end());
       if (with_sig) {
-        const auto sg = encode_nl_sig_ie(cell, gen, 500, nl, signer(sign_key));
+        const auto sg = encode_nl_sig_ie(cell, gen, 500, 64, nl, signer(sign_key));
         b.insert(b.end(), sg.begin(), sg.end());
       }
       const auto ce = encode_nl_cert_ie(cell, cert_pub, cert_sig);
@@ -1050,7 +1050,7 @@ int main() {
     NlVerifier v(fake_pub(ca), verify);
     auto good = beacon(2, 7, l1, k2, true, fake_pub(k2), cert2);
     auto r = v.check(good.data(), good.size(), 2);
-    CHECK(r && r->nl.gen == 7 && r->nl.cells == l1 && r->win == 500); /* the chain holds, with its window */
+    CHECK(r && r->nl.gen == 7 && r->nl.cells == l1 && r->win == 500 && r->win_sf == 64); /* the chain holds */
     auto again = beacon(2, 7, l1, k2, true, fake_pub(k2), cert2);
     CHECK(v.check(again.data(), again.size(), 2));                   /* the same list + window: from the cache */
     const std::vector<Neighbour> l2 = {{1, 149, 12345}};
@@ -1075,7 +1075,7 @@ int main() {
       swapped[0] = 0x80;
       const auto nl_a = encode_nl_ie(2, 9, l1, Mac{});
       const auto nl_b = encode_nl_ie(2, 9, l2, Mac{});
-      const auto sg = encode_nl_sig_ie(2, 9, 500, nl_b, signer(k2));
+      const auto sg = encode_nl_sig_ie(2, 9, 500, 64, nl_b, signer(k2));
       const auto ce = encode_nl_cert_ie(2, fake_pub(k2), cert2);
       for (const auto *ie : {&nl_a, &sg, &ce})
         swapped.insert(swapped.end(), ie->begin(), ie->end());
@@ -1098,6 +1098,29 @@ int main() {
       auto w2 = beacon(2, 12, l1, k2, true, fake_pub(k2), cert2);
       auto ok2 = v3.check(w2.data(), w2.size(), 2);
       CHECK(ok2 && ok2->win == 500);
+      /* v3: the window's LENGTH is signed too — relabelling a 64-superframe
+       * signature as a 1-superframe one (or back) is refused; a zero length
+       * is never valid. */
+      NlVerifier v4(fake_pub(ca), verify);
+      auto w3 = beacon(2, 13, l1, k2, true, fake_pub(k2), cert2);
+      for (size_t i = 36; i + 1 < w3.size(); ++i)
+        if (w3[i] == 221 && w3[i + 5] == 'N' && w3[i + 6] == 'S') {
+          w3[i + 2 + 3 + 13] = 1; /* win_sf's low byte: 64 -> 1 */
+          break;
+        }
+      CHECK(!v4.check(w3.data(), w3.size(), 2));
+      {
+        std::vector<uint8_t> b1(36, 0);
+        b1[0] = 0x80;
+        const auto nl = encode_nl_ie(2, 14, l1, Mac{});
+        const auto sg = encode_nl_sig_ie(2, 14, 77000, 1, nl, signer(k2)); /* per superframe */
+        const auto ce = encode_nl_cert_ie(2, fake_pub(k2), cert2);
+        for (const auto *ie : {&nl, &sg, &ce})
+          b1.insert(b1.end(), ie->begin(), ie->end());
+        auto o1 = v4.check(b1.data(), b1.size(), 2);
+        CHECK(o1 && o1->win == 77000 && o1->win_sf == 1);
+        CHECK(encode_nl_sig_ie(2, 14, 77000, 0, nl, signer(k2)).empty());
+      }
       /* A list with no signature IE at all: refused even when cached. */
       auto bare = beacon(2, 12, l1, k2, false, fake_pub(k2), cert2);
       CHECK(!v3.check(bare.data(), bare.size(), 2));

@@ -51,10 +51,13 @@
  * it could forge, so with the area key every UE could fake any cell's NL. A
  * DU therefore also SIGNS its NL (Ed25519, its own key) and airs a
  * certificate for that key signed by the area CA:
- *   NS IE: 'N' 'S' ver(1)=2 cell(2) gen(4) win(4) sig(64)
- *          sig over 'S' || the NL IE || win(4): win = the network superframe
- *          / kNlWindowSf, the signature's freshness (re-signed per window)
- *   NC IE: 'N' 'C' ver(1)=2 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
+ *   NS IE: 'N' 'S' ver(1)=3 cell(2) gen(4) win(4) win_sf(2) sig(64)
+ *          sig over 'S' || the NL IE || win(4) || win_sf(2): win = the network
+ *          superframe / win_sf, the signature's freshness (re-signed per
+ *          window). win_sf is the DU's (CELL_NL_WINDOW_SF, default
+ *          kNlWindowSf); 1 = re-signed every superframe, so a copy is
+ *          fresh for about one superframe, not about one window
+ *   NC IE: 'N' 'C' ver(1)=3 cell(2) pub(32) ca_sig(64)  ca_sig over 'C' cell(2) pub
  * A UE holding only the CA's PUBLIC key (CELL_CA_PUB) checks the chain
  * (NlVerifier) — and can forge nothing. It caches the NL bytes it verified
  * per cell, so a signature is checked once per list and window, not per
@@ -64,8 +67,12 @@
  * (fresh: the UE hears it live), and the serving window never goes back;
  * and the beacon must arrive at the TBTT offset the serving list names for
  * that neighbour (main.cpp: on the shared timebase a re-aired copy lands
- * off-phase). What remains is a real-time repeater placed on the right
- * phase — only distance bounding would stop that.
+ * off-phase). What remains is a copy within the freshness window that lands
+ * within the phase tolerance: a live relay, or an on-phase replay at most
+ * about one window old. A store-and-forward relay must receive the whole
+ * beacon before re-airing it, so a tolerance below its airtime leaves only
+ * a cut-through relay (a repeater with almost no latency: physically, a
+ * reflector). Only distance bounding would stop that.
  * The crypto is injected (examples fill it from OpenSSL), as the HMAC is.
  *
  * Pure header; the cell_m6 ctest covers it. */
@@ -287,8 +294,8 @@ inline std::optional<MrIe> find_mr_ie(const uint8_t *mpdu, size_t len, uint16_t 
 }
 
 /* --- Signed neighbour lists (see the header). --- */
-constexpr uint8_t kNlSigVersion = 2;
-constexpr uint32_t kNlWindowSf = 64; /* ~6.5 s at 100 TU: a signature's freshness window */
+constexpr uint8_t kNlSigVersion = 3;
+constexpr uint32_t kNlWindowSf = 64; /* ~6.5 s at 100 TU: the default freshness window */
 using Ed25519Pub = std::array<uint8_t, 32>;
 using Ed25519Sig = std::array<uint8_t, 64>;
 /* msg -> its signature under the signer's key. False on failure. */
@@ -341,20 +348,23 @@ inline std::optional<std::vector<uint8_t>> raw_nl_ie(const uint8_t *mpdu, size_t
 } /* namespace mg_detail */
 
 namespace mg_detail {
-inline std::vector<uint8_t> nl_sig_message(const std::vector<uint8_t> &nl_ie, uint32_t win) {
+inline std::vector<uint8_t> nl_sig_message(const std::vector<uint8_t> &nl_ie, uint32_t win, uint16_t win_sf) {
   std::vector<uint8_t> m = {'S'};
   m.insert(m.end(), nl_ie.begin(), nl_ie.end());
   put(m, win, 4);
+  put(m, win_sf, 2);
   return m;
 }
 } /* namespace mg_detail */
 
-/* The NS IE for an NL IE (its full bytes, as aired) in network window `win`.
- * Empty if signing fails. */
-inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32_t win,
+/* The NS IE for an NL IE (its full bytes, as aired) in network window `win`
+ * of `win_sf` superframes. Empty if signing fails (or win_sf is 0). */
+inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32_t win, uint16_t win_sf,
                                              const std::vector<uint8_t> &nl_ie, const NlSigner &sign) {
   using namespace mg_detail;
-  const auto msg = nl_sig_message(nl_ie, win);
+  if (win_sf == 0)
+    return {};
+  const auto msg = nl_sig_message(nl_ie, win, win_sf);
   uint8_t sig[64];
   if (!sign || !sign(msg.data(), msg.size(), sig))
     return {};
@@ -362,6 +372,7 @@ inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32
   put(b, cell, 2);
   put(b, gen, 4);
   put(b, win, 4);
+  put(b, win_sf, 2);
   b.insert(b.end(), sig, sig + 64);
   return plain_ie(b);
 }
@@ -370,6 +381,7 @@ inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32
 struct SignedNl {
   NlIe nl;
   uint32_t win = 0;
+  uint16_t win_sf = kNlWindowSf; /* the window's length, as signed */
 };
 /* The NC IE: this cell's signing key and the CA's signature over it. */
 inline std::vector<uint8_t> encode_nl_cert_ie(uint16_t cell, const Ed25519Pub &pub, const Ed25519Sig &ca_sig) {
@@ -405,19 +417,21 @@ public:
       return std::nullopt;
     /* The signature IE for this list's gen: its window (and signature). */
     std::optional<uint32_t> win;
+    uint16_t win_sf = 0;
     std::array<uint8_t, 64> sig{};
     for_each_ie(mpdu, len, 'N', 'S', [&](const uint8_t *b, size_t n) {
-      if (win || n != 13 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
-          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen)
+      if (win || n != 15 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
+          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen || get(b + 13, 2) == 0)
         return;
       win = static_cast<uint32_t>(get(b + 9, 4));
-      std::copy(b + 13, b + 77, sig.begin());
+      win_sf = static_cast<uint16_t>(get(b + 13, 2));
+      std::copy(b + 15, b + 79, sig.begin());
     });
     if (!win)
       return std::nullopt;
-    const auto msg = nl_sig_message(*raw, *win);
+    const auto msg = nl_sig_message(*raw, *win, win_sf);
     if (auto it = ok_.find(cell); it != ok_.end() && it->second == msg)
-      return SignedNl{*nl, *win}; /* verified before, byte for byte */
+      return SignedNl{*nl, *win, win_sf}; /* verified before, byte for byte */
     /* The cell's certificate (verified once per key). */
     for_each_ie(mpdu, len, 'N', 'C', [&](const uint8_t *b, size_t n) {
       if (n != 5 + 32 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell)
@@ -436,7 +450,7 @@ public:
     if (!verify_ || !verify_(key->second.data(), msg.data(), msg.size(), sig.data()))
       return std::nullopt;
     ok_[cell] = msg;
-    return SignedNl{*nl, *win};
+    return SignedNl{*nl, *win, win_sf};
   }
 
 private:

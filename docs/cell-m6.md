@@ -1634,13 +1634,19 @@ measure and the CU could hand over to. Two checks make a re-aired copy
 useless unless it is relayed live and on time (`src/cell/MeasGap.h`,
 `examples/cell/main.cpp`).
 
-- **A signed window.** The NS IE (version 2) carries `win`, the network
-  superframe / `kNlWindowSf` (64, ~6.5 s at 100 TU), inside the signature
-  (`'S' || NL IE || win`). The DU re-signs at every window change, and signs
-  only once it knows the network superframe. The UE takes its serving
-  cell's window as "now" and refuses a serving window that goes back. It
-  takes a neighbour's beacon only if the neighbour's window is within one of
-  the serving window, i.e. only if it was signed in the last ~13 s.
+- **A signed window.** The NS IE (version 3) carries `win`, the network
+  superframe / `win_sf`, AND `win_sf` itself, both inside the signature
+  (`'S' || NL IE || win || win_sf`). `win_sf` is the DU's
+  `CELL_NL_WINDOW_SF` (default `kNlWindowSf`, 64, ~6.5 s at 100 TU; down to
+  1 superframe, ~102 ms). Signing the length too stops a replayer relabelling
+  a 64-superframe signature as a 1-superframe one or back. The DU re-signs
+  at every window change, and signs only once it knows the network
+  superframe. The UE takes its serving cell's window as "now" and refuses a
+  serving window that goes back, or one of a different length. It takes a
+  neighbour's beacon only if the neighbour's window is within one of the
+  serving window, i.e. only if it was signed in the last ~2·`win_sf`
+  superframes. The smaller `win_sf` is, the shorter a re-aired copy stays
+  fresh — at the cost of an Ed25519 signature every `win_sf` superframes.
 - **The phase.** All DUs share the PTP timebase, and the serving list names
   each neighbour's TBTT offset on the serving grid. The UE keeps the phase
   where its serving beacons land (on its fitted DU clock) and refuses a
@@ -1670,9 +1676,37 @@ Refusals are logged per reason (`cell.ue.nbr_refused`, counted in
 `cell.ue.done`). `CELL_UE_NBR_FRESH=0` turns the checks off, which the rig
 uses for the counterfactual.
 
-**What remains** is a real-time repeater placed on the right phase: it
-relays the live beacon within the tolerance, so it is the real cell, only
-louder. Only distance bounding would stop that.
+**What remains, and how far.** Two replay shapes survive the signature:
+- **A store-and-forward relay** — a device that decodes a genuine beacon and
+  re-airs it. It is beaten by the phase check: it cannot re-air a beacon
+  before it has received it, so its copy lands about a beacon's airtime
+  after the cell's own TBTT, well outside the tolerance. Measured below.
+- **An on-phase copy** — a cut-through repeater or reflector that re-radiates
+  the beacon with almost no delay, so it lands within the tolerance, the
+  real cell only louder. The phase check cannot tell it from the cell. What
+  bounds it is the freshness window: a copy more than ~`win_sf` superframes
+  old is refused (stale), so `CELL_NL_WINDOW_SF=1` caps its useful life at
+  ~102 ms rather than ~6.5 s. A copy fresher than that, on phase, is
+  physically the cell's own signal re-radiated; only distance bounding (or a
+  per-beacon nonce the UE challenges, not on this one-way broadcast path)
+  would stop it.
+
+**Rig result, the live relay** (testrig `scripts/m6_nlrelay.sh`): 2 runs,
+all pass. Per-cell keys and signed lists, both cells on one channel, DU2
+alive throughout. The witness runs the replayer in relay mode: it re-aired
+every genuine cell-2 beacon it heard (1267–1310 in a run), carrying a
+current signature.
+- **Refused on phase, not freshness.** The relay's copies landed a median
+  636 µs off the cell's TBTT and were refused on phase (895–896 per run);
+  **0** were refused as stale — their signatures were fresh. A
+  store-and-forward relay cannot be on time.
+- **The genuine cell is undisturbed.** UE1 measured genuine cell 2 in 100 %
+  of its reports throughout.
+- **The phase check's margin.** Genuine neighbour beacons landed within
+  6–7 µs (p99) and 8 µs (max) of their predicted phase — against the 300 µs
+  tolerance, a ~40× margin. The tolerance could be tightened a long way
+  before genuine beacons were at risk, which narrows the window a near-zero
+  latency repeater has.
 
 **Costs.** A neighbour is measured only once the serving phase is known. On
 the rig that is about the first 16 neighbour beacons after the UE starts or

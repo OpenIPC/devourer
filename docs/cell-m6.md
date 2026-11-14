@@ -483,6 +483,13 @@ pass.
   - Its DL gap across the move was 133 ms, the stream's own cadence. The
     longest DL silences in these runs (410 ms) are the suspend gaps' DL
     skips before the move; the baseline has the same.
+- **A move announced and not made** (`CELL_DU_TEST_REPHASE_FAIL=1` on DU2,
+  2 runs): UE2 shifted at the instant. Its fit confirmed the opposite step
+  (+31199 µs) 6 beacons later, and it re-placed its beacon
+  (`cell.ue.cs_rephase_undone`). That cost 8 uplinks out of slot (the 6
+  beacons the fit needs to confirm a step, then the re-placement), and it
+  was in slot from then on. The CU held DU2 off and moved cell 1 instead
+  (0 → 71200), which completed.
 - **A first run** with ties going to the lower id moved cell 1 instead
   (0 → 71200, step −71200 at 92700 µs) with the same outcome: 2 uplinks out
   of slot, then 100 %, and no suspend gap after. Ties now move the higher

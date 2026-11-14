@@ -1948,6 +1948,36 @@ replay checks caught it in the signed-list run: UE2 reported cell 1 in only
   - only a gap that ran consumes its suspend superframe; a failed one (late,
     the beacon would not stop) is left to that log.
 
+**A handover arrival placed on a position a schedule was giving another
+UE.** One `m6_daps_dl` run showed the target's DL to the arriving UE
+~111 µs late (2–3 µs elsewhere) and 13 uplinks lost; it was recorded as not
+reproduced. It was a race, and a frequent one.
+- **What happened:** the CU's coordination schedule moved the target's own
+  UE from position 1 to 2. Before that schedule was on air, the CU issued
+  the handover with target position 2, taken free from the target's report
+  (which predated the schedule).
+- **Why the target accepted it:** its free-position check read a snapshot
+  of the map that was refreshed once per main-loop pass, not at the commit.
+  Both UEs then sat on position 2: the arrival's DL frame queued behind the
+  other's in one slot (~110 µs, one frame's airtime), and their uplinks
+  collided.
+- **How often:** in the saved rig logs, 201 of 1550 handover commands (13 %)
+  were refused by the target as `invalid`. That was the same race, caught
+  when the target's view was fresh, and the CU retried. 41–53 % of the
+  same-channel A3 handover runs had one, and 14 DU logs show the race
+  missed (two UEs on one position). Cross-channel runs never had it: the
+  coordination moves only co-channel positions.
+- **The fix:**
+  - The CU holds a handover while either DU has a schedule pushed and not
+    yet applied (the reverse of the schedule's own in-flight guard).
+  - It chooses the target's id and position against its own last schedule
+    for that DU as well as the report.
+  - The DU counts a staged schedule's positions as taken.
+  - The DU refreshes its handover check's view of the map at the commit.
+- **Rig, after:** 25 runs (`m6_handover.sh` 6 normal + 3 fault,
+  `m6_daps_dl.sh` all 16), 29 commands: 0 refused, no position shared,
+  the arrival's DL 2–3 µs late (p50) in every run.
+
 **First attempts at execution, in order:**
 1. The source's stale reports re-triggered the A3 for the UE that had just
    left, which issued a duplicate command. The CU now retires the old key.

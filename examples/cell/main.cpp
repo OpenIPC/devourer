@@ -99,8 +99,11 @@
 //                             genuine beacon as soon as it has it (a live
 //                             store-and-forward relay), or with
 //                             CELL_REPLAY_DELAY_SF=N the one captured N
-//                             beacons earlier (an on-phase replay N
-//                             superframes old); cell.replay.relay per frame.
+//                             beacons earlier (a delayed store-and-forward
+//                             replay — still off-phase, since send_packet has
+//                             no sub-slot departure control; it ages the copy
+//                             to probe the staleness check, not the phase
+//                             one); cell.replay.relay per frame.
 //   CELL_UE_KEY               UE, per-cell keys: its own key K_(c,u) (home
 //                             cell and id), which unwraps the target cell's
 //                             key a handover carries. Without it, or for a
@@ -3735,10 +3738,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
               int64_t d = std::llabs(a - b) % P;
               return std::min(d, P - d);
             };
+            /* Windows of different lengths (win_sf) are not comparable as raw
+             * `win`: compare on the shared network-superframe timeline, the
+             * net_sf a signature's window started at (win * win_sf). A switch
+             * or a length change gets one (coarser) window of slack; a
+             * same-length steady cell is strictly monotone, as before. */
+            const int64_t sig_net = static_cast<int64_t>(sn->win) * sn->win_sf;
+            const int64_t serv_net = static_cast<int64_t>(serv_win) * serv_win_sf;
             if (serving) {
-              const uint32_t back = serv_switched ? 1u : 0u;
-              if (nbr_fresh && have_serv_win && sn->win + back < serv_win) {
-                why = "stale";
+              const bool len_change = have_serv_win && sn->win_sf != serv_win_sf;
+              const int64_t unit = std::max<int64_t>(sn->win_sf, serv_win_sf);
+              const int64_t slack = (serv_switched || len_change) ? unit : 0;
+              if (nbr_fresh && have_serv_win && sig_net + slack < serv_net) {
+                why = "stale"; /* the signed window went back */
               } else if (nbr_fresh && have_serv_phase && phase >= 0 &&
                          phase_off(phase, serv_phase) > nbr_phase_tol_us && ++serv_off_run < 20) {
                 why = "phase"; /* 20 in a row, none on the reference: the cell moved */
@@ -3746,7 +3758,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
                 if (phase >= 0 && have_serv_phase && serv_off_run >= 20)
                   have_serv_phase = false; /* re-taken below */
                 serv_off_run = 0;
-                if (!have_serv_win || sn->win > serv_win || serv_switched || sn->win_sf != serv_win_sf)
+                if (!have_serv_win || sig_net > serv_net || serv_switched || len_change)
                   serv_win_ms = ue_ms();
                 serv_win = sn->win;
                 serv_win_sf = sn->win_sf;
@@ -3765,15 +3777,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
                 }
               }
             } else if (nbr_fresh) {
-              const int64_t dw = static_cast<int64_t>(sn->win) - static_cast<int64_t>(serv_win);
               const auto it = std::find_if(nbrs.begin(), nbrs.end(),
                                            [&](const devourer::cell::Neighbour &x) { return x.cell == bc; });
               /* The serving window itself must be current: one that has not
                * advanced for two windows' time is no "now" to compare with. */
               const bool serv_current =
                   have_serv_win && ue_ms() - serv_win_ms <= static_cast<uint64_t>(2 * serv_win_sf * P / 1000);
-              /* Windows of different lengths are not comparable: stale. */
-              if (!serv_current || sn->win_sf != serv_win_sf || dw < -1 || dw > 1) {
+              /* Fresh on the shared net_sf timeline: a live neighbour signs at
+               * the same net_sf as serving, so its window start is within one
+               * window (the coarser of the two lengths) of the serving one —
+               * whatever each cell's win_sf. An older on-phase copy is refused
+               * here; the window length each cell uses need not match. */
+              const int64_t unit = std::max<int64_t>(sn->win_sf, serv_win_sf);
+              if (!serv_current || std::llabs(sig_net - serv_net) > unit) {
                 why = "stale";
               } else if (it == nbrs.end()) {
                 why = "unlisted";
@@ -5462,9 +5478,11 @@ int run_replayer(IRadio *dev, const Cfg &c) {
 /* CELL_REPLAY_MODE=relay (test only): a live store-and-forward relay of cell
  * `cell`'s genuine DU beacons — each re-aired as soon as the RX path has it
  * (whole, CRC-good: what any radio that decodes before it re-airs has), or,
- * with CELL_REPLAY_DELAY_SF=N, the one captured N beacons earlier (an
- * on-phase replay N superframes old). Never sent from the RX callback (a DU
- * froze doing that): a sender thread waits on it. */
+ * with CELL_REPLAY_DELAY_SF=N, the one captured N beacons earlier — still a
+ * store-and-forward replay (off-phase: send_packet cannot place a frame on a
+ * sub-slot departure), N superframes staler, to probe the staleness check.
+ * Never sent from the RX callback (a DU froze doing that): a sender thread
+ * waits on it. */
 int run_relay(IRadio *dev, const Cfg &c, uint16_t cell) {
   const int delay = static_cast<int>(envl("CELL_REPLAY_DELAY_SF", 0, 0, 1000));
   uint8_t du[6];
@@ -5475,7 +5493,6 @@ int run_relay(IRadio *dev, const Cfg &c, uint16_t cell) {
   std::optional<std::vector<uint8_t>> pending;
   uint32_t pending_tsfl = 0;
   uint64_t heard = 0;
-  std::atomic<bool> stop{false};
   dev->InitWrite(SelectedChannel{c.ch, 0, CHANNEL_WIDTH_20});
   std::thread rx([&] {
     dev->StartRxLoop([&](const Packet &p) {
@@ -5521,7 +5538,6 @@ int run_relay(IRadio *dev, const Cfg &c, uint16_t cell) {
              cell, ok ? 1 : 0, frame.size(), rx_tsfl, rd ? static_cast<uint32_t>(t) : 0u, delay);
     emit(l);
   }
-  stop = true;
   char l[140];
   {
     std::lock_guard<std::mutex> lk(m);

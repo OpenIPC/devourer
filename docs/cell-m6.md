@@ -1684,9 +1684,11 @@ uses for the counterfactual.
 - **An on-phase copy** — a cut-through repeater or reflector that re-radiates
   the beacon with almost no delay, so it lands within the tolerance, the
   real cell only louder. The phase check cannot tell it from the cell. What
-  bounds it is the freshness window: a copy more than ~`win_sf` superframes
-  old is refused (stale), so `CELL_NL_WINDOW_SF=1` caps its useful life at
-  ~102 ms rather than ~6.5 s. A copy fresher than that, on phase, is
+  bounds it is the freshness window: the UE accepts a neighbour signature
+  within one window of the serving one, so a copy more than ~2·`win_sf`
+  superframes old is refused (stale), and `CELL_NL_WINDOW_SF=1` caps its
+  useful life at ~205 ms rather than ~13 s. A copy fresher than that, on
+  phase, is
   physically the cell's own signal re-radiated; only distance bounding (or a
   per-beacon nonce the UE challenges, not on this one-way broadcast path)
   would stop it.

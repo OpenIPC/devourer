@@ -742,7 +742,7 @@ int run_du(IRadio *dev, const Cfg &c) {
   std::vector<uint8_t> nl_signed_for, nl_sig_ie; /* the last NL signed, and its NS IE */
   bool nl_sign_failed = false, nl_unsigned_no_net = false;
   const int64_t nl_win_sf = envl("CELL_NL_WINDOW_SF", devourer::cell::kNlWindowSf, 1, 64);
-  uint32_t nl_signed_win = 0;
+  uint64_t nl_signed_win = 0;
   const int64_t release_sf = envl("CELL_RELEASE_SF", 50, 2, 100000);
   /* Suspend gaps (MeasGap.h): a UE some neighbour leaves no idle window
    * goes deaf in its suspend superframes; no DL to it then or the next one.
@@ -3055,7 +3055,7 @@ int run_du(IRadio *dev, const Cfg &c) {
       /* Signed once per list and network window (its freshness: the
        * network superframe / CELL_NL_WINDOW_SF, on the shared timebase). */
       const int64_t net_sf_now = net_ok.load() ? sf + net_off.load() : -1;
-      const uint32_t win = net_sf_now >= 0 ? static_cast<uint32_t>(net_sf_now / nl_win_sf) : 0;
+      const uint64_t win = net_sf_now >= 0 ? static_cast<uint64_t>(net_sf_now / nl_win_sf) : 0;
       if (nl_sign && !nl.empty() && net_sf_now < 0 && !nl_unsigned_no_net) {
         /* No network superframe (no PTP service mode, or sync lost): no
          * window to sign, so the list airs unsigned and signed UEs refuse it. */
@@ -3498,7 +3498,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   bool serv_switched = false;
   uint64_t serv_win_ms = 0; /* when the serving window last advanced */
   int serv_off_run = 0;     /* serving copies off the reference phase in a row */
-  uint32_t serv_win = 0;
+  uint64_t serv_win = 0;
   int64_t serv_phase = 0;
   std::map<std::string, uint64_t> nbr_refused;
   if (const char *ca = std::getenv("CELL_CA_PUB"); ca && *ca) {
@@ -3812,8 +3812,9 @@ int run_ue(IRadio *dev, const Cfg &c) {
                 char l[200];
                 snprintf(l, sizeof l,
                          "{\"ev\":\"cell.ue.nbr_phase\",\"cell\":%u,\"err_us\":%lld,\"ok\":%d,\"why\":\"%s\","
-                         "\"win\":%u,\"serving_win\":%u,\"rssi\":%d,\"tsfl\":%u}",
-                         bc, want >= 0 ? (long long)err : 0LL, why ? 0 : 1, why ? why : "", sn->win, serv_win,
+                         "\"win\":%llu,\"serving_win\":%llu,\"rssi\":%d,\"tsfl\":%u}",
+                         bc, want >= 0 ? (long long)err : 0LL, why ? 0 : 1, why ? why : "",
+                         (unsigned long long)sn->win, (unsigned long long)serv_win,
                          static_cast<int>(p.RxAtrib.rssi[0]) - 110, p.RxAtrib.tsfl);
                 emit(l);
               }
@@ -3824,9 +3825,10 @@ int run_ue(IRadio *dev, const Cfg &c) {
               if (n++ < 20) {
                 char l[240];
                 snprintf(l, sizeof l,
-                         "{\"ev\":\"cell.ue.nbr_refused\",\"cell\":%u,\"why\":\"%s\",\"win\":%u,\"serving_win\":%u,"
+                         "{\"ev\":\"cell.ue.nbr_refused\",\"cell\":%u,\"why\":\"%s\",\"win\":%llu,\"serving_win\":%llu,"
                          "\"phase\":%lld,\"want\":%lld,\"serv_phase\":%lld}",
-                         bc, why, sn->win, serv_win, (long long)phase, (long long)want,
+                         bc, why, (unsigned long long)sn->win, (unsigned long long)serv_win,
+                         (long long)phase, (long long)want,
                          have_serv_phase ? (long long)serv_phase : -1LL);
                 emit(l);
               }

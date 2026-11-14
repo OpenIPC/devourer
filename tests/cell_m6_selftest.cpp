@@ -1105,7 +1105,7 @@ int main() {
       auto w3 = beacon(2, 13, l1, k2, true, fake_pub(k2), cert2);
       for (size_t i = 36; i + 1 < w3.size(); ++i)
         if (w3[i] == 221 && w3[i + 5] == 'N' && w3[i + 6] == 'S') {
-          w3[i + 2 + 3 + 13] = 1; /* win_sf's low byte: 64 -> 1 */
+          w3[i + 2 + 3 + 17] = 1; /* win_sf's low byte (after the 8-byte win): 64 -> 1 */
           break;
         }
       CHECK(!v4.check(w3.data(), w3.size(), 2));
@@ -1120,6 +1120,19 @@ int main() {
         auto o1 = v4.check(b1.data(), b1.size(), 2);
         CHECK(o1 && o1->win == 77000 && o1->win_sf == 1);
         CHECK(encode_nl_sig_ie(2, 14, 77000, 0, nl, signer(k2)).empty());
+        /* win is 64-bit: net_sf / win_sf=1 can exceed 2^32 (net_sf is
+         * PTP-derived, ~2^34), so a small window must not overflow it. */
+        NlVerifier v5(fake_pub(ca), verify);
+        std::vector<uint8_t> b2(36, 0);
+        b2[0] = 0x80;
+        const uint64_t big = (uint64_t{1} << 34) + 123; /* > 2^32 */
+        const auto nl2 = encode_nl_ie(2, 15, l1, Mac{});
+        const auto sg2 = encode_nl_sig_ie(2, 15, big, 1, nl2, signer(k2));
+        const auto ce2 = encode_nl_cert_ie(2, fake_pub(k2), cert2);
+        for (const auto *ie : {&nl2, &sg2, &ce2})
+          b2.insert(b2.end(), ie->begin(), ie->end());
+        auto o2 = v5.check(b2.data(), b2.size(), 2);
+        CHECK(o2 && o2->win == big && o2->win_sf == 1);
       }
       /* A list with no signature IE at all: refused even when cached. */
       auto bare = beacon(2, 12, l1, k2, false, fake_pub(k2), cert2);

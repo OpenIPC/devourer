@@ -51,8 +51,8 @@
  * it could forge, so with the area key every UE could fake any cell's NL. A
  * DU therefore also SIGNS its NL (Ed25519, its own key) and airs a
  * certificate for that key signed by the area CA:
- *   NS IE: 'N' 'S' ver(1)=3 cell(2) gen(4) win(4) win_sf(2) sig(64)
- *          sig over 'S' || the NL IE || win(4) || win_sf(2): win = the network
+ *   NS IE: 'N' 'S' ver(1)=3 cell(2) gen(4) win(8) win_sf(2) sig(64)
+ *          sig over 'S' || the NL IE || win(8) || win_sf(2): win = the network
  *          superframe / win_sf, the signature's freshness (re-signed per
  *          window). win_sf is the DU's (CELL_NL_WINDOW_SF, default
  *          kNlWindowSf); 1 = re-signed every superframe, so a copy is
@@ -348,10 +348,10 @@ inline std::optional<std::vector<uint8_t>> raw_nl_ie(const uint8_t *mpdu, size_t
 } /* namespace mg_detail */
 
 namespace mg_detail {
-inline std::vector<uint8_t> nl_sig_message(const std::vector<uint8_t> &nl_ie, uint32_t win, uint16_t win_sf) {
+inline std::vector<uint8_t> nl_sig_message(const std::vector<uint8_t> &nl_ie, uint64_t win, uint16_t win_sf) {
   std::vector<uint8_t> m = {'S'};
   m.insert(m.end(), nl_ie.begin(), nl_ie.end());
-  put(m, win, 4);
+  put(m, win, 8);
   put(m, win_sf, 2);
   return m;
 }
@@ -359,7 +359,7 @@ inline std::vector<uint8_t> nl_sig_message(const std::vector<uint8_t> &nl_ie, ui
 
 /* The NS IE for an NL IE (its full bytes, as aired) in network window `win`
  * of `win_sf` superframes. Empty if signing fails (or win_sf is 0). */
-inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32_t win, uint16_t win_sf,
+inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint64_t win, uint16_t win_sf,
                                              const std::vector<uint8_t> &nl_ie, const NlSigner &sign) {
   using namespace mg_detail;
   if (win_sf == 0)
@@ -371,7 +371,7 @@ inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32
   std::vector<uint8_t> b = {'N', 'S', kNlSigVersion};
   put(b, cell, 2);
   put(b, gen, 4);
-  put(b, win, 4);
+  put(b, win, 8);
   put(b, win_sf, 2);
   b.insert(b.end(), sig, sig + 64);
   return plain_ie(b);
@@ -380,7 +380,7 @@ inline std::vector<uint8_t> encode_nl_sig_ie(uint16_t cell, uint32_t gen, uint32
 /* A verified list and the network window its signature names. */
 struct SignedNl {
   NlIe nl;
-  uint32_t win = 0;
+  uint64_t win = 0;
   uint16_t win_sf = kNlWindowSf; /* the window's length, as signed */
 };
 /* The NC IE: this cell's signing key and the CA's signature over it. */
@@ -416,16 +416,16 @@ public:
     if (!nl)
       return std::nullopt;
     /* The signature IE for this list's gen: its window (and signature). */
-    std::optional<uint32_t> win;
+    std::optional<uint64_t> win;
     uint16_t win_sf = 0;
     std::array<uint8_t, 64> sig{};
     for_each_ie(mpdu, len, 'N', 'S', [&](const uint8_t *b, size_t n) {
-      if (win || n != 15 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
-          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen || get(b + 13, 2) == 0)
+      if (win || n != 19 + 64 || b[2] != kNlSigVersion || get(b + 3, 2) != cell ||
+          static_cast<uint32_t>(get(b + 5, 4)) != nl->gen || get(b + 17, 2) == 0)
         return;
-      win = static_cast<uint32_t>(get(b + 9, 4));
-      win_sf = static_cast<uint16_t>(get(b + 13, 2));
-      std::copy(b + 15, b + 79, sig.begin());
+      win = get(b + 9, 8);
+      win_sf = static_cast<uint16_t>(get(b + 17, 2));
+      std::copy(b + 19, b + 83, sig.begin());
     });
     if (!win)
       return std::nullopt;

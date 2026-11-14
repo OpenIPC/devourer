@@ -1122,6 +1122,11 @@ int run_du(IRadio *dev, const Cfg &c) {
   /* One discipline iteration: a PHC-bracketed radio read, the step, the
    * health verdict. Runs on the DU's main thread (the only TSF writer). */
   std::atomic<int64_t> net_off{0}; /* network sf - local sf, from the PHC */
+  /* The cell's phase now (us): dc.phase_us is the main thread's (the
+   * discipline's); the RX and F1 threads read this, which a live phase move
+   * (ChannelSwitch.h v2) changes with net_off, in the idle part of a
+   * superframe. */
+  std::atomic<int64_t> phase_live{static_cast<int64_t>(dc.phase_us)};
   std::atomic<bool> net_ok{false};
   uint64_t sync_samples = 0;
   std::array<uint64_t, 3> sync_in_state{};
@@ -1412,6 +1417,7 @@ int run_du(IRadio *dev, const Cfg &c) {
    * grid (aired in the NL IE), and what each own UE reported measuring (its
    * MR IE), relayed in Report.ue_meas. */
   std::vector<devourer::cell::Neighbour> nb_list;
+  std::vector<devourer::cell::f1::NeighbourEntry> nb_raw; /* f1_mu: the list as the CU sent it */
   uint32_t nl_gen = 1; /* bumped whenever the list changes (UEs refuse older) */
   bool have_nb_seq = false;
   uint64_t last_nb_seq = 0;
@@ -1437,6 +1443,8 @@ int run_du(IRadio *dev, const Cfg &c) {
     uint8_t channel = 0;
     int64_t eff_sf = 0; /* this DU's count */
     int aired = 0;      /* superframes a published beacon carried its IE */
+    int64_t phase = -1; /* a phase move (ChannelSwitch.h v2): to this phase, */
+    int64_t at_us = 0, step_us = 0; /* the TSF step and its instant (rephase_plan) */
   };
   std::optional<CsStaged> cs_staged;
   uint32_t cs_aired_id = 0; /* the move whose IE the live beacon carries (f1_mu) */
@@ -1542,7 +1550,7 @@ int run_du(IRadio *dev, const Cfg &c) {
     u.du = c.cell;
     u.cell = cell;
     u.ue = ue;
-    u.net_us = *at + static_cast<int64_t>(dc.phase_us) + net_off.load() * P;
+    u.net_us = *at + phase_live.load() + net_off.load() * P;
     u.seq = devourer::cell::ul_seq_from_network_time(u.net_us, P);
     u.rssi_dbm = static_cast<int8_t>(static_cast<int>(p.RxAtrib.rssi[0]) - 110);
     send_f1(devourer::cell::f1::encode_uplink(u, f1_mac));
@@ -1867,7 +1875,7 @@ int run_du(IRadio *dev, const Cfg &c) {
             r.sync_state = f1_view.sync_state;
             r.coordinated = f1_view.coordinated;
             r.channel = du_ch.load();
-            r.phase_us = static_cast<int64_t>(dc.phase_us);
+            r.phase_us = phase_live.load();
             r.period_us = P;
             r.gap_suspend_sf = static_cast<uint16_t>(std::min<int64_t>(gap_suspend_every, 65535));
             r.net_sf = f1_view.net_sf >= 0 ? static_cast<uint64_t>(f1_view.net_sf) : 0;
@@ -2006,13 +2014,13 @@ int run_du(IRadio *dev, const Cfg &c) {
           std::vector<devourer::cell::Neighbour> v;
           for (const auto &e : nb->cells)
             v.push_back({e.cell, e.channel,
-                         devourer::cell::neighbour_offset_us(e.phase_us,
-                                                             static_cast<int64_t>(dc.phase_us), P)});
+                         devourer::cell::neighbour_offset_us(e.phase_us, phase_live.load(), P)});
           std::lock_guard<std::mutex> lk(f1_mu);
           if (have_nb_seq && nb->seq <= last_nb_seq)
             continue; /* a replay or reordering */
           have_nb_seq = true;
           last_nb_seq = nb->seq;
+          nb_raw = nb->cells; /* their phases: the offsets again after a phase move */
           if (v != nb_list) {
             nb_list = std::move(v);
             ++nl_gen;
@@ -2031,7 +2039,13 @@ int run_du(IRadio *dev, const Cfg &c) {
             net_now = f1_view.net_sf;
             const bool same = cs_staged && cs_staged->id == cs->id;
             const int64_t eff_new = static_cast<int64_t>(cs->effective_net_sf) - net_off.load();
-            const bool reused = same && (cs_staged->channel != cs->channel || cs_staged->eff_sf != eff_new);
+            const bool reused = same && (cs_staged->channel != cs->channel || cs_staged->eff_sf != eff_new ||
+                                         cs_staged->phase != cs->phase_us);
+            /* A phase move: on this channel, at an instant idle in both grids. */
+            const bool rephase = cs->phase_us >= 0;
+            const auto rp = rephase && cs->phase_us < P
+                                ? devourer::cell::rephase_plan(phase_live.load(), cs->phase_us, grid_span_us, 1000, P)
+                                : std::nullopt;
             if (have_cs_seq && cs->seq <= last_cs_seq) {
               st = f1::AckStatus::Stale; /* a replay or reordering */
             } else {
@@ -2046,13 +2060,16 @@ int run_du(IRadio *dev, const Cfg &c) {
                 st = f1::AckStatus::Late, why = "no_clock";
               } else if (static_cast<int64_t>(cs->effective_net_sf) < net_now + 4) {
                 st = f1::AckStatus::Late, why = "lead"; /* announced too few superframes ahead */
-              } else if (cs->channel == du_ch.load() || !ho_in.empty() || !ho_out.empty() ||
-                         (cs_staged && cs_staged->id > cs->id)) {
-                st = f1::AckStatus::Invalid, why = "busy_or_same";
-              } else if (!devourer::cell::cs_retune_at_us(grid_span_us, cs_retune_us, 1000, P)) {
+              } else if ((rephase ? cs->channel != du_ch.load() : cs->channel == du_ch.load()) ||
+                         !ho_in.empty() || !ho_out.empty() || (cs_staged && cs_staged->id > cs->id)) {
+                st = f1::AckStatus::Invalid, why = "busy_or_same"; /* a phase move: on its own channel only */
+              } else if (rephase && !rp) {
+                st = f1::AckStatus::Invalid, why = "no_window"; /* no instant idle in both grids */
+              } else if (!rephase && !devourer::cell::cs_retune_at_us(grid_span_us, cs_retune_us, 1000, P)) {
                 st = f1::AckStatus::Invalid, why = "no_window"; /* the retune would not fit: never announced */
               } else {
-                cs_staged = CsStaged{cs->id, cs->channel, eff};
+                cs_staged = CsStaged{cs->id, cs->channel, eff, 0, rephase ? cs->phase_us : -1,
+                                     rp ? rp->at_us : 0, rp ? rp->step_us : 0};
               }
             }
           }
@@ -2061,9 +2078,10 @@ int run_du(IRadio *dev, const Cfg &c) {
                               f1_mac));
           char l[200];
           snprintf(l, sizeof l,
-                   "{\"ev\":\"cell.cs.cmd\",\"id\":%u,\"channel\":%u,\"effective_net_sf\":%llu,"
+                   "{\"ev\":\"cell.cs.cmd\",\"id\":%u,\"channel\":%u,\"phase_us\":%d,\"effective_net_sf\":%llu,"
                    "\"status\":\"%s\",\"why\":\"%s\"}",
-                   cs->id, cs->channel, (unsigned long long)cs->effective_net_sf, f1::ack_status_name(st), why);
+                   cs->id, cs->channel, cs->phase_us, (unsigned long long)cs->effective_net_sf,
+                   f1::ack_status_name(st), why);
           emit(l);
           continue;
         }
@@ -2997,7 +3015,9 @@ int run_du(IRadio *dev, const Cfg &c) {
       }
       if (csn && sf < csn->eff_sf) {
         const auto cie = devourer::cell::encode_cs_ie(
-            {csn->id, c.cell, csn->channel, static_cast<uint64_t>(csn->eff_sf)}, auth);
+            {csn->id, c.cell, csn->channel, static_cast<uint64_t>(csn->eff_sf),
+             static_cast<int32_t>(csn->step_us), static_cast<int32_t>(csn->at_us)},
+            auth);
         ho_ies.insert(ho_ies.end(), cie.begin(), cie.end());
       }
       /* Signed once per list and network window (its freshness: the
@@ -3176,7 +3196,73 @@ int run_du(IRadio *dev, const Cfg &c) {
           ++cs_staged->aired;
         cs = cs_staged;
       }
-      if (cs && sf + 1 >= cs->eff_sf) {
+      if (cs && cs->phase >= 0 && sf + 1 >= cs->eff_sf) {
+        /* A phase move: at at_us into this (the last old) superframe, the
+         * TSF steps by step_us; the discipline takes the new phase (its fit
+         * is on the free-running counter, which the step does not move), and
+         * the network superframe offset follows. The beacon runs on: Kestrel
+         * fires it once more at the old phase, idle by the plan. */
+        const int64_t old_phase = phase_live.load();
+        bool moved = false;
+        int64_t late_us = 0;
+        const char *why = "";
+        if (sf + 1 != cs->eff_sf) {
+          why = "missed";
+        } else if (cs->aired < 3) {
+          why = "unannounced";
+        } else {
+          const int64_t want = grid->slot_start_tsf(sf, 0) + cs->at_us;
+          late_us = sleep_until_tsf(dev, want) - want;
+          /* Late: still fine while the landing stays clear of the next TBTT. */
+          if (cs->at_us + late_us + std::max<int64_t>(0, cs->step_us) >= P - 1000 ||
+              cs->at_us + late_us >= P - 1000) {
+            why = "late";
+          } else if (!dev->WriteTsf(static_cast<uint64_t>(static_cast<int64_t>(dev->ReadTsf()) + cs->step_us))) {
+            why = "write";
+            disc.wrote(false); /* a failed write may have half-updated it: re-anchor */
+          } else {
+            moved = true;
+            dc.phase_us = static_cast<double>(cs->phase);
+            disc.set_phase(dc.phase_us);
+            disc.stepped(cs->step_us);
+            net_off.store(net_off.load() + (old_phase - cs->phase - cs->step_us) / P);
+            phase_live.store(cs->phase);
+            uint64_t t2 = 0, f2 = 0;
+            if (dev->ReadTsfAndFreeRun(t2, f2)) {
+              publish_clock(t2, f2);
+            } else {
+              std::lock_guard<std::mutex> lk(clk_mu);
+              clk.valid = false;
+            }
+            /* The neighbours' offsets are relative to this cell's phase. */
+            std::lock_guard<std::mutex> lk(f1_mu);
+            std::vector<devourer::cell::Neighbour> v;
+            for (const auto &e : nb_raw)
+              v.push_back({e.cell, e.channel, devourer::cell::neighbour_offset_us(e.phase_us, cs->phase, P)});
+            if (v != nb_list) {
+              nb_list = std::move(v);
+              ++nl_gen;
+            }
+          }
+        }
+        char l[260];
+        snprintf(l, sizeof l,
+                 "{\"ev\":\"cell.cs.rephase\",\"id\":%u,\"from_us\":%lld,\"to_us\":%lld,\"step_us\":%lld,"
+                 "\"at_us\":%lld,\"sf\":%lld,\"ok\":%d,\"late_us\":%lld,\"aired\":%d,\"why\":\"%s\"}",
+                 cs->id, (long long)old_phase, (long long)cs->phase, (long long)cs->step_us, (long long)cs->at_us,
+                 (long long)sf, moved ? 1 : 0, (long long)late_us, cs->aired, why);
+        emit(l);
+        if (f1_on) {
+          const auto ack = devourer::cell::f1::encode_ack({c.cell, devourer::cell::f1::AckKind::ChannelSwitch, cs->id,
+                                           moved ? devourer::cell::f1::AckStatus::Applied : devourer::cell::f1::AckStatus::Invalid,
+                                           static_cast<uint64_t>(std::max<int64_t>(0, sf + net_off.load()))},
+                                          f1_mac);
+          sendto(f1_fd.fd, ack.data(), ack.size(), 0, reinterpret_cast<const sockaddr *>(&f1_addr), f1_addr_len);
+        }
+        std::lock_guard<std::mutex> lk(f1_mu);
+        cs_staged.reset();
+        cs_aired_id = 0;
+      } else if (cs && sf + 1 >= cs->eff_sf) {
         const auto at = devourer::cell::cs_retune_at_us(grid_span_us, cs_retune_us, 1000, P);
         const uint8_t from = du_ch.load();
         bool moved = false;
@@ -3862,6 +3948,7 @@ int run_ue(IRadio *dev, const Cfg &c) {
   bool had_susp_prev = false; /* last pass had neighbours only a suspend gap reaches */
   std::optional<std::chrono::steady_clock::time_point> next_pass_at; /* (a switch's) */
   std::optional<uint8_t> place_ul_slot; /* an inter-frequency switch: place the TSF after its retune */
+  bool rephase_place = false; /* a phase move: the beacon stopped and the TSF placed (no retune) */
   std::optional<std::chrono::steady_clock::time_point> beacon_hold_until; /* no beacon restart before */
   int place_tries = 0;                   /* ... retried before the beacon restart if it failed */
   int64_t restart_du = -1; /* the switch's expedited pass (DU time): the beacon restarts there */
@@ -4031,13 +4118,50 @@ int run_ue(IRadio *dev, const Cfg &c) {
         if (!ho_pending && cs_rx.accept(*cs_seen, static_cast<uint64_t>(sfn))) {
           cs_pending = cs_seen;
           char l[160];
-          snprintf(l, sizeof l, "{\"ev\":\"cell.ue.cs_staged\",\"ue\":%d,\"id\":%u,\"channel\":%u,\"eff_sf\":%llu}",
-                   me_a.load(), cs_seen->id, cs_seen->channel, (unsigned long long)cs_seen->effective_sf);
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.cs_staged\",\"ue\":%d,\"id\":%u,\"channel\":%u,\"eff_sf\":%llu,"
+                   "\"step_us\":%d,\"at_us\":%d}",
+                   me_a.load(), cs_seen->id, cs_seen->channel, (unsigned long long)cs_seen->effective_sf,
+                   cs_seen->step_us, cs_seen->at_us);
           emit(l);
         }
         cs_seen.reset();
       }
-      if (cs_pending && du_now >= 0 && !retune_to) {
+      /* A phase move (ChannelSwitch.h v2): at at_us into the last old
+       * superframe the DU steps its TSF by step_us; so does this UE's view of
+       * it, at once, and its own uplink beacon is re-placed for its slot on
+       * the moved grid (stopped, placed, restarted next pass: as after a
+       * switch). The superframe count runs on. */
+      if (cs_pending && cs_pending->step_us != 0 && du_now >= 0) {
+        const int64_t win = (static_cast<int64_t>(cs_pending->effective_sf) - 1) * P + cs_pending->at_us;
+        if (du_now >= win) {
+          const int64_t before = du_now;
+          sync.ShiftRemote(cs_pending->step_us);
+          du_now = sync.RemoteForLocal(static_cast<uint64_t>(wrap.extend(static_cast<uint32_t>(f))));
+          sfn = du_now / P;
+          have_serv_phase = false; /* the serving grid moved */
+          no_step_until_sf = -1;
+          const GrantMap *cm = rxr.current(static_cast<uint64_t>(sfn));
+          if (const Grant *gg = cm ? cm->find(static_cast<uint16_t>(me_a.load())) : nullptr) {
+            place_ul_slot = gg->ul_slot;
+            place_tries = 0;
+            rephase_place = true;
+          }
+          char l[240];
+          snprintf(l, sizeof l,
+                   "{\"ev\":\"cell.ue.cs_rephase\",\"ue\":%d,\"id\":%u,\"step_us\":%d,\"late_us\":%lld,"
+                   "\"du_before\":%lld,\"du_after\":%lld}",
+                   me_a.load(), cs_pending->id, cs_pending->step_us, (long long)(before - win),
+                   (long long)before, (long long)du_now);
+          emit(l);
+          cs_pending.reset();
+        } else {
+          const auto due = std::chrono::steady_clock::now() + std::chrono::microseconds(win - du_now);
+          if (!next_pass_at || due < *next_pass_at)
+            next_pass_at = due;
+        }
+      }
+      if (cs_pending && cs_pending->step_us == 0 && du_now >= 0 && !retune_to) {
         int64_t span = 0;
         for (const auto &x : grid->slots())
           span = std::max<int64_t>(span, x.start_us + x.len_us);
@@ -4309,6 +4433,19 @@ int run_ue(IRadio *dev, const Cfg &c) {
                    (long long)std::chrono::duration_cast<std::chrono::microseconds>(r1 - r0).count());
           emit(l);
         }
+      }
+    }
+    if (rephase_place) {
+      /* A phase move: the uplink beacon stops, the TSF is placed for its slot
+       * on the moved grid, and the beacon restarts next pass (as after a
+       * switch, minus the retune). A failed stop is retried next pass. */
+      bool stopped = !beaconing;
+      for (int k = 0; k < 3 && !stopped; ++k)
+        stopped = dev->StopBeacon();
+      if (stopped) {
+        beaconing = false;
+        rephase_place = false;
+        switch_place();
       }
     }
     if (rearm_ack) {

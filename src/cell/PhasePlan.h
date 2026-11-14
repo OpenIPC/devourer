@@ -19,8 +19,9 @@ namespace devourer::cell {
 
 /* --- Phase planning (the CU): where a JOINING DU's TBTT goes. ---
  *
- * The DUs already running keep their phases (re-phasing a live cell would
- * move every UE's clock); a new one gets the phase that best fits them:
+ * The DUs already running keep their phases (moving one moves every UE's
+ * clock: the CU does it only on a large enough gain, RAN_REPHASE and
+ * ChannelSwitch.h v2); a new one gets the phase that best fits them:
  *   - another channel: its UEs and the other's must be able to MEASURE each
  *     other — for every capacity position of each cell, a gap for the
  *     other's beacon (gap_window) clear of that position's slots;

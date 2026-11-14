@@ -329,6 +329,44 @@ int main() {
     auto ack = f1::encode_ack({2, f1::AckKind::ChannelSwitch, 77, f1::AckStatus::Staged, 17523899990ull}, k1);
     auto da = f1::decode_ack(ack.data(), ack.size(), k1);
     CHECK(da && da->kind == f1::AckKind::ChannelSwitch && da->version == 77);
+    CHECK(f1::decode_channel_switch(m.data(), m.size(), k1)->phase_us == -1); /* a channel move */
+  }
+
+  /* A live cell's phase move (ChannelSwitch.h v2, F1 v19): the IE carries
+   * the step and its instant; the plan keeps the instant idle in both grids
+   * and the superframe count running. */
+  {
+    const Mac k1 = fake_mac(11);
+    const CsIe ph{80, 2, 157, 7000, -31200, 52700};
+    auto ie = encode_cs_ie(ph, k1);
+    std::vector<uint8_t> bcn(36, 0);
+    bcn[0] = 0x80;
+    bcn.insert(bcn.end(), ie.begin(), ie.end());
+    CHECK(find_cs_ie(bcn.data(), bcn.size(), 2, k1) == ph);
+    auto t = bcn;
+    t[bcn.size() - kCsTagLen - 2 - 6] ^= 1; /* a step byte: CRC and tag */
+    CHECK(!find_cs_ie(t.data(), t.size(), 2, k1));
+    /* The rig grid: P 102400, active span 20500, guard 1000 (idle from 21500). */
+    const int64_t P = 102400, span = 20500, g = 1000;
+    /* 20000 -> 51200 (the planner's phase for a second cell): forward 71200,
+     * taken as -31200 at 52700, landing at 21500 — just after the new span. */
+    auto r = rephase_plan(20000, 51200, span, g, P);
+    CHECK(r && r->at_us == 52700 && r->step_us == -31200);
+    CHECK(r && r->at_us >= span + g && r->at_us + r->step_us >= span + g); /* idle in both grids */
+    CHECK(r && P + r->step_us > r->at_us + r->step_us); /* the stale TBTT after the landing: idle */
+    r = rephase_plan(0, 51200, span, g, P);
+    CHECK(r && r->at_us == 72700 && r->step_us == -51200);
+    r = rephase_plan(0, 75000, span, g, P); /* forward 27400 */
+    CHECK(r && r->at_us == 96500 && r->step_us == -75000 && r->at_us < P - g);
+    /* Forward 22000: no negative instant before the next TBTT; a positive
+     * step whose stale TBTT (22000 into the next superframe) clears the span. */
+    r = rephase_plan(22000, 0, span, g, P);
+    CHECK(r && r->at_us == 21500 && r->step_us == 22000);
+    CHECK(!rephase_plan(0, 90000, span, g, P)); /* 12.4 ms apart: inside the span, move twice */
+    CHECK(!rephase_plan(5000, 5000, span, g, P)); /* no move */
+    const f1::ChannelSwitchCmd pc{2, 80, 157, 17523900000ull, 10, 51200};
+    auto pm = f1::encode_channel_switch(pc, k1);
+    CHECK(f1::decode_channel_switch(pm.data(), pm.size(), k1) == pc);
   }
 
   if (failures == 0)

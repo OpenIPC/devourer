@@ -273,6 +273,7 @@
 #include "cell/LinkAdapt.h"
 #include "cell/SlotGrid.h"
 #include "logger.h"
+#include "cell_caps.h"
 #include "radio_open.h"
 #include "cell/CellScheduler.h"
 #include "cell/ChannelSwitch.h"
@@ -564,7 +565,7 @@ int64_t sleep_until_tsf(IRadio *dev, int64_t target) {
 
 bool caps_ok(IRadio *dev) {
   const auto c = dev->GetAdapterCaps();
-  if (!c.tsf_write_ok || !c.tbtt_follows_tsf || !c.beacon_backoff_ctl || !c.hw_beacon_txtsf) {
+  if (!devourer::cell_node_caps_ok(c)) {
     fprintf(stderr, "this radio cannot run a cell node (tsf_write_ok=%d tbtt_follows_tsf=%d "
                     "beacon_backoff_ctl=%d hw_beacon_txtsf=%d)\n",
             c.tsf_write_ok, c.tbtt_follows_tsf, c.beacon_backoff_ctl, c.hw_beacon_txtsf);

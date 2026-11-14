@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <memory>
 
+#include "cell_caps.h"
 #include "radio_open.h"
 
 int main() {
@@ -15,7 +16,7 @@ int main() {
     return 1;
   }
   const auto c = radio.dev->GetAdapterCaps();
-  const bool cell_ok = c.tsf_write_ok && c.tbtt_follows_tsf && c.beacon_backoff_ctl && c.hw_beacon_txtsf;
+  const bool cell_ok = devourer::cell_node_caps_ok(c);
   printf("{\"ev\":\"cellcaps\",\"radio\":\"%s\",\"chip\":\"%s\",\"variant\":\"%s\",\"transport\":\"%s\","
          "\"tsf_write_ok\":%d,\"tbtt_follows_tsf\":%d,\"beacon_backoff_ctl\":%d,\"hw_beacon_txtsf\":%d,"
          "\"ack_responder_ok\":%d,\"hw_rx_timestamp\":%d,\"hw_injected_mgmt_txtsf\":%d,"

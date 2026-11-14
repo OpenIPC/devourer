@@ -1898,14 +1898,17 @@ Linux stack:
   - the client's authentication wait runs out first. It falls back to the
     AP it was leaving, which pays the same deletion, and ignores both for
     ~4.5 s;
-  - each fallback clears the other AP's entry, so the cycle alternates.
-    Returns to one AP are always slow and roams into the other always
-    fast; "the first AP" is only where the cycle starts.
+  - each fallback deletes the station at the AP being left (hostapd logs
+    its `DEL_STATION` there). In every run (4 runs, 40 roams), every roam
+    into one AP was slow and every roam into the other fast; which AP is
+    slow follows where the cycle started (the AP joined first), not a radio
+    or a channel.
 
   With the old AP dropping the client as it leaves (`hostapd_cli
   deauthenticate STA tx=0`, testrig `m6_roam_baseline.sh --drop-left 1`),
-  every roam took 0.41–0.57 s (10/10). Which part of the 430 ms deletion is
-  spent where in the kernel was not traced.
+  every roam took 0.41–0.57 s (10/10, against 5/5 slow returns without it in
+  the same session; testrig `results/2026-11-14-m6-causes.txt`). Which part
+  of the 430 ms deletion is spent where in the kernel was not traced.
 
 ## The rig suite (where the M6 tests live)
 

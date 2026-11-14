@@ -1028,6 +1028,9 @@ public:
   }
   uint32_t applied_version() const { return applied_ ? applied_->version : 0; }
   uint32_t staged_version() const { return staged_ ? staged_->version : 0; }
+  /* The staged schedule (not yet on air): its positions are already taken
+   * for anything else this DU is asked to place (a handover arrival). */
+  const std::optional<Schedule> &staged() const { return staged_; }
   const std::optional<Schedule> &applied() const { return applied_; }
 
 private:

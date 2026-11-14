@@ -1113,16 +1113,28 @@ int main() {
             for (const auto &fl : flights)
               busy = busy || fl.second.cmd.target == *act || fl.second.cmd.source == *act ||
                      fl.second.cmd.target == cell || fl.second.cmd.source == cell;
+            /* Nor while either DU has a schedule pushed and not yet applied:
+             * the positions in its report are about to change (the reverse
+             * of the schedule's own in-flight guard). */
+            for (const uint16_t x : {cell, *act})
+              if (auto xd = dus.find(x); xd != dus.end() && xd->second.sched && !xd->second.sched_refused &&
+                                         xd->second.rep.applied_version < xd->second.sched->version)
+                busy = true;
             auto tit = dus.find(*act);
             /* The target's report must be current: its capacity, channel and
              * clock are what the command is built from. */
             const bool tgt_fresh = tit != dus.end() && now - tit->second.at < std::chrono::seconds(3);
             if (!busy && tgt_fresh && tit->second.rep.net_sf > 0 && dit->second.rep.net_sf > 0) {
               const f1::Report &sr = dit->second.rep, &tr = tit->second.rep;
+              /* Taken at the target: what it reports, and what this CU last
+               * scheduled it (its report may predate that schedule). */
+              std::vector<CoordAssign> taken = tr.ues;
+              if (tit->second.sched)
+                taken.insert(taken.end(), tit->second.sched->ues.begin(), tit->second.sched->ues.end());
               uint16_t tue = 0;
               for (uint16_t u = 1; u <= tr.positions.size() && !tue; ++u) {
                 bool used = false;
-                for (const auto &a : tr.ues)
+                for (const auto &a : taken)
                   used = used || a.ue == u;
                 if (!used)
                   tue = u;
@@ -1130,7 +1142,7 @@ int main() {
               uint8_t tpos = 0;
               for (uint8_t p = 1; p <= tr.positions.size() && !tpos; ++p) {
                 bool used = false;
-                for (const auto &a : tr.ues)
+                for (const auto &a : taken)
                   used = used || a.pos == p;
                 if (!used)
                   tpos = p;

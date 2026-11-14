@@ -2124,7 +2124,12 @@ int run_du(IRadio *dev, const Cfg &c) {
               last_ho_seq = cmd.seq;
             }
             net_now = f1_view.net_sf;
+            /* Taken: the map on air and a schedule staged to replace it (an
+             * arrival placed on a position the next schedule gives another UE
+             * collides with it from that instant: shared DL and UL slots). */
             live = f1_view.ues;
+            if (const auto &sg = stager.staged())
+              live.insert(live.end(), sg->ues.begin(), sg->ues.end());
             again = (cmd.target == c.cell && ho_in.count(cmd.target_ue) &&
                      ho_in[cmd.target_ue].id == cmd.id) ||
                     (cmd.source == c.cell && ho_out.count(cmd.ue) && ho_out[cmd.ue].id == cmd.id);
@@ -3110,6 +3115,11 @@ int run_du(IRadio *dev, const Cfg &c) {
             ta_report.clear();
             for (const Grant &g : map.grants)
               ta_report[g.ue] = g.ta_us;
+            /* The positions the F1 thread checks a handover against: the map
+             * just committed, at once (not at the next pass). */
+            f1_view.ues.clear();
+            for (const Grant &g : map.grants)
+              f1_view.ues.push_back({g.ue, position_of(g)});
           }
           if (f1_eff) {
             std::lock_guard<std::mutex> lk(f1_mu);

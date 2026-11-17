@@ -65,6 +65,10 @@ struct rx_pkt_attrib
      * the chip's TSF against its own wall clock. Populated by
      * FrameParser; surfaced through examples/rx/main.cpp's rx.frame event. */
     uint32_t tsfl;
+    /* Primary channel from this RX record's supported PHY report; never
+     * inferred from host retune state. Other backends leave it unknown. */
+    uint16_t phy_channel = 0;
+    bool phy_channel_valid = false;
     /* AX/VHT datarate code is 9-bit (HT 0x80+, VHT 0x100+, HE 0x180+), so a
      * uint8_t truncates the format bits — VHT2SS+ and every HE rate collapse
      * onto an HT/legacy code. Kept 16-bit so the reported RX rate is truthful

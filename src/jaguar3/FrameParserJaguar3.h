@@ -300,6 +300,8 @@ inline bool parse_rx_8822c(const uint8_t *buf, size_t buflen,
  * must not fold a field the return value does not claim. */
 inline PhyStsFill parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
                                      uint8_t configured_bw, rx_pkt_attrib &a) {
+  a.phy_channel = 0;
+  a.phy_channel_valid = false;
   if (physts == nullptr || physts_len < 28)
     return PhyStsFill::None;
   const uint8_t page_num = physts[0] & 0x0f;
@@ -331,6 +333,15 @@ inline PhyStsFill parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
    * 20..23, DW6 rxsnr[4] at 24..27); other OFDM pages (2/3/4/5/6) reuse those
    * offsets for other data, so leave them at 0 there. */
   if (page_num == 1) {
+    /* Type1 primary channel is 10 bits: byte6 plus byte0[7:6].
+     * Keep high bits until range checking; the radio API supports 1..255. */
+    const uint16_t primary = static_cast<uint16_t>(physts[6]) |
+                             (static_cast<uint16_t>(physts[0] >> 6) << 8);
+    if (a.physt && a.pkt_rpt_type == RX_PACKET_TYPE::NORMAL_RX &&
+        primary > 0 && primary <= 255) {
+      a.phy_channel = primary;
+      a.phy_channel_valid = true;
+    }
     a.cfo_tail = static_cast<int8_t>(physts[20]); /* path-A CFO tail */
     for (int i = 0; i < 4; i++) {
       a.evm[i] = static_cast<int8_t>(physts[16 + i]);

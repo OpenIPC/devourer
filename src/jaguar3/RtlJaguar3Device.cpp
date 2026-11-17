@@ -391,6 +391,8 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
         p.RxAtrib.ppdu_cnt = f.ppdu_cnt;
         p.RxAtrib.drvinfo_sz = static_cast<uint8_t>(f.drvinfo_size);
         p.RxAtrib.shift_sz = f.shift;
+        /* The parser gates packet-channel evidence on this record's PHYST. */
+        p.RxAtrib.physt = f.physt;
         /* RX desc word2 BIT(28) = FW C2H report, not an 802.11 frame. During
          * concurrent TX+RX the FW emits one small C2H per TX, so tag them for
          * the packetProcessor (which skips C2H) instead of surfacing a flood
@@ -425,7 +427,6 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
          * the shared field carries on Jaguar1 and the RTL8733B too, and what
          * a caller needs to tell which A-MPDU subframe the report belonged to.
          * `phy` is the local that says which fields are safe to fold. */
-        p.RxAtrib.physt = f.physt;
         p.Data = std::span<uint8_t>(const_cast<uint8_t *>(f.frame), f.frame_len);
         if (!p.RxAtrib.crc_err && phy != PhyStsFill::None) {
           _rxq.add(p.RxAtrib.rssi[0], p.RxAtrib.snr[0], p.RxAtrib.evm[0]);

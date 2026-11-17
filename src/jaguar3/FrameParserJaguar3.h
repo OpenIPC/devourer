@@ -299,7 +299,8 @@ inline bool parse_rx_8822c(const uint8_t *buf, size_t buflen,
  * IS a measurement even though the type1-only fields are left at 0. Callers
  * must not fold a field the return value does not claim. */
 inline PhyStsFill parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
-                                     uint8_t configured_bw, rx_pkt_attrib &a) {
+                                     uint8_t configured_bw, rx_pkt_attrib &a,
+                                     bool rf_band_encoded_channel = false) {
   a.phy_channel = 0;
   a.phy_channel_valid = false;
   if (physts == nullptr || physts_len < 28)
@@ -337,9 +338,20 @@ inline PhyStsFill parse_phy_sts_jgr3(const uint8_t *physts, uint16_t physts_len,
      * Keep high bits until range checking; the radio API supports 1..255. */
     const uint16_t primary = static_cast<uint16_t>(physts[6]) |
                              (static_cast<uint16_t>(physts[0] >> 6) << 8);
+    uint16_t decoded = primary;
+    if (rf_band_encoded_channel) {
+      /* 8822E reports RF18's 5-GHz bit8 with its channel. Validate against
+       * this report's band before normalizing, never a host channel label. */
+      const uint8_t band = f7 & 3;
+      const uint8_t low = physts[6];
+      const bool supported =
+          (band == 0 && (primary >> 8) == 0 && low >= 1 && low <= 14) ||
+          (band == 1 && (primary >> 8) == 1 && low >= 16 && low <= 253);
+      decoded = supported ? static_cast<uint16_t>(low) : uint16_t{0};
+    }
     if (a.physt && a.pkt_rpt_type == RX_PACKET_TYPE::NORMAL_RX &&
-        primary > 0 && primary <= 255) {
-      a.phy_channel = primary;
+        decoded > 0 && decoded <= 255) {
+      a.phy_channel = decoded;
       a.phy_channel_valid = true;
     }
     a.cfo_tail = static_cast<int8_t>(physts[20]); /* path-A CFO tail */

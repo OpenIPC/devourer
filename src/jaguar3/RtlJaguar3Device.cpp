@@ -427,7 +427,8 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
         if (!is_c2h && f.physt && f.drvinfo_size >= 28)
           phy = jaguar3::parse_phy_sts_jgr3(
               data + off + jaguar3::RXDESC_SIZE_8822C, f.drvinfo_size,
-              _rx_bw_code.load(std::memory_order_relaxed), p.RxAtrib);
+              _rx_bw_code.load(std::memory_order_relaxed), p.RxAtrib,
+              _variant == jaguar3::ChipVariant::C8822E);
         /* The RAW descriptor bit, not the parse outcome — that is the meaning
          * the shared field carries on Jaguar1 and the RTL8733B too, and what
          * a caller needs to tell which A-MPDU subframe the report belonged to.

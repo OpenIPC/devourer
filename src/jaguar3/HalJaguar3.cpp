@@ -1121,7 +1121,7 @@ void HalJaguar3::apply_bb_rf_agc_tables(InitTimer *timer) {
          * [27:20] (0 here), data in [19:0]. The radio tables DO carry reg-0
          * entries (0x00010000 / 0x0003001F), so this branch is load-bearing. */
         _device.rtw_write32(base == 0x4c00 ? 0x4108 : 0x1808, data & RFREG_MASK);
-        return;
+        break;
       default:
         /* Plain 20-bit write, not the vendor's read-modify-write under
          * MASK20BITS: the direct window's bits [31:20] are not storage --
@@ -1135,6 +1135,12 @@ void HalJaguar3::apply_bb_rf_agc_tables(InitTimer *timer) {
          * (ITransport::write_batch_begin). */
         _device.rtw_write32(static_cast<uint16_t>(base + ((addr & 0xff) << 2)),
                             data & RFREG_MASK);
+      }
+      if (_variant == ChipVariant::C8822E) {
+        /* odm_config_rf_reg_8822e requires a post-write 1us settle, also for
+         * reg 0. Complete pipelined transfers before starting that interval. */
+        _device.flush_writes();
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
       }
     };
   };

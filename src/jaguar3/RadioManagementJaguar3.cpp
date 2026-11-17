@@ -116,15 +116,11 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
    * the sub-band bit (ch>144 -> BIT18, ch>=80 -> BIT17, else none). --- */
   const bool is_c = (_variant == ChipVariant::C8822C);
   const bool is_2g = central <= 14;
-  /* RF 0x18 channel/band tune. 8822C is a read-modify-write preserving [15:10]
-   * and setting the BW20 bits (config_phydm_switch_channel/bandwidth_8822c);
-   * 8822E configures its RF band via its own phydm path (config_channel_8822e),
-   * so it composes the value from scratch (base 0). */
-  const uint32_t rf18 =
-      is_c ? rf18_for(central, bwmode,
-                      _device.rtw_read32(
-                          static_cast<uint16_t>(0x3c00 + (0x18 << 2))))
-           : rf18_for(central, bwmode, 0);
+  /* Both vendor channel/BW paths preserve RF18 state outside the channel,
+   * band and bandwidth masks; the 8822E must not compose from zero either. */
+  const uint32_t rf18 = rf18_for(
+      central, bwmode,
+      _device.rtw_read32(static_cast<uint16_t>(0x3c00 + (0x18 << 2))));
   _logger->info("Jaguar3: central ch {} (pri idx {}) RF18=0x{:05x}", central,
                 pri, rf18);
 
@@ -496,8 +492,8 @@ void RadioManagementJaguar3::central_and_pri(uint8_t channel,
  * vendor does rf_reg18 &= ~(BIT13|BIT12) before setting them, and the RMW mask
  * must too — otherwise a prior 20 MHz tune's BIT12 survives and a 40 MHz tune
  * ends up BIT13|BIT12 = 20 MHz RF while BB/descriptor say 40 MHz, which halts
- * the TX engine (frames fill TXPKTBUF but never drain). base 0 (8822e) composes
- * the value from scratch. */
+ * the TX engine (frames fill TXPKTBUF but never drain). Both dies preserve
+ * the base's remaining RF state. */
 uint32_t RadioManagementJaguar3::rf18_for(uint8_t central,
                                           ChannelWidth_t bwmode,
                                           uint32_t base) {
@@ -757,11 +753,9 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
         _device.rtw_read32(static_cast<uint16_t>(0x4c00 + (0x18 << 2)));
     _cw_primed = true;
   }
-  /* RF18: merge the new central into the cached low 20 bits (8822c — the
-   * primed read carries the current BW/band bits) or compose from scratch
-   * (8822e); the window dword's top 12 bits ride along from the prime. */
-  const uint32_t rf18 = is_c ? rf18_for(central, bwmode, _cw_rfwin_a)
-                             : rf18_for(central, bwmode, 0);
+  /* RF18: preserve the primed non-channel/BW state on both dies. The window
+   * dword's top 12 bits ride along from the prime. */
+  const uint32_t rf18 = rf18_for(central, bwmode, _cw_rfwin_a);
   const uint32_t win_a = (_cw_rfwin_a & 0xfff00000u) | rf18;
   const uint32_t win_b = (_cw_rfwin_b & 0xfff00000u) | rf18;
   prof.mark("prime");

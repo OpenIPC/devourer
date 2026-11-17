@@ -532,7 +532,7 @@ private:
    * coarse path's TBTT phase-alignment must subtract it. Guarded by _reg_mu. */
   int64_t _tbtt_off_us = 0;
   /* StartRxLoop stop request (StopRxLoop). */
-  volatile bool _rx_stop = false;
+  std::atomic<bool> _rx_stop{false};
 
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
 

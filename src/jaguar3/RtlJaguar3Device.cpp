@@ -233,6 +233,12 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
    * the register restore below, so its 200 ms bulk reads don't interleave with
    * the RX-path enable sequence. */
   _rx_loop_active = true;
+  /* Release bulk-IN even if setup, the transport or the consumer throws.
+   * Declared before the local watchdog so it is joined before handover. */
+  struct RxOwnership {
+    std::atomic<bool> &active;
+    ~RxOwnership() { active = false; }
+  } rx_ownership{_rx_loop_active};
 
   /* An InitWrite bring-up is TX-oriented: it closed the RX filters
    * (0x6A0-0x6A4, so a TX-only session's unread frames can't fill the on-chip
@@ -303,12 +309,11 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
    * a sync control transfer from the bulk-IN event thread starves its own
    * event loop; a separate thread under _reg_mu is the proven pattern, same
    * as the TX-side coex thread, which owns the tick in TX+RX mode). */
-  std::atomic<bool> phydm_stop{false};
-  std::thread phydm_thread;
+  std::jthread phydm_thread;
   if (!_coex_thread.joinable()) {
-    phydm_thread = std::thread([this, &phydm_stop] {
+    phydm_thread = std::jthread([this](std::stop_token stop) {
       auto next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-      while (!phydm_stop && !g_devourer_should_stop) {
+      while (!stop.stop_requested() && !g_devourer_should_stop) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (std::chrono::steady_clock::now() < next)
           continue;
@@ -503,10 +508,6 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
   _device.bulk_read_async_loop(rx_urb_bytes, 8, on_data, [this]() -> bool {
     return _rx_stop || g_devourer_should_stop;
   });
-  _rx_loop_active = false;
-  phydm_stop = true;
-  if (phydm_thread.joinable())
-    phydm_thread.join();
 }
 
 /* Coex runtime (port of the rtw88 watchdog's coex path): drain the firmware's

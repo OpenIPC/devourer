@@ -100,9 +100,10 @@ never trips this because its flow always tunes *through* a channel change (an
 RF18 edge) around any bandwidth switch. The fix is to force the edge: write RF18
 once with a substitute channel byte, then the real value. (The 8821C variant
 does not share this dependence.) The same wall hits a plain width change on an
-unchanged centre channel (40 MHz at primary 34 -> 20 MHz on 36): the BW bits
-change but the channel byte does not, and RX stays partly deaf — so
-`set_channel_bw` forces the edge for any write that keeps the channel byte.
+unchanged centre channel (40 MHz at primary 34 -> 20 MHz on 36, and the
+reverse): the BW bits change but the channel byte does not, and RX
+intermittently goes partly or fully deaf — so `set_channel_bw` forces the edge
+for any write that keeps the channel byte (`tests/width_relatch_rxcheck.cpp`).
 
 ### Jaguar3 (RTL8822CU / RTL8822EU) — the `0x9b0`/`0x9b4` dividers
 

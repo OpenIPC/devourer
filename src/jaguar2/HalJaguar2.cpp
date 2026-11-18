@@ -984,7 +984,10 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
 
   uint32_t rf18 = rf_read(0, 0x18);
   const bool same_cch = (rf18 & 0xffu) == cch; /* see the RF18 edge below */
-  rf18 &= ~((1u << 18) | (1u << 17) | 0xffu); /* clear band/MASKBYTE0 */
+  /* Clear band/MASKBYTE0 and bit 15, the LCK trigger: after do_lck the read
+   * can still show it set, and writing it back (on both paths, outside
+   * do_lck's RTK/standby bracket) would kick a fresh LC calibration. */
+  rf18 &= ~((1u << 18) | (1u << 17) | (1u << 15) | 0xffu);
   rf18 |= cch;
 
   if (g2) {
@@ -1133,18 +1136,20 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   if (g2)
     rf18 &= 0x00060cffu;
 
-  /* The RF synth only re-latches its internal channel state on a change of
-   * RF18's CHANNEL BYTE — a rewrite with the same byte does nothing, even when
-   * the BW bits [11:10] change. The kernel never hits this because its flow
-   * always tunes through a channel/band change around a bandwidth switch.
+  /* The RF synth only reliably re-latches its internal channel state on a
+   * change of RF18's CHANNEL BYTE — a rewrite with the same byte is not
+   * reliably applied, even when the BW bits [11:10] change. The kernel never
+   * hits this because its flow always tunes through a channel/band change
+   * around a bandwidth switch.
    *  - 5/10 MHz: after the baseband ADC/DAC re-clock the RF stays latched to
    *    pre-re-clock internals (RX deaf, TX invalid); devourer's end-of-bring-up
    *    narrowband re-clock rewrites RF18 with the identical value. Isolated by
    *    golden-init replay bisection down to exactly this write pair (23300 vs
    *    9 NB frames on the bench).
    *  - A width change on the same centre channel (40 MHz at primary 34 ->
-   *    20 MHz on 36: centre 36 both times) writes new BW bits under the same
-   *    byte, and RX stays partly deaf until the next real channel change.
+   *    20 MHz on 36: centre 36 both times, and the reverse) writes new BW
+   *    bits under the same byte; RX then intermittently goes partly or fully
+   *    deaf (tests/width_relatch_rxcheck.cpp).
    * Force the edge: intermediate write with a different channel byte, then
    * the real value. A real channel change is its own edge and skips it. */
   if (bw == 5 || bw == 6 || same_cch) {

@@ -8,9 +8,8 @@
 // shows even while strong frames still decode. Compare with a fresh bring-up
 // at the target width.
 //
-// Build (one line):
-//   g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/width_relatch_rxcheck.cpp
-//   examples/common/env_config.cpp build/libdevourer.a
+// Build: g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/width_relatch_rxcheck.cpp \
+//   examples/common/env_config.cpp build/libdevourer.a \
 //   $(pkg-config --cflags --libs libusb-1.0) -lpthread -o build/width_relatch_rxcheck
 // Run: DEVOURER_VID=0x0bda DEVOURER_PID=0xb812 build/width_relatch_rxcheck <from> <to>
 //   from/to in MHz: 20, 40 or 80, all centred on channel 36 (40: primary 34,
@@ -84,7 +83,11 @@ int main(int argc, char **argv) {
       g_beacons.push_back(b);
     }
   };
-  std::thread rx([&] { dev->Init(cb, centre36(from)); });
+  std::atomic<bool> rx_done{false};
+  std::thread rx([&] {
+    dev->Init(cb, centre36(from));
+    rx_done = true;
+  });
   std::this_thread::sleep_for(std::chrono::seconds(2)); // settle bring-up
 
   auto second = [] {
@@ -103,12 +106,23 @@ int main(int argc, char **argv) {
   }
   for (int i = 0; i < 6; i++) printf(" %llu", second());
   printf("\n");
+  /* StartRxLoop clears the stop flag on entry, so repeat the stop until the
+   * RX thread has really ended, then tear down in order. */
+  while (!rx_done) {
+    dev->StopRxLoop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  rx.join();
+  dev->Stop();
+
   /* Beacon RSSI/SNR of the most-heard beaconing transmitter, per second
    * (seconds 1-3 before the switch, 4-9 after). */
-  std::lock_guard<std::mutex> lk(g_mu);
   std::map<std::array<uint8_t, 6>, int> n;
   for (const auto &b : g_beacons) n[b.sa]++;
-  if (n.empty()) { printf("  no beacons\n"); fflush(stdout); _exit(0); }
+  if (n.empty()) {
+    printf("  no beacons\n");
+    return 0;
+  }
   auto top = n.begin();
   for (auto it = n.begin(); it != n.end(); ++it)
     if (it->second > top->second) top = it;
@@ -123,6 +137,5 @@ int main(int argc, char **argv) {
     else printf(" -");
   }
   printf("\n");
-  fflush(stdout);
-  _exit(0); // don't join the blocking RX loop
+  return 0;
 }

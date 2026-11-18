@@ -983,6 +983,7 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   (void)rfe_type;
 
   uint32_t rf18 = rf_read(0, 0x18);
+  const bool same_cch = (rf18 & 0xffu) == cch; /* see the RF18 edge below */
   rf18 &= ~((1u << 18) | (1u << 17) | 0xffu); /* clear band/MASKBYTE0 */
   rf18 |= cch;
 
@@ -1132,16 +1133,21 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   if (g2)
     rf18 &= 0x00060cffu;
 
-  /* 5/10 MHz: the RF synth only re-latches its internal channel state on an
-   * RF18 VALUE EDGE — a same-value rewrite does nothing, and after the
-   * baseband ADC/DAC re-clock the RF stays latched to pre-re-clock internals
-   * (RX deaf, TX invalid). The kernel never hits this because its flow always
-   * tunes through a channel/band change around a bandwidth switch; devourer's
-   * end-of-bring-up narrowband re-clock rewrites RF18 with the identical
-   * value. Force the edge: intermediate write with a different channel byte,
-   * then the real value. Isolated by golden-init replay bisection down to
-   * exactly this write pair (23300 vs 9 NB frames on the bench). */
-  if (bw == 5 || bw == 6) {
+  /* The RF synth only re-latches its internal channel state on a change of
+   * RF18's CHANNEL BYTE — a rewrite with the same byte does nothing, even when
+   * the BW bits [11:10] change. The kernel never hits this because its flow
+   * always tunes through a channel/band change around a bandwidth switch.
+   *  - 5/10 MHz: after the baseband ADC/DAC re-clock the RF stays latched to
+   *    pre-re-clock internals (RX deaf, TX invalid); devourer's end-of-bring-up
+   *    narrowband re-clock rewrites RF18 with the identical value. Isolated by
+   *    golden-init replay bisection down to exactly this write pair (23300 vs
+   *    9 NB frames on the bench).
+   *  - A width change on the same centre channel (40 MHz at primary 34 ->
+   *    20 MHz on 36: centre 36 both times) writes new BW bits under the same
+   *    byte, and RX stays partly deaf until the next real channel change.
+   * Force the edge: intermediate write with a different channel byte, then
+   * the real value. A real channel change is its own edge and skips it. */
+  if (bw == 5 || bw == 6 || same_cch) {
     const uint32_t rf18_alt = (rf18 & ~0xffu) | (cch == 1 ? 2u : 1u);
     rf_write(0, 0x18, rf18_alt);
     if (r2t2r)
@@ -1408,8 +1414,10 @@ bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
     bb_reset(); /* relatch the DAC/DFE at the new sample rate */
   } else {
     /* narrowband -> 20 MHz: restore the cached 20 MHz 0x8ac + ADC buffer clock
-     * (exactly the CHANNEL_WIDTH_20 branch; no edge / no bb_reset, matching the
-     * full path). */
+     * (exactly the CHANNEL_WIDTH_20 branch; no bb_reset). No RF18 edge: the
+     * RF stays in its 20 MHz mode across NB, and NB -> 20 has not been shown
+     * to need one — the full path does edge here, only because it edges every
+     * same-channel-byte write. */
     _device.phy_set_bb_reg(0x08ac, 0xffffffff, _fbw_8ac_20m);
     _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
     const uint32_t rf18 = _fbw_rf18;

@@ -53,10 +53,11 @@ Jaguar1 (shared `PhyTableLoader`).
   network).
 - **5/10 MHz narrowband on both variants**: a baseband ADC/DAC re-clock
   packed into BB `0x8ac`; the RF stays in 20 MHz mode; applied as an
-  end-of-bring-up retune. The 8822B RF synth only re-latches on an RF18
-  *value edge*, so the narrowband path writes RF18 twice — same-value
-  rewrites do nothing; see the `set_channel_bw` NB branch and
-  `docs/narrowband.md`.
+  end-of-bring-up retune. The 8822B RF synth only re-latches on a change
+  of RF18's *channel byte*, so any write that keeps the byte (narrowband,
+  or a width change on the same centre channel such as 40@34 -> 20@36)
+  writes RF18 twice — same-byte rewrites do nothing, even with new BW
+  bits; see the RF18 edge in `set_channel_bw` and `docs/narrowband.md`.
 - 5 MHz at 5 GHz is CFO-limited: subcarrier spacing shrinks 4× and a
   far-offset TX/RX crystal pair syncs bimodally per bring-up — at 2.4 GHz
   the same pair is stable (`tests/narrowband_cross_rx.sh` header).

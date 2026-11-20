@@ -125,7 +125,13 @@ column, 10 MHz unless noted (`tests/nb_toggle_rxcheck.cpp`):
 | fast switch, 5 MHz, ch36 | 16 of 24 | 20 of 20 |
 | direct bring-up, 8812BU (external antennas) | 1 of 6 | 6 of 6 warm, 5 of 5 VBUS-cold |
 | direct bring-up, T3U (internal antennas) | 0 of 6 | 6 of 6 warm, 5 of 5 VBUS-cold |
-| direct 5 MHz bring-up, VBUS-cold, ch36 | — | 8812BU 5 of 5, T3U 17 of 17 |
+| direct 5 MHz bring-up, VBUS-cold, ch36 | not run | 8812BU 5 of 5, T3U 17 of 17 |
+
+The cold 5 MHz row has a third arm the table has no column for: with the reset
+placed *before* the edge, the same cell read 8812BU 5 of 5 and T3U 15 of 17.
+Two failures in 17 against none in 17 is not a difference to claim, and they
+were not diagnosed — they are as likely the CFO limit below as anything the
+reset did.
 
 The reset buys nothing on the TX side either. SDR, channel 44, median PSD
 against a silent baseline, the reset placed before the edge versus absent,
@@ -226,7 +232,9 @@ chip-specific traps. The ones this port paid for, current-state:
    Not every deaf 5 MHz bring-up is this. On the 8822B the baseband-reset
    fault above produced the same symptom on any crystal pair; with it gone,
    two 8822B receivers against one 8812CU transmitter decoded 22 of 22
-   direct 5 MHz bring-ups from VBUS-cold on channel 36. That is one
+   direct 5 MHz bring-ups from VBUS-cold on channel 36 — and 20 of 22 in
+   the arm of the same run that still had a reset before the RF18 edge, the
+   two misses both on the internal-antenna unit and undiagnosed. That is one
    transmitter and not a far-offset pair, so it bounds the fault, not the
    CFO limit: check the NHM/CCA signature before blaming the crystal.
 

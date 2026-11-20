@@ -254,8 +254,16 @@ cached channel state, and falls back to the full `SetMonitorChannel` for a
   (8812AU), ~0.74 ms (8814AU) — a 265–490× speedup.
 - **Jaguar2** (8822B): the re-clock is larger — `0x8ac`/`0x8c4`/`0x8c8`, the
   band-keyed CCK trio, the RF18 re-latch *edge* (the 8822B synth only re-latches
-  on an RF18 value change), and a BB reset — but all replayed from a cache with
-  no RF read. ~15 ms (20→NB, bounded by the RF18 edge) / ~3 ms (NB→20).
+  on an RF18 channel-byte change), and a BB reset — but all replayed from a
+  cache with no RF read. The return to 20 MHz edges RF18 as well: without it
+  20 MHz RX came back deaf in 3 of 6 toggles on one 8812BU, with it in 0 of 8
+  (`tests/fast_bw_after_hop_rxcheck.cpp`). Measured on that unit at USB 2:
+  ~1.2 ms (20→NB) / ~0.5 ms (NB→20), against ~7 ms for the full path either
+  way. A `FastRetune` hop carries the cached RF18 with it, so a toggle after a
+  hop stays on the hop's channel; a firmware hop drops the cache and the next
+  toggle takes the full path. Not closed: the 20→NB direction decoded nothing
+  from a 10 MHz partner in roughly one bring-up in three on the same unit,
+  with and without the return edge.
 - **Jaguar3** (8822C/8822E): the narrowband re-clock is already a self-contained
   delta (`set_bandwidth_dividers`, incl. a 20 MHz-restore default and the
   8822e MAC-clock/TX-shaping), so the fast path is that delta + a BB reset.
@@ -380,6 +388,8 @@ traffic), and `tests/jaguar1_cfo_convergence.sh` (two-adapter Jaguar1 link:
 the receiver's loop engages and steps its cap to reduce a real inter-crystal
 offset — the same convergence behaviour validated on Jaguar2/Jaguar3), and
 `tests/fast_bw_parity.sh` (FastSetBandwidth timing + register parity +
-cross-RX decode, all three generations), and `tests/tdma_demo.sh`
+cross-RX decode, all three generations), `tests/fast_bw_after_hop_rxcheck.cpp`
+(8822B: a toggle after a `FastRetune` hop stays on the hop's channel and
+20 MHz RX survives the return), and `tests/tdma_demo.sh`
 (the burst-level bandwidth-TDMA example — both lockstep sync modes + the
 dual-RX per-band split).

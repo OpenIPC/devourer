@@ -59,9 +59,16 @@ upstream history.
   needs (mainline `rtw89` does not carry it; the 2021 lwfinger v1.15 8852A drop
   has only basic TWT). Forked for pinning; unlike the rtw88-era forks these
   need **no kbuild patches** — both pinned tips build *and* run (insmod, bind,
-  netdev up) unpatched on kernel 6.18.33 (`tests/kestrel_vendor_ko_smoke.sh`
+  netdev up) on kernel 6.18.33 without one (`tests/kestrel_vendor_ko_smoke.sh`
   is the functional gate). A `devourer-kbuild` branch gets added only if a
-  future kernel breaks them.
+  future kernel breaks them. The `rtl8852bu` pin is the upstream tip as-is;
+  the `rtl8852cu` pin is the upstream tip plus **one fork-only commit** that
+  makes cfg80211 monitor mode work on kernel 5.12+ (`CONFIG_WIFI_MONITOR=y`,
+  the interface-add deadlock, the monitor-RX NULL dereference). That commit
+  exists only in the fork, so the fork's `devourer-pin-20260713` tag points at
+  it — the pin stays fetchable whatever `main` does. When moving either pin,
+  push the commit **and** a tag before committing the gitlink: a pin that
+  exists only in a local checkout breaks every fresh submodule fetch.
 - **libc0607 `5mhz_bw` for `rtl88x2eu-5mhz`.** The only fork carrying the
   working 5 MHz DAC-clock divider write (`R_0x9b4`) that devourer ported for
   Jaguar3 narrowband. It is the on-air ground-truth for

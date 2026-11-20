@@ -9,7 +9,7 @@
 // beacons were decoded per advertised primary channel (HT Operation element,
 // DS Parameter Set as fallback). Needs only ambient APs on both channels, in
 // the same band. PASS = the last phase hears <to>'s beacons and none of
-// <from>'s.
+// <from>'s. Exit status: 0 PASS, 1 FAIL, 2 INCONCLUSIVE.
 //
 // Build (one line):
 //   g++ -std=c++20 -O2 -Isrc -Iexamples/common tests/fast_bw_after_hop_rxcheck.cpp examples/common/env_config.cpp build/libdevourer.a $(pkg-config --cflags --libs libusb-1.0) -lpthread -o build/fast_bw_after_hop_rxcheck
@@ -35,6 +35,7 @@
 
 static std::mutex g_mu;
 static std::map<int, int> g_by_ch; // advertised primary channel -> beacons
+static std::atomic<bool> g_rx_live{false}; // a frame arrived: bring-up is done
 
 /* Primary channel a beacon advertises, 0 when it carries neither element. */
 static int beacon_channel(const uint8_t *d, size_t n) {
@@ -71,7 +72,10 @@ int main(int argc, char **argv) {
   if (!dev) return 1;
 
   auto cb = [](const Packet &p) {
-    if (p.RxAtrib.crc_err || p.Data.size() < 38 || p.Data[0] != 0x80)
+    if (p.RxAtrib.crc_err)
+      return;
+    g_rx_live.store(true, std::memory_order_relaxed);
+    if (p.Data.size() < 38 || p.Data[0] != 0x80)
       return;
     const int ch = beacon_channel(p.Data.data(), p.Data.size());
     std::lock_guard<std::mutex> lk(g_mu);
@@ -82,7 +86,26 @@ int main(int argc, char **argv) {
     dev->Init(cb, SelectedChannel{from, 0, CHANNEL_WIDTH_20});
     rx_done = true;
   });
-  std::this_thread::sleep_for(std::chrono::seconds(2)); // settle bring-up
+  /* Stop the RX loop and tear down in order. StartRxLoop clears the stop
+   * flag on entry, so repeat the stop until the thread has really ended. */
+  auto shutdown = [&] {
+    while (!rx_done) {
+      dev->StopRxLoop();
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    rx.join();
+    dev->Stop();
+  };
+  /* Init runs bring-up before its RX loop, and the hop and toggle below must
+   * not overlap it. The first decoded frame is the proof it has finished. */
+  for (int i = 0; i < 150 && !g_rx_live && !rx_done; i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (!g_rx_live) {
+    printf("verdict: INCONCLUSIVE — no frame decoded on ch%d within 15 s of "
+           "bring-up\n", from);
+    shutdown();
+    return 2;
+  }
 
   /* Beacons per advertised channel over `ms`; returns {on `want`, on `other`}. */
   auto window = [&](const char *label, int ms, int want, int other) {
@@ -107,23 +130,19 @@ int main(int argc, char **argv) {
   dev->FastSetBandwidth(CHANNEL_WIDTH_20);
   const auto c = window("after 20 -> 10 -> 20 toggle", 3000, to, other);
 
-  /* StartRxLoop clears the stop flag on entry, so repeat the stop until the
-   * RX thread has really ended, then tear down in order. */
-  while (!rx_done) {
-    dev->StopRxLoop();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }
-  rx.join();
-  dev->Stop();
+  shutdown();
 
-  if (a.first == 0 || b.first == 0)
+  if (a.first == 0 || b.first == 0) {
     printf("verdict: INCONCLUSIVE — need beacons on both channels "
            "(<from>:%d, <to> after the hop:%d)\n", a.first, b.first);
-  else if (c.first > 0 && c.second == 0)
+    return 2;
+  }
+  if (c.first > 0 && c.second == 0) {
     printf("verdict: PASS — still on <to> after the toggle (%d beacons)\n",
            c.first);
-  else
-    printf("verdict: FAIL — after the toggle <to>:%d, <from>:%d\n", c.first,
-           c.second);
-  return 0;
+    return 0;
+  }
+  printf("verdict: FAIL — after the toggle <to>:%d, <from>:%d\n", c.first,
+         c.second);
+  return 1;
 }

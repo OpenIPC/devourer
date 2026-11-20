@@ -105,6 +105,33 @@ reverse): the BW bits change but the channel byte does not, and RX
 intermittently goes partly or fully deaf — so `set_channel_bw` forces the edge
 for any write that keeps the channel byte (`tests/width_relatch_rxcheck.cpp`).
 
+The edge has an ordering constraint of its own: **the baseband reset that
+relatches the divided clock tree must come before the RF18 edge, not after
+it.** With the reset last, the synth's re-latch was undone more often than not.
+The signature is a receiver that sees no in-band power at all — the NHM
+histogram at its floor and zero CCA under a strong co-channel transmitter —
+while every register, RF18 included, reads back correct; in the other
+direction the chip airs nothing a witness can decode. It is a per-switch
+lottery, not a per-unit fault, and neither the crystal trim nor the ADC/DAC
+clock codes move it. Measured on two 8822B units against master, same
+transmitter session, runs alternating (`tests/nb_toggle_rxcheck.cpp`):
+
+| 10 MHz unless noted | reset after the edge | reset before the edge |
+|---|---|---|
+| fast switch, ch36 | 10 of 32 windows decode | 32 of 32 |
+| full `SetMonitorChannel`, ch36 | 9 of 24 | 24 of 24 |
+| fast switch, ch6 | 11 of 20 | 20 of 20 |
+| full path, ch6 | 2 of 16 | 16 of 16 |
+| fast switch, 5 MHz, ch36 | 16 of 24 | 24 of 24 |
+| direct bring-up, 8812BU (external antennas) | 1 of 6 | 6 of 6 |
+| direct bring-up, T3U (internal antennas) | 0 of 6 | 6 of 6 |
+| 10 MHz TX, decoded by an 8852C witness | 2 of 6 bring-ups | 6 of 6 |
+
+What this does not show: the 8821C keeps its reset after its single RF18
+write and was not measured, and the 5 MHz row is one transmitter/receiver pair
+at one temperature — it does not retire the CFO limit below, it only removes
+one thing that looked like it.
+
 ### Jaguar3 (RTL8822CU / RTL8822EU) — the `0x9b0`/`0x9b4` dividers
 
 Jaguar3 moved the block: small-BW lives in `0x9b0[7:6]`, the ADC/DAC dividers in
@@ -121,7 +148,8 @@ converged on independently.
 - **A baseband reset relatches the divided clock tree.** Toggling MAC `0x0`
   BIT16 (the `_iqk_bb_reset` mechanism) after the re-clock makes the DAC/DFE
   pick up the new sample rate. Jaguar3 needs it; the Jaguar2 narrowband path
-  performs it; the 8812A happens not to require it.
+  performs it — on the 8822B strictly before the RF18 edge (above); the 8812A
+  happens not to require it.
 - **TX power folds to the 20 MHz column.** The per-rate regulatory `txpwr_lmt`
   tables carry no narrowband rows. A raw 5/10 bandwidth index reads as HT40 and
   misses the table entirely — leaving TX power unclamped at the rail. Narrowband
@@ -261,9 +289,7 @@ cached channel state, and falls back to the full `SetMonitorChannel` for a
   ~1.2 ms (20→NB) / ~0.5 ms (NB→20), against ~7 ms for the full path either
   way. A `FastRetune` hop carries the cached RF18 with it, so a toggle after a
   hop stays on the hop's channel; a firmware hop drops the cache and the next
-  toggle takes the full path. Not closed: the 20→NB direction decoded nothing
-  from a 10 MHz partner in roughly one bring-up in three on the same unit,
-  with and without the return edge.
+  toggle takes the full path.
 - **Jaguar3** (8822C/8822E): the narrowband re-clock is already a self-contained
   delta (`set_bandwidth_dividers`, incl. a 20 MHz-restore default and the
   8822e MAC-clock/TX-shaping), so the fast path is that delta + a BB reset.
@@ -390,6 +416,7 @@ offset — the same convergence behaviour validated on Jaguar2/Jaguar3), and
 `tests/fast_bw_parity.sh` (FastSetBandwidth timing + register parity +
 cross-RX decode, all three generations), `tests/fast_bw_after_hop_rxcheck.cpp`
 (8822B: a toggle after a `FastRetune` hop stays on the hop's channel and
-20 MHz RX survives the return), and `tests/tdma_demo.sh`
+20 MHz RX survives the return), `tests/nb_toggle_rxcheck.cpp` (every switch
+into narrowband decodes, fast / full / direct bring-up), and `tests/tdma_demo.sh`
 (the burst-level bandwidth-TDMA example — both lockstep sync modes + the
 dual-RX per-band split).

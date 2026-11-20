@@ -1101,6 +1101,13 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
     _device.phy_set_bb_reg(0x08ac, 0xffffffff, v8ac);
     _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x0); /* ADC buffer clock */
     _device.phy_set_bb_reg(0x08c8, (1u << 31), 0x1);
+    /* BB reset (MAC 0x0 BIT16 toggle — the same _iqk_bb_reset_8822b
+     * mechanism) so the DAC/DFE relatch at the new sample rate. It has to
+     * come BEFORE the RF18 edge below: a reset after the edge undoes the
+     * synth's re-latch more often than not, and the receiver then sees no
+     * in-band power at all — NHM at its floor and zero CCA under a strong
+     * co-channel transmitter. */
+    bb_reset();
     rf18 |= (1u << 11) | (1u << 10); /* RF stays 20M */
     /* config_phydm_switch_band_8822b CCK-block trio (the 8821C path has it in
      * its band block; the 8822B port never carried it). At 5G the CCK block
@@ -1212,13 +1219,6 @@ void HalJaguar2::set_channel_bw(uint8_t channel, uint8_t bw, uint8_t rfe_type,
   /* phydm_spur_calibration_8822b — reset the NBI/CSI notch state, and on the
    * chip's own spur channels PSD-detect + notch (vendor switch_channel tail). */
   spur_calibration(channel, cch, bw);
-
-  /* 5/10 MHz: BB reset (MAC 0x0 BIT16 toggle — the same _iqk_bb_reset_8822b
-   * mechanism) so the DAC/DFE relatch at the new sample rate. Hardware-taught
-   * on Jaguar3 (RadioManagementJaguar3::set_bandwidth_dividers): without it
-   * the re-clock doesn't take. */
-  if (bw == 5 || bw == 6)
-    bb_reset();
 
   /* phydm_config_kfree — per-channel-group efuse TX gain trim, applied by the
    * vendor after every channel/BW set. Group-keyed, so FastRetune (intra-band
@@ -1404,8 +1404,11 @@ bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
       _device.phy_set_bb_reg(0x0808, (1u << 28), 0x0);
       _device.phy_set_bb_reg(0x0814, 0x0000FC00, 34);
     }
-    /* RF18 re-latch edge (the 8822B narrowband requirement) then the real
-     * value — both write-only from the cached rf18, no RF read. */
+    /* Relatch the DAC/DFE at the new sample rate, then the RF18 re-latch
+     * edge (the 8822B narrowband requirement) and the real value — in that
+     * order, see set_channel_bw: a BB reset after the edge undoes it. Both
+     * RF writes come from the cached rf18, no RF read. */
+    bb_reset();
     const uint32_t rf18 = _fbw_rf18;
     const uint32_t rf18_alt = (rf18 & ~0xffu) | (_fbw_cch == 1 ? 2u : 1u);
     rf_write(0, 0x18, rf18_alt);
@@ -1416,7 +1419,6 @@ bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
       rf_write(1, 0x18, rf18);
     rf_set(0, 0xb8, (1u << 19), 0);
     rf_set(0, 0xb8, (1u << 19), 1);
-    bb_reset(); /* relatch the DAC/DFE at the new sample rate */
   } else {
     /* narrowband -> 20 MHz: restore the cached 20 MHz 0x8ac + ADC buffer clock
      * (exactly the CHANNEL_WIDTH_20 branch; no bb_reset). RF18 keeps its

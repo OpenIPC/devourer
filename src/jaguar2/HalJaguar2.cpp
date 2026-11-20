@@ -1419,13 +1419,18 @@ bool HalJaguar2::fast_set_bandwidth(uint8_t bw) {
     bb_reset(); /* relatch the DAC/DFE at the new sample rate */
   } else {
     /* narrowband -> 20 MHz: restore the cached 20 MHz 0x8ac + ADC buffer clock
-     * (exactly the CHANNEL_WIDTH_20 branch; no bb_reset). No RF18 edge: the
-     * RF stays in its 20 MHz mode across NB, and NB -> 20 has not been shown
-     * to need one — the full path does edge here, only because it edges every
-     * same-channel-byte write. */
+     * (exactly the CHANNEL_WIDTH_20 branch; no bb_reset). RF18 keeps its
+     * value across NB, but the synth still has to re-latch after the re-clock
+     * back: written without a channel-byte edge, 20 MHz RX comes back deaf
+     * about half the time (tests/fast_bw_after_hop_rxcheck.cpp, from == to).
+     * So edge it, as the full path does for every same-byte write. */
     _device.phy_set_bb_reg(0x08ac, 0xffffffff, _fbw_8ac_20m);
     _device.phy_set_bb_reg(0x08c4, (1u << 30), 0x1);
     const uint32_t rf18 = _fbw_rf18;
+    const uint32_t rf18_alt = (rf18 & ~0xffu) | (_fbw_cch == 1 ? 2u : 1u);
+    rf_write(0, 0x18, rf18_alt);
+    if (r2t2r)
+      rf_write(1, 0x18, rf18_alt);
     rf_write(0, 0x18, rf18);
     if (r2t2r)
       rf_write(1, 0x18, rf18);
@@ -1567,6 +1572,10 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
     _last_rf_be = -1;
     _last_df18 = -1;
     _last_cck_key = -1;
+    /* ...and the RF18 fast_set_bandwidth would replay: the firmware wrote
+     * its own (and, in mode 2, possibly another band's). Decline the fast
+     * toggle until a full set re-captures it. */
+    _fbw_cache_valid = false;
     _last_tuned_ch = channel;
     DVR_DEBUG(_logger, "Jaguar2: fw fast retune -> ch {} (central {})",
               channel, cch);
@@ -1603,6 +1612,12 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   }
   prof.mark("prime");
   uint32_t rf18 = _rf18_cache & ~((1u << 18) | (1u << 17) | 0xffu);
+  /* 8822B: bit 15 is the LCK trigger, and a read taken after do_lck (the
+   * prime above, or fw_switch_confirm's) can still show it set. Composed
+   * into the cache it would ride every hop of the epoch and kick an LC
+   * calibration each time — same hazard set_channel_bw clears. */
+  if (!c8821)
+    rf18 &= ~(1u << 15);
   rf18 |= cch;
 
   /* Channel-keyed constants, written only when their bucket moves (the caches
@@ -1715,6 +1730,16 @@ bool HalJaguar2::fast_retune(uint8_t channel, uint8_t bw,
   if (!c8821 && r2t2r)
     rf_write(1, 0x18, rf18);
   _rf18_cache = rf18; /* refresh so the next hop merges into what we wrote */
+  /* fast_set_bandwidth replays the RF18 and centre channel of the channel the
+   * radio is on, so a hop has to move them with it — otherwise a bandwidth
+   * toggle after a hop writes the previous channel's RF18 back and retunes
+   * the synth there. The band never changes here, so _fbw_g2 holds; at
+   * 40/80 MHz the value carries those BW bits, where fast_set_bandwidth
+   * declines anyway. */
+  if (!c8821) {
+    _fbw_rf18 = rf18;
+    _fbw_cch = cch;
+  }
   prof.mark("rf18");
 
   /* No per-hop RX kick. The vendor switch_channel tail (8822B RF 0xb8 +

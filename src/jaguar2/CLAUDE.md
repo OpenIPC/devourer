@@ -61,7 +61,10 @@ Jaguar1 (shared `PhyTableLoader`).
   `docs/narrowband.md` and `tests/width_relatch_rxcheck.cpp`.
   `set_channel_bw` also clears RF18 bit 15 (the LCK trigger) from its read:
   after `do_lck` the read can still show it, and writing it back kicks a
-  stray LC calibration.
+  stray LC calibration; `fast_retune` clears it from its compose cache for
+  the same reason. `fast_set_bandwidth` edges RF18 in both directions, and
+  its cached RF18 / centre channel follow a software `fast_retune` hop (a
+  firmware hop invalidates them) — `tests/fast_bw_after_hop_rxcheck.cpp`.
 - 5 MHz at 5 GHz is CFO-limited: subcarrier spacing shrinks 4× and a
   far-offset TX/RX crystal pair syncs bimodally per bring-up — at 2.4 GHz
   the same pair is stable (`tests/narrowband_cross_rx.sh` header).

@@ -380,11 +380,11 @@ private:
    * or calibrations. _fbw_8ac_20m is the 20 MHz-state 0x8ac (captured on a
    * bw==0 set) — the base the narrowband/20 compose masks are applied to.
    * Invalidated (validity flags) by every full set_channel_bw. */
-  uint32_t _fbw_rf18 = 0;   /* final RF18 the full path wrote (20 MHz-mode) */
+  uint32_t _fbw_rf18 = 0;   /* RF18 of the current channel (full set or sw hop) */
   uint32_t _fbw_8ac_20m = 0;
   uint8_t _fbw_cch = 0;
   bool _fbw_g2 = false, _fbw_r2t2r = false;
-  bool _fbw_cache_valid = false; /* rf18/cch/g2/r2t2r captured this channel */
+  bool _fbw_cache_valid = false; /* rf18/cch/g2/r2t2r current; a fw hop clears it */
   bool _fbw_8ac_valid = false;   /* _fbw_8ac_20m holds a real 20 MHz snapshot */
   uint8_t _fbw_cur_bw = 0xff;    /* bw of the last full/fast set (0/5/6/...) */
 

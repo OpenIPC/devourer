@@ -1517,6 +1517,14 @@ int main(int argc, char **argv) {
           poff = static_cast<uint8_t>(std::atoi(off_env));
       }
     }
+    /* DEVOURER_NB_BW=5|10 — narrowband re-clock, as on the USB path below. */
+    if (const char *nb = std::getenv("DEVOURER_NB_BW")) {
+      const int mhz = std::atoi(nb);
+      if (mhz == 5 || mhz == 10) {
+        pwidth = mhz == 5 ? CHANNEL_WIDTH_5 : CHANNEL_WIDTH_10;
+        poff = 0;
+      }
+    }
     logger->info("PCIe RX: {} ch={} bw={}", bdf, pch, (int)pwidth);
     /* DEVOURER_LA_CAPTURE rides the same worker-thread pattern as the USB
      * default path — the LA module is bus-neutral (RtlAdapter). */

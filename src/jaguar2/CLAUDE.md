@@ -70,7 +70,9 @@ Jaguar1 (shared `PhyTableLoader`).
   (RX sees no in-band power, TX airs nothing decodable, every register reads
   back right), and with none the SDR-measured TX lobe is unchanged — table
   in `docs/narrowband.md`, check with `tests/nb_toggle_rxcheck.cpp`. The
-  8821C path still resets after its RF18 write and is unmeasured.
+  8821C path still resets after its RF18 write and does not have the fault
+  (one RTL8821CE, 2.4 GHz: reset last / first / absent all decode every
+  bring-up).
 - 5 MHz at 5 GHz is CFO-limited: subcarrier spacing shrinks 4× and a
   far-offset TX/RX crystal pair syncs bimodally per bring-up — at 2.4 GHz
   the same pair is stable (`tests/narrowband_cross_rx.sh` header).

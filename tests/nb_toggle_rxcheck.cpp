@@ -37,11 +37,19 @@ static std::atomic<uint64_t> g_hits{0};
 static std::atomic<bool> g_rx_live{false};
 
 int main(int argc, char **argv) {
-  const char *mode = argc > 1 ? argv[1] : "fast";
+  /* A mistyped argument must not quietly test something else, or nothing:
+   * every one of them is checked before the device is opened. */
+  const char *mode = argc > 1 ? argv[1] : "";
   const bool fast = !strcmp(mode, "fast"), init = !strcmp(mode, "init");
-  const ChannelWidth_t nb =
-      (argc > 2 && atoi(argv[2]) == 5) ? CHANNEL_WIDTH_5 : CHANNEL_WIDTH_10;
+  const int mhz = argc > 2 ? atoi(argv[2]) : 0;
   const int n = init ? 1 : (argc > 3 ? atoi(argv[3]) : 8);
+  if ((!fast && !init && strcmp(mode, "full")) || (mhz != 5 && mhz != 10) ||
+      n < 1) {
+    fprintf(stderr, "usage: %s <fast|full|init> <5|10> [switches >= 1, "
+                    "default 8]\n", argv[0]);
+    return 2;
+  }
+  const ChannelWidth_t nb = mhz == 5 ? CHANNEL_WIDTH_5 : CHANNEL_WIDTH_10;
   uint8_t ch = 36;
   if (const char *c = std::getenv("DEVOURER_CHANNEL")) ch = (uint8_t)atoi(c);
 
@@ -87,7 +95,7 @@ int main(int argc, char **argv) {
   };
 
   int failed = 0;
-  printf("%s %d MHz:", mode, nb == CHANNEL_WIDTH_5 ? 5 : 10);
+  printf("%s %d MHz:", mode, mhz);
   if (init) {
     /* No ambient traffic decodes in narrowband, so there is no frame to wait
      * on when the window is dead: give bring-up a fixed allowance instead. */

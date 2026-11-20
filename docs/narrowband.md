@@ -142,13 +142,15 @@ within 0.8 dB, and an 8852C witness decoding the same rate (2522–2532
 frames/s at 10 MHz, 1355–1358 at 5 MHz). One of the six 10 MHz captures in
 each arm caught a strong narrow ambient emitter and is not in those ranges.
 
-The 8821C does not share the fault. Its path keeps a reset after its single
-RF18 write, and on an RTL8821CE (PCIe, channel 6) the position made no
-difference — reset last, reset first and no reset interleaved, direct
+The 8821C showed no such fault where it was measured. Its path keeps a reset
+after its single RF18 write, and on an RTL8821CE (PCIe, channel 6) the position
+made no difference — reset last, reset first and no reset interleaved, direct
 bring-ups: 10 of 10 each at 10 MHz (3712–3936 frames per run across all
 three) and 8 of 8 each at 5 MHz (3796–3938); 10 MHz TX decoded by an
-8852C witness in 6 of 6 bring-ups with the reset and 6 of 6 without. One unit,
-2.4 GHz only (that rig's RF path does not reach on 5 GHz), and no USB 8821CU.
+8852C witness in 6 of 6 bring-ups with the reset and 6 of 6 without. That is
+one unit, at 2.4 GHz only (that rig's RF path does not reach on 5 GHz), by
+direct bring-up only: a 20 MHz -> narrowband switch on a running 8821C, 5 GHz,
+and the USB RTL8811CU / RTL8821CU were not exercised and are not covered by it.
 
 What this does not show: the SDR comparison is 5 GHz only, and the cold-start
 rows are two receivers against one transmitter, which is not the far-offset

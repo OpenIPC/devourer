@@ -1523,6 +1523,7 @@ int main(int argc, char **argv) {
       if (mhz == 5 || mhz == 10) {
         pwidth = mhz == 5 ? CHANNEL_WIDTH_5 : CHANNEL_WIDTH_10;
         poff = 0;
+        logger->info("DEVOURER_NB_BW={} — RX bandwidth {} MHz", nb, mhz);
       }
     }
     logger->info("PCIe RX: {} ch={} bw={}", bdf, pch, (int)pwidth);

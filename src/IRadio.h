@@ -304,9 +304,10 @@ public:
    * TRANSMISSION IS NOT PART OF THE ARM. This covers what the MAC receives
    * and acknowledges. A station's own unicast (management, EAPOL, data) must
    * request an ACK in its radiotap - build_stream_radiotap(mode, false),
-   * the no_ack argument; the default stream radiotap is NOACK, which never
-   * retries - and the hardware retransmits an unacknowledged frame only
-   * DeviceConfig::tx.retry_limit times, whose default is 0. A station
+   * the no_ack argument; the default stream radiotap is NOACK, which only the
+   * MT7612U reads (RadiotapBuilder.h) - and the Realtek hardware retransmits
+   * an unacknowledged unicast frame DeviceConfig::tx.retry_limit times,
+   * whatever that flag says, with a default of 0. A station
    * session sets a nonzero limit explicitly; left at the default it sends
    * each unicast frame once.
    *

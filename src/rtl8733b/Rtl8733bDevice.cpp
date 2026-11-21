@@ -190,7 +190,7 @@ void Rtl8733bDevice::Init(Action_ParsedRadioPacket packetProcessor,
         throw std::runtime_error("RTL8733B channel configuration failed");
       _channel = channel;
       _rx_configured_bw = channel.ChannelWidth == CHANNEL_WIDTH_40 ? 1 : 0;
-      if (!_mac.configure_monitor_rx(_cfg.rx.keep_corrupted))
+      if (!_mac.configure_monitor_rx(_cfg.rx))
         throw std::runtime_error("RTL8733B monitor RX configuration failed");
     }
     /* Measurement-only live disarm. Constructed only after bring-up has
@@ -245,7 +245,7 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
     if (!configure_tx_power(channel))
       throw std::runtime_error("RTL8733B safe TX power setup failed");
     if (_cfg.rx.enable_with_tx &&
-        !_mac.configure_monitor_rx(_cfg.rx.keep_corrupted))
+        !_mac.configure_monitor_rx(_cfg.rx))
       throw std::runtime_error("RTL8733B monitor RX configuration failed");
     _tx_ready = true;
     _tx_submits = 0;

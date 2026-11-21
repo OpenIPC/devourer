@@ -1808,6 +1808,14 @@ target_link_libraries(TxQueueSelftest PRIVATE devourer)
 target_include_directories(TxQueueSelftest PRIVATE src)
 add_test(NAME txqueue_map COMMAND TxQueueSelftest)
 
+# Headless guard for the monitor RX filter knobs (src/RxFilter.h): the RCR
+# and RXFLTMAP1 values drop_ctrl / own_addr_only produce, and that the
+# defaults leave both as the monitor setups always wrote them.
+add_executable(RxFilterSelftest tests/rx_filter_selftest.cpp)
+target_link_libraries(RxFilterSelftest PRIVATE devourer)
+target_include_directories(RxFilterSelftest PRIVATE src)
+add_test(NAME rx_filter COMMAND RxFilterSelftest)
+
 # Headless guard for the beamforming-report decoder (src/BfReportDecode.h) — the
 # LSB-first Givens-angle unpacking + per-tone variance behind sense. It
 # decodes a real captured VHT MU report and checks the angles against an offline

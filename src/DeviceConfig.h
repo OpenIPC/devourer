@@ -126,6 +126,18 @@ struct DeviceConfig {
      * RX filter). Jaguar1, Jaguar2, Jaguar3, the RTL8733B and the MT7612U;
      * not ported on Kestrel, where it is silently inert. */
     bool keep_corrupted = false;
+    /* env: DEVOURER_RX_DROP_CTRL — RXFLTMAP1 = 0: control frames (ACK, RTS,
+     * CTS, BlockAck, ...) stop at the MAC. The MAC still acts on the ACKs for
+     * its own frames; host readers of control frames get none. A beamformee
+     * arm re-opens subtypes 4-5. Jaguar2, Jaguar3 and the RTL8733B; silently
+     * inert elsewhere. */
+    bool drop_ctrl = false;
+    /* env: DEVOURER_RX_OWN_ADDR_ONLY — RCR AAP off, APM|AM|AB on: only unicast
+     * to the address in MACID (0x0610), plus group frames. The RTL8733B
+     * bring-up programs its EFUSE address there; Jaguar2/3 bring-up does not,
+     * so arm an identity first (SetAckResponder, a station or beacon arm).
+     * Jaguar2, Jaguar3 and the RTL8733B; silently inert elsewhere. */
+    bool own_addr_only = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and
      * enable the RX path during a TX (InitWrite) bring-up so StartRxLoop can
      * run on the same handle. Must be decided before InitWrite (retrofitting

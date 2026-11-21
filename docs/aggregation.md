@@ -25,6 +25,12 @@ blocks 8-byte aligned, the FIRST descriptor carries the block count
 (dword7[31:24]: `USB_TXAGG_NUM` Jaguar1 / `DMA_TXAGG_NUM` HalMAC — inside the
 checksummed span, so agg-num is set before the checksum), and the URB total
 never lands on an exact bulk-MPS multiple (the sync bulk path has no ZLP).
+A single frame gets the same treatment on Jaguar2/3, whether the knob is off
+or a plan holds only one frame: when descriptor + frame is an exact bulk-MPS
+multiple, `single_block_pkt_offset` sets PKT_OFFSET = 1 (8 bytes of pad), as
+the vendor drivers do. Without it the chip neither airs nor reports that
+frame. Its descriptor then differs from the default in PKT_OFFSET and in the
+descriptor checksum, which covers that field.
 
 Per-family hardware rules:
 

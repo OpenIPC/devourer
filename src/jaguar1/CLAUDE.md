@@ -37,6 +37,27 @@ methods), `RadioManagementModule` (channel/BW/TX power, up to 4 RF paths),
   8814A decodes LDPC but reports no per-frame flag (`ldpc_rx_flag=0`,
   `RxAtrib.ldpc` reads 0).
 
+## Monitor RX filters
+
+`DeviceConfig::Rx::drop_ctrl` and `own_addr_only` are applied in
+`RadioManagementModule::hw_var_set_monitor`. Two things differ from the
+HalMAC generations. Control frames are gated by RCR `ACF` here: closing
+RXFLTMAP1 alone left every control subtype arriving on an 8812AU (4184 of
+4234), while clearing `ACF` took a 10 s cell from 4951 to 143 — and every one
+of the 143 was a BlockAck, which this MAC passes with data frames, so
+`rx.blockack` readers still see them. And bring-up programs MACID from EFUSE,
+so `own_addr_only` works without an identity arm. With `drop_ctrl` on, the
+8812AU as transmitter still consumed its peer's ACKs and BlockAcks (reports
+OK 87% vs 86% open, 0% with no responder; A-MPDU 77% vs 78%, 0%). One unit,
+ch36; the 8812AU as ACK *responder* under `drop_ctrl` is unmeasured (the
+cross-rig loop did not close with the knobs off either).
+
+Under `own_addr_only` a beamformee arm and an ACK responder cannot share a
+session on the 8812 die: the beamformee answers on the EFUSE address, a
+responder on another address is refused at bring-up because it moves MACID,
+and a responder on the EFUSE address is refused by the arm itself (this die
+cannot be armed to its pre-arm MACID).
+
 ## Teardown
 
 **`Stop()` forgets any armed busy window** — the rule, and the residual it

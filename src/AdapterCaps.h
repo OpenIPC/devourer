@@ -350,6 +350,12 @@ struct AdapterCaps {
    * False everywhere else: the bit is ignored and a flagged frame can still
    * be folded into an aggregate at its neighbour's rate. */
   bool tx_no_agg_ok = false;
+  /* DeviceConfig::Rx::drop_ctrl and own_addr_only are applied by this
+   * backend's monitor RX setup. TRUE on Jaguar1, Jaguar2, Jaguar3 and the
+   * RTL8733B (on air: 8812AU, 8812BU, 8812CU, 8812EU, 8733BU, one unit
+   * each). False elsewhere: the knobs are ignored and the host sees every
+   * frame. */
+  bool rx_mac_filters_ok = false;
 
   /* --- feature flags --- */
   /* Per-packet TX power: a per-frame power trim driven by radiotap

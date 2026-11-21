@@ -1,3 +1,4 @@
+#include "RxFilter.h"
 #include "RtlJaguar3Device.h"
 #include "TxQueueMap.h"
 #include "PktBufWindow.h"
@@ -173,6 +174,11 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
      * RA has nothing to match. Give the beamformee a known identity here so
      * the sounder can address it; log it for the test harness. */
     static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xce};
+    if (devourer::own_addr_identity_conflict(_cfg, kBfeeMac))
+      throw std::runtime_error(
+          "Jaguar3: rx.own_addr_only cannot serve a beamformee and an ACK "
+          "responder on different addresses (one MACID); give the responder "
+          "the beamformee address 00:e0:4c:88:22:ce");
     for (uint16_t i = 0; i < 6; ++i)
       _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
     /* bf.mu upgrades the responder to an MU beamformee, whose report appends
@@ -985,6 +991,11 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                   [this] { _device.flush_writes(); });
   WriteBatchScope batch(_device);
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
+  /* That bring-up wrote the monitor filter maps, so a "closed" state left by
+   * an earlier TX-only InitWrite on this object no longer describes the chip.
+   * Left set, start_rx_loop would rewrite the maps after a beamformee arm and
+   * take its control subtypes back out under rx.drop_ctrl. */
+  _rx_filters_closed = false;
   timer.stage("hal_init");
   /* 8822C at 40/80 MHz: IQK at 20 MHz, then retune — see Init. */
   const bool iqk_at_20 = _variant == jaguar3::ChipVariant::C8822C &&
@@ -1979,6 +1990,7 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.station_mode_ok = _variant == jaguar3::ChipVariant::C8822C;
   /* TxMode::no_agg: AGG_EN=0 + BK=1 in build_tx_block. */
   c.tx_no_agg_ok = true;
+  c.rx_mac_filters_ok = true;
   /* Per-packet TX power: the TXPWR_OFSET_TYPE bank selector + programmable
    * 0x1e70 offset banks (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER;
    * TxPktPwrBanks.h). Continuous in step_qdb units, ±63/-64 index travel, 2

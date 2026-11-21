@@ -67,6 +67,7 @@ class RadioManagementModule {
   RtlAdapter _device;
   devourer::DeviceConfig::Tuning _tuning; /* skip_txpwr / force_iqk / disable_iqk */
   bool _keep_corrupted = false;           /* rx.keep_corrupted */
+  devourer::DeviceConfig::Rx _rx;         /* rx.drop_ctrl / rx.own_addr_only */
   bool _dump_canary = false;              /* debug.dump_canary */
   std::shared_ptr<EepromManager> _eepromManager;
   Logger_t _logger;

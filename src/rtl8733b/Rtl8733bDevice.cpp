@@ -1378,6 +1378,7 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
    * (tests/rtl8733b_retry_limit_onair.sh; bench narrative in
    * src/rtl8733b/CLAUDE.md "Hardware ARQ"). */
   caps.ack_responder_ok = true;
+  caps.rx_mac_filters_ok = true;
   caps.tx_retry_limit_ok = true;
   /* RX-LDPC measured absent, as the vendor HAL declares: 0 of 1542 MCS7/20
    * LDPC frames from an RTL8822BU decoded on the b733 against 1435/1542

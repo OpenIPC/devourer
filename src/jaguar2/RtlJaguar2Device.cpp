@@ -1,3 +1,4 @@
+#include "RxFilter.h"
 #include "RtlJaguar2Device.h"
 #include "PktBufWindow.h"
 
@@ -561,6 +562,11 @@ void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
      * RA has nothing to match. Give the beamformee a known identity here so
      * the sounder can address it; log it for the test harness. */
     static const uint8_t kBfeeMac[6] = {0x00, 0xe0, 0x4c, 0x88, 0x22, 0xbb};
+    if (devourer::own_addr_identity_conflict(_cfg, kBfeeMac))
+      throw std::runtime_error(
+          "Jaguar2: rx.own_addr_only cannot serve a beamformee and an ACK "
+          "responder on different addresses (one MACID); give the responder "
+          "the beamformee address 00:e0:4c:88:22:bb");
     for (uint16_t i = 0; i < 6; ++i)
       _device.rtw_write8(0x0610 + i, kBfeeMac[i]);
     /* bf.mu upgrades the responder to an MU beamformee, whose report appends
@@ -1428,6 +1434,7 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * die is measured on both counts; the 8821C shares the recipe but has no
    * bench cell yet, so its flags stay false-as-unmeasured. */
   c.ack_responder_ok = _variant == jaguar2::ChipVariant::C8822B;
+  c.rx_mac_filters_ok = true;
   c.tx_retry_limit_ok = _variant == jaguar2::ChipVariant::C8822B;
   /* station_mode_ok: the 8822B die only - both halves measured on one
    * RTL8812BU by tests/realtek_station_onair.sh (numbers and limits at the

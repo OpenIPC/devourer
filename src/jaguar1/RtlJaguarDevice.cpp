@@ -2304,6 +2304,7 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
    * measured working on all four dies — 8821A included; the 8814A die keeps
    * the vendor retry carve-out (knob inert). */
   c.ack_responder_ok = true;
+  c.rx_mac_filters_ok = true;
   c.tx_retry_limit_ok = _eepromManager->version_id.ICType != CHIP_8814A;
   /* station_mode_ok: false on every Jaguar1 die - ported (StationArm.h),
    * not yet measured by tests/realtek_station_onair.sh; the AdapterCaps

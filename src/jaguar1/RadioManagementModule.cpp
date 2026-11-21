@@ -1,3 +1,4 @@
+#include "RxFilter.h"
 #include "RadioManagementModule.h"
 #include "Hal8812PhyReg.h"
 #include "Hal8812a_TxPwrTrack.h" /* kTxScalingTableJaguar — fast swing lever */
@@ -18,7 +19,7 @@ RadioManagementModule::RadioManagementModule(
     RtlAdapter device, std::shared_ptr<EepromManager> eepromManager,
     Logger_t logger, const devourer::DeviceConfig &cfg)
     : _device{device}, _tuning{cfg.tuning},
-      _keep_corrupted{cfg.rx.keep_corrupted},
+      _keep_corrupted{cfg.rx.keep_corrupted}, _rx{cfg.rx},
       _dump_canary{cfg.debug.dump_canary}, _eepromManager{eepromManager},
       _logger{logger},
       _pwrTrk{device, eepromManager, this, logger},
@@ -172,6 +173,17 @@ void RadioManagementModule::hw_var_set_monitor() {
   }
 
   // rtw_hal_get_hwreg(adapterState, HW_VAR_RCR, pHalData.rcr_backup);
+  /* rx.own_addr_only: unicast to MACID only, which this bring-up programs
+   * from EFUSE (HalModule), so the knob needs no identity arm here. */
+  rcr_bits = devourer::monitor_rcr(rcr_bits, _rx);
+  /* rx.drop_ctrl: on this MAC generation RCR_ACF is the control-frame accept
+   * (RXFLTMAP1 alone left every control subtype arriving on an 8812AU), with
+   * the subtype map closed as well for the BA / BAR / PS-Poll the ADF bit
+   * governs. */
+  if (_rx.drop_ctrl) {
+    rcr_bits &= ~RCR_ACF;
+    _device.rtw_write16(REG_RXFLTMAP1, devourer::monitor_ctrl_map(_rx));
+  }
   hw_var_rcr_config(rcr_bits);
 
   /* Receive all data frames */

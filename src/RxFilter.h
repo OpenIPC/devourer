@@ -24,4 +24,17 @@ inline uint16_t monitor_ctrl_map(const DeviceConfig::Rx &rx) {
   return rx.drop_ctrl ? 0x0000 : 0xFFFF;
 }
 
+/* rx.own_addr_only leaves MACID as the only unicast accept path, and MACID
+ * holds one address. A beamformee arm and an ACK responder each program it,
+ * so the two can only share a session when they name the same address. */
+inline bool own_addr_identity_conflict(const DeviceConfig &cfg,
+                                       const uint8_t beamformee_mac[6]) {
+  if (!cfg.rx.own_addr_only || !cfg.bf.beamformee_of || !cfg.rx.ack_responder)
+    return false;
+  for (int i = 0; i < 6; ++i)
+    if (cfg.rx.ack_responder->bytes[i] != beamformee_mac[i])
+      return true;
+  return false;
+}
+
 } // namespace devourer

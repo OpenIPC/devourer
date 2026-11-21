@@ -129,17 +129,21 @@ struct DeviceConfig {
     /* env: DEVOURER_RX_DROP_CTRL — RXFLTMAP1 = 0: control frames (ACK, RTS,
      * CTS, BlockAck, ...) stop at the MAC. The MAC still acts on the ACKs for
      * its own frames; host readers of control frames get none. A beamformee
-     * arm re-opens subtypes 4-5. Jaguar2, Jaguar3 and the RTL8733B; silently
-     * inert elsewhere. */
+     * arm re-opens subtypes 4-5. The first few frames of a session can
+     * predate the write (1-3 control frames seen on Jaguar3 and the
+     * RTL8733B, admitted during bring-up). On Jaguar1 the knob clears RCR
+     * ACF instead, and BlockAcks still arrive (that MAC passes them with
+     * data frames). Backends with AdapterCaps::rx_mac_filters_ok (Jaguar1,
+     * Jaguar2, Jaguar3, the RTL8733B); ignored elsewhere. */
     bool drop_ctrl = false;
     /* env: DEVOURER_RX_OWN_ADDR_ONLY — RCR AAP off, APM|AM|AB on: only unicast
-     * to the address in MACID (0x0610), plus group frames. The RTL8733B
-     * bring-up programs its EFUSE address there; Jaguar2/3 bring-up does not,
+     * to the address in MACID (0x0610), plus group frames. The Jaguar1 and
+     * RTL8733B bring-ups program the EFUSE address there; Jaguar2/3 do not,
      * so arm an identity first (SetAckResponder, a station or beacon arm);
-     * StartRxLoop warns when MACID is still all-zero. One identity only: an
-     * ACK responder on another address overwrites the MACID a beamformee
-     * arm wrote, and the sounding frames no longer pass.
-     * Jaguar2, Jaguar3 and the RTL8733B; silently inert elsewhere. */
+     * StartRxLoop warns when MACID is still all-zero. MACID is one address:
+     * a beamformee arm plus an ACK responder on a different address is
+     * refused at bring-up. Backends with AdapterCaps::rx_mac_filters_ok;
+     * ignored elsewhere. */
     bool own_addr_only = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and
      * enable the RX path during a TX (InitWrite) bring-up so StartRxLoop can

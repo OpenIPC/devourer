@@ -1,4 +1,5 @@
 #include "Halmac8733bMac.h"
+#include "RxFilter.h"
 
 #include "AckResponder.h" /* shared ACK-responder register recipe */
 
@@ -792,17 +793,18 @@ bool Halmac8733bMac::initialize(const EfuseInfo &efuse) {
   return true;
 }
 
-bool Halmac8733bMac::configure_monitor_rx(bool keep_corrupted) {
+bool Halmac8733bMac::configure_monitor_rx(const devourer::DeviceConfig::Rx &rx) {
   /* Vendor set_opmode_monitor plus HALMAC_DRV_INFO_PHY_STATUS. AAP makes the
    * receive path promiscuous, APP_PHYSTS appends 32 bytes of PHY status, and
    * APP_FCS preserves the trailing FCS expected by Packet::Data. */
   uint32_t rcr = (1u << 31) | (1u << 28) | 1u;
-  if (keep_corrupted)
+  if (rx.keep_corrupted)
     rcr |= (1u << 8) | (1u << 9);
+  rcr = devourer::monitor_rcr(rcr, rx);
   _device.rtw_write32(kRegRcr, rcr);
   _device.rtw_write8(kRegRxPacketLimit + 3, 4); // REG_RX_DRVINFO_SZ, 8-B units
   _device.rtw_write16(kRegRxFilter0, 0xffff);
-  _device.rtw_write16(kRegRxFilter0 + 2, 0xffff);
+  _device.rtw_write16(kRegRxFilter0 + 2, devourer::monitor_ctrl_map(rx));
   _device.rtw_write16(kRegRxFilter2, 0xffff);
   _device.rtw_write16(kRegCr, 0x06ff); // full DMA/protocol/MAC TX+RX enable
 

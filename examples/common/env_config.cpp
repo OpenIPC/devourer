@@ -111,6 +111,8 @@ devourer::DeviceConfig devourer_config_from_env() {
 
   /* ---- rx ---- */
   cfg.rx.keep_corrupted = env_flag("DEVOURER_RX_KEEP_CORRUPTED");
+  cfg.rx.drop_ctrl = env_flag("DEVOURER_RX_DROP_CTRL");
+  cfg.rx.own_addr_only = env_flag("DEVOURER_RX_OWN_ADDR_ONLY");
   cfg.rx.enable_with_tx = env_str("DEVOURER_TX_WITH_RX") != nullptr;
   if (const char *e = env_str("DEVOURER_RX_CSI_MASK"))
     cfg.rx.csi_mask = e;

@@ -17,6 +17,7 @@
 #include "RadiotapPeek.h"   /* send_packets batch pre-parse */
 #include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"      /* USB TX aggregation URB packing */
+#include "RxFilter.h"       /* monitor RX filter knobs */
 #include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 #include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
 
@@ -251,7 +252,7 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
       try {
         std::lock_guard<std::mutex> lk(_reg_mu);
         _device.rtw_write<uint16_t>(0x06A0, 0xFFFF);
-        _device.rtw_write<uint16_t>(0x06A2, 0xFFFF);
+        _device.rtw_write<uint16_t>(0x06A2, devourer::monitor_ctrl_map(_cfg.rx));
         _device.rtw_write<uint16_t>(0x06A4, 0xFFFF);
         _hal.enable_rx_path();
         _rx_filters_closed = false;

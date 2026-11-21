@@ -1,4 +1,5 @@
 #include "HalJaguar3.h"
+#include "RxFilter.h"
 #include "InitTimer.h"
 #include <cstdlib>
 #include <cstring>
@@ -536,12 +537,14 @@ void HalJaguar3::monitor_rx_cfg() {
    * conditions. */
   if (_cfg.rx.keep_corrupted)
     rcr |= (1u << 8) | (1u << 9);
+  rcr = devourer::monitor_rcr(rcr, _cfg.rx);
   _device.rtw_write32(REG_RCR_8822C, rcr);
   _device.rtw_write8(REG_RX_DRVINFO_SZ_8822C, 0x04);
   _device.rtw_write16(REG_RXFLTMAP0_8822C, 0xFFFF);
-  _device.rtw_write16(REG_RXFLTMAP1_8822C, 0xFFFF);
+  _device.rtw_write16(REG_RXFLTMAP1_8822C, devourer::monitor_ctrl_map(_cfg.rx));
   _device.rtw_write16(REG_RXFLTMAP2_8822C, 0xFFFF);
-  _logger->info("Jaguar3: monitor RX config applied (accept-all + phystatus)");
+  _logger->info("Jaguar3: monitor RX config applied (RCR=0x{:08x}, RXFLTMAP1=0x{:04x})",
+                rcr, devourer::monitor_ctrl_map(_cfg.rx));
 }
 
 /* Port of rtl8822c_ops.c read_chip_version(). REG_SYS_CFG1_8822C=0x00F0:

@@ -1,4 +1,5 @@
 #include "HalJaguar2.h"
+#include "RxFilter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -2749,7 +2750,12 @@ void HalJaguar2::enable_rx() {
    * MAC->USB delivery works and only clean-decode is marginal. */
   if (_cfg.rx.keep_corrupted)
     rcr |= (1u << 8) | (1u << 9);
+  rcr = devourer::monitor_rcr(rcr, _cfg.rx);
   _device.rtw_write32(0x0608, rcr);
+  /* RXFLTMAP1 is left as MAC init wrote it (8822B 0x0FFF, 8821C 0xFFFF)
+   * unless rx.drop_ctrl closes it. */
+  if (_cfg.rx.drop_ctrl)
+    _device.rtw_write16(0x06A2, devourer::monitor_ctrl_map(_cfg.rx));
 
   /* Interim fixed IGI (initial gain) until the phydm DIG thread is ported: the
    * BB/AGC table default leaves IGI too low, so the RX drowns in false alarms

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "DeviceConfig.h"
 #include "RtlAdapter.h"
 #include "logger.h"
 
@@ -117,7 +118,7 @@ public:
 
   bool read_efuse(EfuseInfo &out);
   bool initialize(const EfuseInfo &efuse);
-  bool configure_monitor_rx(bool keep_corrupted);
+  bool configure_monitor_rx(const devourer::DeviceConfig::Rx &rx);
   /* Program both response-window registers: REG_ACKTO (0x0640) for OFDM/HT
    * and REG_ACKTO_CCK (0x0639) for CCK. Returns the actual readback plus the
    * transport-write result for diagnostics; readback is authoritative because

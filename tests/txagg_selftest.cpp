@@ -271,7 +271,8 @@ static void test_repad_8822c() {
       CHECK(std::memcmp(out.data() + 48 + want * 8u,
                         blk.data() + 48 + poff * 8u, frame_len) == 0,
             "repad: poff %u mps %zu frame bytes moved wrongly", poff, mps);
-      std::vector<uint8_t> fresh(48, 0);
+      /* Sized for the pad: with PKT_OFFSET set the checksum reads it. */
+      std::vector<uint8_t> fresh(48 + want * 8u, 0);
       jaguar3::fill_data_tx_desc_8822c(
           fresh.data(), static_cast<uint16_t>(frame_len), 7, 9, 0, false,
           false, 0, false, false, 0, 0, want);

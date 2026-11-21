@@ -126,25 +126,17 @@ struct DeviceConfig {
      * RX filter). Jaguar1, Jaguar2, Jaguar3, the RTL8733B and the MT7612U;
      * not ported on Kestrel, where it is silently inert. */
     bool keep_corrupted = false;
-    /* env: DEVOURER_RX_DROP_CTRL — drop every control frame (ACK, RTS, CTS,
-     * BlockAck, ...) at the MAC RX filter (RXFLTMAP1 = 0) instead of passing
-     * them up to the host. The MAC still acts on them: the ACKs for our own
-     * frames keep ending their retries (measured on an 8812EU, 8812BU and
-     * 8733BU as senders, retry share unchanged). Starves host readers of
-     * control frames (rx.blockack, cell RTS/BA attribution). A beamformee arm
-     * runs after this and re-opens subtypes 4-5 (NDPA, BF report poll).
-     * Jaguar2, Jaguar3 and the RTL8733B; silently inert elsewhere. */
+    /* env: DEVOURER_RX_DROP_CTRL — RXFLTMAP1 = 0: control frames (ACK, RTS,
+     * CTS, BlockAck, ...) stop at the MAC. The MAC still acts on the ACKs for
+     * its own frames; host readers of control frames get none. A beamformee
+     * arm re-opens subtypes 4-5. Jaguar2, Jaguar3 and the RTL8733B; silently
+     * inert elsewhere. */
     bool drop_ctrl = false;
-    /* env: DEVOURER_RX_OWN_ADDR_ONLY — pass only unicast whose RA matches the
-     * MACID register (0x0610), plus group frames: RCR AAP cleared, APM|AM|AB
-     * set. Whatever writes MACID decides what passes: SetAckResponder,
-     * SetStationIdentity, StartBeacon (the beacon SA), a beamformee arm or
-     * bf.sounder_self_mac. The RTL8733B bring-up programs the EFUSE address
-     * there; Jaguar2/3 bring-up does not, so on those arm one of the above
-     * first or unicast is dropped. On Jaguar2/3 ClearAckResponder leaves
-     * MACID as it was. Third-party unicast (sounding captures, the CBR a
-     * Jaguar3 beamformer waits for unless sounder_self_mac is its TA) is
-     * dropped. Jaguar2, Jaguar3 and the RTL8733B; silently inert elsewhere. */
+    /* env: DEVOURER_RX_OWN_ADDR_ONLY — RCR AAP off, APM|AM|AB on: only unicast
+     * to the address in MACID (0x0610), plus group frames. The RTL8733B
+     * bring-up programs its EFUSE address there; Jaguar2/3 bring-up does not,
+     * so arm an identity first (SetAckResponder, a station or beacon arm).
+     * Jaguar2, Jaguar3 and the RTL8733B; silently inert elsewhere. */
     bool own_addr_only = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and
      * enable the RX path during a TX (InitWrite) bring-up so StartRxLoop can

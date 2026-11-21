@@ -1,7 +1,4 @@
-/* Headless guard for src/RxFilter.h: the monitor RCR and RXFLTMAP1 values the
- * two opt-in RX filter knobs (DeviceConfig::Rx::drop_ctrl, own_addr_only)
- * produce from each family's monitor base RCR. Defaults must leave both
- * registers exactly as the monitor setup has always written them. */
+/* Headless guard for src/RxFilter.h. */
 #include <cstdio>
 
 #include "RxFilter.h"

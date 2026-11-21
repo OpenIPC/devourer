@@ -17,7 +17,6 @@
 #include "RadiotapPeek.h"   /* send_packets batch pre-parse */
 #include "RadiotapTxFlags.h" /* HT MCS field decoder (LDPC/STBC) */
 #include "TxAggPlan.h"      /* USB TX aggregation URB packing */
-#include "RxFilter.h"       /* monitor RX filter knobs */
 #include "RxParseAbort.h" /* rx.parse_abort — abandoned-aggregate event */
 #include "TxReport.h"     /* CCX TX-status report decode + tx.report event */
 
@@ -239,7 +238,7 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
    * (0x6A0-0x6A4, so a TX-only session's unread frames can't fill the on-chip
    * RX FIFO) and never ran enable_rx_path (the 3-wire IGI toggle that puts the
    * RF into RX mode — without it the chip delivers zero frames). This caller
-   * wants RX, so restore the monitor_rx_cfg accept-all filters and enable the
+   * wants RX, so restore the monitor_rx_cfg filter maps and enable the
    * RX path. Serialized against the coex housekeeping tick, the only other
    * register writer right now. */
   if (_rx_filters_closed) {
@@ -251,9 +250,7 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
     for (int attempt = 0; attempt < 5; ++attempt) {
       try {
         std::lock_guard<std::mutex> lk(_reg_mu);
-        _device.rtw_write<uint16_t>(0x06A0, 0xFFFF);
-        _device.rtw_write<uint16_t>(0x06A2, devourer::monitor_ctrl_map(_cfg.rx));
-        _device.rtw_write<uint16_t>(0x06A4, 0xFFFF);
+        _hal.write_rx_filter_maps();
         _hal.enable_rx_path();
         _rx_filters_closed = false;
         _logger->info("Jaguar3: RX filters re-opened + RX path enabled for "

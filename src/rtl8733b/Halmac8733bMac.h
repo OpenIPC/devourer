@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "DeviceConfig.h"
 #include "RtlAdapter.h"
 #include "logger.h"
 

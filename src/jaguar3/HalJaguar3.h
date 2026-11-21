@@ -119,6 +119,9 @@ private:
   void monitor_rx_cfg();
 
 public:
+  /* The monitor RX filter maps (control map per rx.drop_ctrl); also used to
+   * re-open them after a TX-only InitWrite. */
+  void write_rx_filter_maps();
   /* Enable the BB/RF RX path (port of phydm config_trx_mode RX half:
    * set_rf_mode_table + config_cck/ofdm_rx_path + bb_reset + igi_toggle, all
    * BB_PATH_AB). The IGI toggle is mandatory — it forces the BB to emit the

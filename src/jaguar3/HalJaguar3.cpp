@@ -502,7 +502,8 @@ void HalJaguar3::rtw_hal_deinit() {
 
 /* Monitor-mode RX configuration (devourer-specific; the vendor driver has no
  * pure-monitor path). Accept all frames, append PHY status drvinfo (so
- * parse_rx_8822c's drvinfo_size is consistent), all RX filter maps open.
+ * parse_rx_8822c's drvinfo_size is consistent), filter maps per
+ * write_rx_filter_maps.
  * RCR base 0xF410400F = AAP/APM/AM/AB + HTC_LOC_CTRL + PKTCTL_DLEN + VHT_DACK
  * + APP_FCS/APP_MIC/APP_ICV/APP_PHYSTS (halmac_bit_8822c.h). ACRC32 (BIT8)
  * and AICV (BIT9) are NOT in the base — the WMAC drops FCS/ICV-failed frames
@@ -510,9 +511,6 @@ void HalJaguar3::rtw_hal_deinit() {
  * RTL8733B. */
 void HalJaguar3::monitor_rx_cfg() {
   constexpr uint16_t REG_RCR_8822C = 0x0608;
-  constexpr uint16_t REG_RXFLTMAP0_8822C = 0x06A0;
-  constexpr uint16_t REG_RXFLTMAP1_8822C = 0x06A2;
-  constexpr uint16_t REG_RXFLTMAP2_8822C = 0x06A4;
   constexpr uint16_t REG_RX_DRVINFO_SZ_8822C = 0x060F;
   /* CR = 0x06FF. The low byte (TRX-DMA | PROTOCOL | SCHEDULE | MACTX | MACRX)
    * is already set: init_mac_cfg wrote halmac MAC_TRX_ENABLE, which must be
@@ -540,11 +538,17 @@ void HalJaguar3::monitor_rx_cfg() {
   rcr = devourer::monitor_rcr(rcr, _cfg.rx);
   _device.rtw_write32(REG_RCR_8822C, rcr);
   _device.rtw_write8(REG_RX_DRVINFO_SZ_8822C, 0x04);
-  _device.rtw_write16(REG_RXFLTMAP0_8822C, 0xFFFF);
-  _device.rtw_write16(REG_RXFLTMAP1_8822C, devourer::monitor_ctrl_map(_cfg.rx));
-  _device.rtw_write16(REG_RXFLTMAP2_8822C, 0xFFFF);
+  write_rx_filter_maps();
   _logger->info("Jaguar3: monitor RX config applied (RCR=0x{:08x}, RXFLTMAP1=0x{:04x})",
                 rcr, devourer::monitor_ctrl_map(_cfg.rx));
+}
+
+/* The monitor RX filter maps: management and data open, control open unless
+ * rx.drop_ctrl. Also the re-open after a TX-only InitWrite closed them. */
+void HalJaguar3::write_rx_filter_maps() {
+  _device.rtw_write16(0x06A0 /* REG_RXFLTMAP0 */, 0xFFFF);
+  _device.rtw_write16(0x06A2 /* REG_RXFLTMAP1 */, devourer::monitor_ctrl_map(_cfg.rx));
+  _device.rtw_write16(0x06A4 /* REG_RXFLTMAP2 */, 0xFFFF);
 }
 
 /* Port of rtl8822c_ops.c read_chip_version(). REG_SYS_CFG1_8822C=0x00F0:

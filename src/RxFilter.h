@@ -1,7 +1,6 @@
-/* The two opt-in monitor RX filter knobs (DeviceConfig::Rx::drop_ctrl,
- * own_addr_only), shared by the Jaguar2, Jaguar3 and RTL8733B monitor RX
- * setups. Pure arithmetic; the RCR bits are the same on all three families
- * (hal/hal_com_reg.h RCR_AAP..RCR_AB; halmac_bit_8822b/8822c/8733b.h). */
+/* Register values for DeviceConfig::Rx::drop_ctrl / own_addr_only, shared by
+ * the Jaguar2, Jaguar3 and RTL8733B monitor RX setups (RCR bits as
+ * hal/hal_com_reg.h RCR_AAP..RCR_AB). */
 #pragma once
 #include <cstdint>
 

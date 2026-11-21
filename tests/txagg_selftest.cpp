@@ -244,6 +244,50 @@ static void test_desc_8822c() {
   jaguar3::cal_txdesc_chksum_8822c(blk);
   CHECK(blk[0x1F] == 9, "8822c: agg num byte 0x1F=%u want 9", blk[0x1F]);
 }
+
+/* A built block sent alone is moved off a bulk-size multiple: the pad is
+ * inserted when absent and removed when present, the frame bytes and every
+ * other descriptor field survive, and the checksum matches a fresh one. */
+static void test_repad_8822c() {
+  for (uint8_t poff : {uint8_t(0), uint8_t(1)}) {
+    for (size_t mps : {size_t(512), size_t(1024)}) {
+      const size_t frame_len = 2 * mps - 48 - poff * 8u; /* block = 2 * mps */
+      std::vector<uint8_t> blk(48 + poff * 8u + frame_len, 0);
+      jaguar3::fill_data_tx_desc_8822c(
+          blk.data(), static_cast<uint16_t>(frame_len), 7, 9, 0, false, false,
+          0, /*bmc=*/false, /*ndpa=*/false, /*data_sc=*/0,
+          /*pwr_ofset_type=*/0, poff);
+      for (size_t i = 0; i < frame_len; ++i)
+        blk[48 + poff * 8u + i] = static_cast<uint8_t>(i * 7 + 1);
+      std::vector<uint8_t> out;
+      CHECK(jaguar3::repad_tx_block_8822c(blk.data(), blk.size(), mps, out),
+            "repad: poff %u mps %zu not moved", poff, mps);
+      const uint8_t want = poff ? 0 : 1;
+      CHECK(out.size() == 48 + want * 8u + frame_len &&
+                out.size() % mps != 0,
+            "repad: poff %u mps %zu size %zu", poff, mps, out.size());
+      CHECK((out[0x07] & 0x1f) == want, "repad: PKT_OFFSET %u want %u",
+            out[0x07] & 0x1f, want);
+      CHECK(std::memcmp(out.data() + 48 + want * 8u,
+                        blk.data() + 48 + poff * 8u, frame_len) == 0,
+            "repad: poff %u mps %zu frame bytes moved wrongly", poff, mps);
+      /* Sized for the pad: with PKT_OFFSET set the checksum reads it. */
+      std::vector<uint8_t> fresh(48 + want * 8u, 0);
+      jaguar3::fill_data_tx_desc_8822c(
+          fresh.data(), static_cast<uint16_t>(frame_len), 7, 9, 0, false,
+          false, 0, false, false, 0, 0, want);
+      CHECK(std::memcmp(out.data(), fresh.data(), 48) == 0,
+            "repad: poff %u mps %zu descriptor differs from a fresh build",
+            poff, mps);
+      /* Off the multiple: left alone. */
+      std::vector<uint8_t> untouched;
+      CHECK(!jaguar3::repad_tx_block_8822c(blk.data(), blk.size() - 8, mps,
+                                           untouched) &&
+                untouched.empty(),
+            "repad: moved a block that was not on a multiple");
+    }
+  }
+}
 #endif /* DEVOURER_HAVE_JAGUAR3 */
 
 /* A frame in a bulk transfer of its own gets the 8-byte PKT_OFFSET pad exactly
@@ -282,6 +326,7 @@ int main() {
 #endif
 #if defined(DEVOURER_HAVE_JAGUAR3)
   test_desc_8822c();
+  test_repad_8822c();
 #endif
   test_single_block_offset();
   if (g_fail) {

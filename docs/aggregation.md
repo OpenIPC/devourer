@@ -30,7 +30,13 @@ or a plan holds only one frame: when descriptor + frame is an exact bulk-MPS
 multiple, `single_block_pkt_offset` sets PKT_OFFSET = 1 (8 bytes of pad), as
 the vendor drivers do. Without it the chip neither airs nor reports that
 frame. Its descriptor then differs from the default in PKT_OFFSET and in the
-descriptor checksum, which covers that field.
+descriptor checksum, which covers that field. The RTL8733B applies the same
+rule; a Jaguar3 block built for a shared URB and then sent alone is re-padded
+off the multiple (`repad_tx_block_8822c`). Kestrel has no pad field to use and
+ends such a transfer with a zero-length packet instead
+(`ITransport::set_tx_sync_zlp`), as its vendor drivers do on every TX URB.
+`tests/tx_bulk_boundary_onair.sh` sends every frame at one length and compares
+boundary lengths against a control.
 
 Per-family hardware rules:
 

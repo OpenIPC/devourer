@@ -60,6 +60,10 @@ RtlKestrelDevice::RtlKestrelDevice(RtlAdapter device, Logger_t logger,
                                    devourer::DeviceConfig cfg)
     : _device{device}, _logger{logger}, _variant{variant},
       _cfg{std::move(cfg)}, _hal{device, logger, variant} {
+  /* The AX chips need a bulk-OUT transfer of an exact max-packet-size
+   * multiple ended with a zero-length packet, as the vendor drivers do for
+   * every TX URB: data frames, H2C and firmware download alike. */
+  _device.set_tx_sync_zlp(true);
   /* Confirm the PID-selected variant against the on-chip die id (the PID
    * table is authoritative for dispatch; this catches a mislabeled board or a
    * stale table row before any bring-up write happens). */

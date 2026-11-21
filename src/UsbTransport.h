@@ -8,6 +8,7 @@
  * that discovers the bulk endpoints. The exclusive per-adapter UsbDeviceLock
  * rides here too — its lifetime is the transport's. */
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -107,6 +108,9 @@ public:
   bool tx_async(uint8_t ep, uint8_t *buf, size_t len,
                 unsigned timeout_ms) override;
   int tx_sync(uint8_t ep, uint8_t *buf, size_t len, int timeout_ms) override;
+  void set_tx_sync_zlp(bool on) override {
+    _tx_sync_zlp.store(on, std::memory_order_relaxed);
+  }
   int tx_sync_data(uint8_t ep, uint8_t *buf, size_t len,
                    int timeout_ms) override;
   void rx_loop(int buf_size, int n_urbs,
@@ -214,6 +218,12 @@ private:
    * tx_sync_data's never-cancel rule measures a transfer against
    * (src/BulkOutTimeout.h). 0 = unknown. */
   unsigned _bulk_out_mps = 0;
+  /* set_tx_sync_zlp. While it is on, each endpoint's sync sends are
+   * serialized: a second thread's frame slipping in between a transfer and
+   * its zero-length packet would be read by the chip as that transfer's
+   * continuation. */
+  std::atomic<bool> _tx_sync_zlp{false};
+  std::array<std::mutex, 16> _tx_sync_ep_mu;
   void discover_endpoints(); /* was InitDvObj */
   const char *speed_str() const;
   static void transfer_callback(struct libusb_transfer *transfer);

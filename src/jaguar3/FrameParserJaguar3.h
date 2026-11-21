@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 #include "basic_types.h" /* cpu_to_le32 / le16_to_cpu used by the LE macros */
 #include "TxDescBits.h" /* SET_BITS_TO_LE_4BYTE / LE_BITS_TO_4BYTE */
@@ -216,6 +218,34 @@ inline void fill_data_tx_desc_8822c(uint8_t *d, uint16_t pkt_size,
     SET_TX_DESC_DISDATAFB_8822C(d, 1);
   }
   cal_txdesc_chksum_8822c(d);
+}
+
+/* Move a BUILT TXDMA block (descriptor + PKT_OFFSET pad + frame) off an exact
+ * bulk-size multiple, for a block that was laid out for a shared URB and has
+ * to go out alone instead: a transfer of an exact multiple never airs on the
+ * sync bulk path (TxAggPlan.h single_block_pkt_offset). The 8-byte pad is
+ * inserted when the block has none and removed when it has one, the
+ * descriptor's PKT_OFFSET follows, and the checksum (which covers the field
+ * and the pad) is redone. Every other descriptor field is kept, so nothing
+ * build_tx_block decided is decided twice. Returns false, leaving `out`
+ * alone, when the block is not on a multiple. */
+inline bool repad_tx_block_8822c(const uint8_t *block, size_t len,
+                                 size_t bulk_size, std::vector<uint8_t> &out) {
+  if (bulk_size == 0 || len < TXDESC_SIZE_8822C || len % bulk_size != 0)
+    return false;
+  const size_t old_pad =
+      static_cast<size_t>(GET_TX_DESC_PKT_OFFSET_8822C(block)) * 8;
+  if (TXDESC_SIZE_8822C + old_pad > len)
+    return false;
+  const size_t new_pad = old_pad == 0 ? 8 : old_pad - 8;
+  const size_t frame_len = len - TXDESC_SIZE_8822C - old_pad;
+  out.assign(TXDESC_SIZE_8822C + new_pad + frame_len, 0);
+  std::memcpy(out.data(), block, TXDESC_SIZE_8822C);
+  std::memcpy(out.data() + TXDESC_SIZE_8822C + new_pad,
+              block + TXDESC_SIZE_8822C + old_pad, frame_len);
+  SET_TX_DESC_PKT_OFFSET_8822C(out.data(), new_pad / 8);
+  cal_txdesc_chksum_8822c(out.data());
+  return true;
 }
 
 /* Parsed view of one 8822C RX frame within a (possibly aggregated) bulk-IN

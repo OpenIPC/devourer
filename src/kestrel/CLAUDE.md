@@ -264,6 +264,28 @@ scheduler stalled and the bulk-OUT NAKed). Behavioural quirks beyond the
 the firmware DIG biases the 5 GHz idle-noise measurement):
 `docs/8852c-quirks.md`.
 
+## Bulk-OUT transfers end with a zero-length packet
+
+A sync bulk-OUT of an exact max-packet-size multiple carries no short packet,
+so the chip never sees the transfer end. The constructor turns on
+`set_tx_sync_zlp`, which appends a zero-length packet to every such sync send
+on this device — data, H2C and firmware download — matching the vendor
+drivers' `URB_ZERO_PACKET` on every TX URB (both the 8852BU and 8852CU trees).
+Measured on one 8852C at USB2 (`tests/tx_bulk_boundary_onair.sh`, 1213 frames
+per cell, WD + frame = 1024 and 512): without it 1 frame reaches the receiver
+and the endpoint times out after about 220 sends, so TX aborts. With it, 13
+boundary cells delivered 438-936 (median 896) against 615-933 (median 855)
+for 12 control cells at the neighbouring lengths. That spread is the bench
+pair's, present in both groups, so the result is "no longer lost", not "level
+to within a few points". Against that: across the two runs taken before the
+fix, one control cell (976) read 0 of 1213 directly after a boundary cell and
+852-884 in the other, and the cause was never established — a boundary-length
+send may leave the chip in a state that outlives the session, which the mode
+prevents rather than repairs. The 8852B is enabled on the vendor driver's evidence alone: it
+and USB3 are not measured. While the mode is on, each
+endpoint's sync sends are serialized, so a frame from a second TX thread
+cannot land between a transfer and its terminator.
+
 ## 5 and 6 GHz: EDCCA parked, preamble CCA on
 
 With the carrier-sense TX default, injection on 6 GHz stalled after the first

@@ -2385,6 +2385,15 @@ bool RtlJaguar3Device::send_packet(const uint8_t *packet, size_t length) {
 }
 
 bool RtlJaguar3Device::send_built_block(uint8_t *block, size_t len) {
+  /* The block was sized for a shared URB; alone it can sit on a bulk-size
+   * multiple, which never airs. */
+  std::vector<uint8_t> repadded;
+  if (_device.is_usb() &&
+      jaguar3::repad_tx_block_8822c(
+          block, len, devourer::usb_bulk_mps(_device.speed()), repadded)) {
+    block = repadded.data();
+    len = repadded.size();
+  }
   const int rc = _device.bulk_send_data_sync_ep(tx_ep_for_descriptor(block),
                                                 block, len,
                                                 /*timeout_ms=*/20);

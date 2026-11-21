@@ -102,6 +102,13 @@ public:
    * (USB: bulk completion; PCIe: hardware read-pointer / BCN kick). Returns
    * bytes submitted or a negative error. */
   virtual int tx_sync(uint8_t ep, uint8_t *buf, size_t len, int timeout_ms) = 0;
+  /* End every tx_sync whose length is an exact bulk max-packet-size multiple
+   * with a zero-length packet, which is how a bulk-OUT transfer of that
+   * length is terminated (the vendor AX drivers set URB_ZERO_PACKET on every
+   * TX URB). Off by default: the 11ac/11n HALs keep their frames off the
+   * multiple with a descriptor pad instead, and their firmware-download
+   * chunking was validated without one. No-op off USB. */
+  virtual void set_tx_sync_zlp(bool) {}
   /* tx_sync for a DATA frame — the send path DeviceConfig::Tx::
    * no_cancel_multipkt applies to (UsbTransport overrides it; firmware
    * download and reserved-page writes stay on tx_sync). Default: tx_sync. */

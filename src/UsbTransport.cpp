@@ -1402,6 +1402,18 @@ int UsbTransport::tx_sync(uint8_t ep, uint8_t *packet, size_t length,
      * terminator is a failed send: the frame is not complete on the bus. */
     int zl = 0;
     rc = libusb_bulk_transfer(_dev_handle, ep, packet, 0, &zl, timeout_ms);
+    if (rc != LIBUSB_SUCCESS) {
+      /* Its own log line: the shared one below would read as a failure
+       * after a complete write. */
+      _tx_failed.fetch_add(1, std::memory_order_relaxed);
+      _tx_last_rc.store(rc, std::memory_order_relaxed);
+      _tx_last_timeout.store(rc == LIBUSB_ERROR_TIMEOUT,
+                             std::memory_order_relaxed);
+      _logger->error("bulk_send EP {} FAIL rc={} on the zero-length packet "
+                     "ending a {}-byte transfer",
+                     (int)ep, rc, (int)length);
+      return rc;
+    }
   }
   if (rc != LIBUSB_SUCCESS) {
     _tx_failed.fetch_add(1, std::memory_order_relaxed);

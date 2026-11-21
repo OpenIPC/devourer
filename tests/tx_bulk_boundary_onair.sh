@@ -10,10 +10,12 @@
 # Every frame of a cell has the same PSDU length (DEVOURER_TX_PAYLOAD_BYTES).
 # LENS lists the boundary lengths and at least one control beside them:
 # descriptor + PSDU must be a multiple of 512 (USB2) / 1024 (USB3) for a
-# boundary length. Descriptor sizes: 48 on Jaguar2/3 and the RTL8733B, 40 on
-# Jaguar1, 48 on the 8852B and 56 on the 8852C.
+# boundary length. Descriptor sizes: 48 on Jaguar2/3, 40 on Jaguar1 and the
+# RTL8733B, 48 on the 8852B and 56 on the 8852C. The default LENS is the
+# Jaguar2/3 pair; every other family needs its own, as below.
 #
 #   sudo DUT_PID=0xc812 tests/tx_bulk_boundary_onair.sh
+#   sudo DUT_PID=0xb733 LENS="984 472 976" tests/tx_bulk_boundary_onair.sh
 #   sudo DUT_VID=0x35bc DUT_PID=0x0101 LENS="968 456 976" \
 #        tests/tx_bulk_boundary_onair.sh
 #
@@ -34,23 +36,26 @@ FRAMES=${FRAMES:-1000}
 LENS=${LENS:-"976 984"}
 RATE=${RATE:-}
 # Back the DUT's TX power off (quarter-dB, negative). The bench 8812EU module
-# drops off the bus about a second into TX at its default power and holds at
-# -44; the boundary fault itself does not depend on power.
+# (the 8822E die) drops off the bus about a second into TX at its default
+# power and holds at -44, so that is the only power it was measured at here.
 TX_PWR_OFFSET_QDB=${TX_PWR_OFFSET_QDB:-}
 MIN_PCT=${MIN_PCT:-50}
 OUT=${OUT:-/tmp/devourer-tx-bulk-boundary}
 
 mkdir -p "$OUT"
-RXPID=""
+# Only this run's own processes are ever signalled: another session's demos
+# on other adapters are left alone. cell() runs in this shell, not a
+# subshell, so the trap sees the PIDs.
+RXPID="" TXPID=""
 cleanup() {
+  [ -n "$TXPID" ] && kill -TERM "$TXPID" 2>/dev/null
   [ -n "$RXPID" ] && kill -TERM "$RXPID" 2>/dev/null
-  pkill -x txdemo 2>/dev/null
-  pkill -x rxdemo 2>/dev/null
   wait 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
-cell() { # $1=len -> "hits submitted failed"
+cell() { # $1=len -> CELL_HITS CELL_SUB CELL_FAIL
+  CELL_HITS=-1 CELL_SUB=0 CELL_FAIL=0
   local len="$1"
   local rxlog="$OUT/rx_$len.jsonl" txlog="$OUT/tx_$len.jsonl"
   env DEVOURER_VID="$GND_VID" DEVOURER_PID="$GND_PID" \
@@ -60,14 +65,17 @@ cell() { # $1=len -> "hits submitted failed"
   sleep 7
   if ! kill -0 "$RXPID" 2>/dev/null; then
     echo "ground RX died (len $len) - see $OUT/rx_$len.err" >&2
-    RXPID=""; echo "-1 0 0"; return
+    RXPID=""; return
   fi
   env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" DEVOURER_CHANNEL="$CH" \
     DEVOURER_TX_PAYLOAD_BYTES="$len" DEVOURER_TX_FRAMES="$FRAMES" \
     DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=warn \
     ${RATE:+DEVOURER_TX_RATE="$RATE"} \
     ${TX_PWR_OFFSET_QDB:+DEVOURER_TX_PWR_OFFSET_QDB="$TX_PWR_OFFSET_QDB"} \
-    timeout --signal=TERM 60 "$TXDEMO" > "$txlog" 2>"$OUT/tx_$len.err"
+    timeout --signal=TERM 60 "$TXDEMO" > "$txlog" 2>"$OUT/tx_$len.err" &
+  TXPID=$!
+  wait "$TXPID" 2>/dev/null
+  TXPID=""
   sleep 1
   kill -TERM "$RXPID" 2>/dev/null
   wait "$RXPID" 2>/dev/null
@@ -79,7 +87,7 @@ cell() { # $1=len -> "hits submitted failed"
         grep -o '"submitted":[0-9]*' | cut -d: -f2)
   fail=$(grep -F '"ev":"tx.stats"' "$txlog" | tail -1 |
          grep -o '"failed":[0-9]*' | cut -d: -f2)
-  echo "${hits:-0} ${sub:-0} ${fail:-0}"
+  CELL_HITS=${hits:-0} CELL_SUB=${sub:-0} CELL_FAIL=${fail:-0}
 }
 
 echo "DUT $DUT_VID:$DUT_PID  tx build $TX_BUILD  ch $CH  $FRAMES frames/cell"
@@ -87,10 +95,10 @@ printf '%-6s %-6s %-10s %-7s\n' len hits submitted failed
 best=0
 declare -A got
 for len in $LENS; do
-  read -r h s f <<<"$(cell "$len")"
-  printf '%-6s %-6s %-10s %-7s\n' "$len" "$h" "$s" "$f"
-  got[$len]=$h
-  [ "$h" -gt "$best" ] && best=$h
+  cell "$len"
+  printf '%-6s %-6s %-10s %-7s\n' "$len" "$CELL_HITS" "$CELL_SUB" "$CELL_FAIL"
+  got[$len]=$CELL_HITS
+  [ "$CELL_HITS" -gt "$best" ] && best=$CELL_HITS
 done
 
 # No length delivering is a dead link or a dead DUT, not a boundary finding.

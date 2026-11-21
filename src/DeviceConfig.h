@@ -142,7 +142,8 @@ struct DeviceConfig {
      * so arm an identity first (SetAckResponder, a station or beacon arm);
      * StartRxLoop warns when MACID is still all-zero. MACID is one address:
      * a beamformee arm plus an ACK responder on a different address is
-     * refused at bring-up. Backends with AdapterCaps::rx_mac_filters_ok;
+     * refused at bring-up (a later runtime arm is the caller's to keep
+     * consistent). Backends with AdapterCaps::rx_mac_filters_ok;
      * ignored elsewhere. */
     bool own_addr_only = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and

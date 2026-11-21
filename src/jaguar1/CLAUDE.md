@@ -52,6 +52,12 @@ OK 87% vs 86% open, 0% with no responder; A-MPDU 77% vs 78%, 0%). One unit,
 ch36; the 8812AU as ACK *responder* under `drop_ctrl` is unmeasured (the
 cross-rig loop did not close with the knobs off either).
 
+Under `own_addr_only` a beamformee arm and an ACK responder cannot share a
+session on the 8812 die: the beamformee answers on the EFUSE address, a
+responder on another address is refused at bring-up because it moves MACID,
+and a responder on the EFUSE address is refused by the arm itself (this die
+cannot be armed to its pre-arm MACID).
+
 ## Teardown
 
 **`Stop()` forgets any armed busy window** — the rule, and the residual it

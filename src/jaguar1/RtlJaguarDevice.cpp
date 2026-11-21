@@ -1,6 +1,7 @@
 #include "RtlJaguarDevice.h"
 #include "jaguar1/BeaconPort.h"
 #include "BeamformingSounder.h"
+#include "RxFilter.h"
 #include "ChannelFreq.h"
 #include "EepromManager.h"
 #include "Hal8812PhyReg.h"
@@ -1699,6 +1700,17 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
   StartWithMonitorMode(channel);
   SetMonitorChannel(channel);
 
+  /* The beamformee below answers on the EFUSE address bring-up left in
+   * MACID; under rx.own_addr_only a responder on any other address would
+   * take that one accept path away from it. */
+  uint8_t efuse_mac[6] = {};
+  if (_cfg.rx.own_addr_only && _cfg.bf.beamformee_of && _cfg.rx.ack_responder &&
+      (!_eepromManager->GetMacAddress(efuse_mac) ||
+       devourer::own_addr_identity_conflict(_cfg, efuse_mac)))
+    throw std::runtime_error(
+        "Jaguar1: rx.own_addr_only cannot serve a beamformee and an ACK "
+        "responder on different addresses (one MACID, and the beamformee "
+        "answers on the EFUSE address)");
   if (_cfg.rx.ack_responder) { /* DEVOURER_ACK_RESPONDER */
     std::lock_guard<std::recursive_mutex> lock(_port0_mu);
     if (!SetAckResponder(*_cfg.rx.ack_responder)) {

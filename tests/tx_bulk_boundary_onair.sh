@@ -33,6 +33,10 @@ CH=${CH:-36}
 FRAMES=${FRAMES:-1000}
 LENS=${LENS:-"976 984"}
 RATE=${RATE:-}
+# Back the DUT's TX power off (quarter-dB, negative). The bench 8812EU module
+# drops off the bus about a second into TX at its default power and holds at
+# -44; the boundary fault itself does not depend on power.
+TX_PWR_OFFSET_QDB=${TX_PWR_OFFSET_QDB:-}
 MIN_PCT=${MIN_PCT:-50}
 OUT=${OUT:-/tmp/devourer-tx-bulk-boundary}
 
@@ -62,6 +66,7 @@ cell() { # $1=len -> "hits submitted failed"
     DEVOURER_TX_PAYLOAD_BYTES="$len" DEVOURER_TX_FRAMES="$FRAMES" \
     DEVOURER_TX_GAP_US=2000 DEVOURER_LOG_LEVEL=warn \
     ${RATE:+DEVOURER_TX_RATE="$RATE"} \
+    ${TX_PWR_OFFSET_QDB:+DEVOURER_TX_PWR_OFFSET_QDB="$TX_PWR_OFFSET_QDB"} \
     timeout --signal=TERM 60 "$TXDEMO" > "$txlog" 2>"$OUT/tx_$len.err"
   sleep 1
   kill -TERM "$RXPID" 2>/dev/null

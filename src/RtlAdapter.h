@@ -155,6 +155,9 @@ public:
     return _transport->tx_sync_data(ep, packet, length, timeout_ms);
   }
   void bulk_clear_halt(uint8_t ep) { _transport->clear_halt(ep); }
+  /* ITransport::set_tx_sync_zlp. The transport is shared by every copy of
+   * this adapter, so this is a per-device setting, not a per-copy one. */
+  void set_tx_sync_zlp(bool on) { _transport->set_tx_sync_zlp(on); }
 
   /* Stop TX and wait out everything already submitted (ITransport::
    * quiesce_tx). Must run while the caller's bus context is still alive —

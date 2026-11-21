@@ -264,6 +264,21 @@ scheduler stalled and the bulk-OUT NAKed). Behavioural quirks beyond the
 the firmware DIG biases the 5 GHz idle-noise measurement):
 `docs/8852c-quirks.md`.
 
+## Bulk-OUT transfers end with a zero-length packet
+
+A sync bulk-OUT of an exact max-packet-size multiple carries no short packet,
+so the chip never sees the transfer end. The constructor turns on
+`set_tx_sync_zlp`, which appends a zero-length packet to every such sync send
+on this device — data, H2C and firmware download — matching the vendor
+drivers' `URB_ZERO_PACKET` on every TX URB (both the 8852BU and 8852CU trees).
+Measured on one 8852C at USB2 (`tests/tx_bulk_boundary_onair.sh`, 1213 frames
+per cell, WD + frame = 1024 and 512): without it 1 frame reaches the receiver
+and the endpoint times out after about 220 sends, so TX aborts; with it 896
+and 931 arrive, level with the 891 and 933 of the neighbouring control
+lengths. The 8852B and USB3 are not measured. While the mode is on, each
+endpoint's sync sends are serialized, so a frame from a second TX thread
+cannot land between a transfer and its terminator.
+
 ## 5 and 6 GHz: EDCCA parked, preamble CCA on
 
 With the carrier-sense TX default, injection on 6 GHz stalled after the first

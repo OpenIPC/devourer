@@ -617,13 +617,9 @@ bool Rtl8733bDevice::send_packet(const uint8_t *packet, size_t length) {
   if (radiotap_length == 0)
     return false;
   const size_t frame_len = length - radiotap_length;
-  const size_t bulk_packet = _device.speed() >= devourer::kUsbSpeedSuper
-                                 ? 1024u
-                                 : _device.speed() >= devourer::kUsbSpeedHigh
-                                       ? 512u
-                                       : 64u;
-  const uint8_t packet_offset =
-      (rtl8733b::kTxDescSize + frame_len) % bulk_packet == 0 ? 1 : 0;
+  const uint8_t packet_offset = devourer::single_block_pkt_offset(
+      rtl8733b::kTxDescSize, frame_len,
+      devourer::usb_bulk_mps(_device.speed()));
   std::vector<uint8_t> usb_frame(rtl8733b::kTxDescSize +
                                      static_cast<size_t>(packet_offset) * 8u +
                                      frame_len,
@@ -780,9 +776,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
 
   devourer::TxAggLimits lim;
   lim.desc_size = rtl8733b::kTxDescSize;
-  lim.bulk_size = _device.speed() >= devourer::kUsbSpeedSuper  ? 1024
-                  : _device.speed() >= devourer::kUsbSpeedHigh ? 512
-                                                               : 64;
+  lim.bulk_size = devourer::usb_bulk_mps(_device.speed());
   /* BLK_DESC_NUM: MAC init already programs 3 into DWBCN0_CTRL[7:4]
    * (Halmac8733bMac.cpp) — the same field and value the HalMAC 88xx siblings
    * use — so 3 descriptors per bulk transfer is what this TXDMA parses.

@@ -1386,9 +1386,23 @@ int UsbTransport::tx_sync(uint8_t ep, uint8_t *packet, size_t length,
    * normal TX-queue operation, not the per-send hot path. Resetting the
    * data toggle bit corrupts the chip's state machine. */
   int actual = 0;
+  const bool zlp_mode = _tx_sync_zlp.load(std::memory_order_relaxed);
+  std::unique_lock<std::mutex> ep_lk(_tx_sync_ep_mu[ep & 0x0f],
+                                     std::defer_lock);
+  if (zlp_mode)
+    ep_lk.lock();
   _tx_submitted.fetch_add(1, std::memory_order_relaxed);
   int rc = libusb_bulk_transfer(_dev_handle, ep, packet,
                                 static_cast<int>(length), &actual, timeout_ms);
+  if (rc == LIBUSB_SUCCESS && actual == static_cast<int>(length) && zlp_mode &&
+      length != 0 && _bulk_out_mps != 0 && length % _bulk_out_mps == 0) {
+    /* The transfer ended on a full packet, so the chip is still waiting for
+     * its end. Without the zero-length packet the frame never airs and the
+     * endpoint stops accepting data a few hundred frames later. A failed
+     * terminator is a failed send: the frame is not complete on the bus. */
+    int zl = 0;
+    rc = libusb_bulk_transfer(_dev_handle, ep, packet, 0, &zl, timeout_ms);
+  }
   if (rc != LIBUSB_SUCCESS) {
     _tx_failed.fetch_add(1, std::memory_order_relaxed);
     _tx_last_rc.store(rc, std::memory_order_relaxed);

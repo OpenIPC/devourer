@@ -331,7 +331,8 @@ private:
                 const devourer::AmpduMode &am);
   /* Submit one already-built TXDMA block as its own URB on its own
    * descriptor's endpoint - no rebuild, so no second round of
-   * build_tx_block's side effects. */
+   * build_tx_block's side effects. A block that lands on a bulk-size
+   * multiple alone is re-padded off it first (repad_tx_block_8822c). */
   bool send_built_block(uint8_t *block, size_t len);
 
   RtlAdapter _device;

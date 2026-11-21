@@ -135,7 +135,10 @@ struct DeviceConfig {
     /* env: DEVOURER_RX_OWN_ADDR_ONLY — RCR AAP off, APM|AM|AB on: only unicast
      * to the address in MACID (0x0610), plus group frames. The RTL8733B
      * bring-up programs its EFUSE address there; Jaguar2/3 bring-up does not,
-     * so arm an identity first (SetAckResponder, a station or beacon arm).
+     * so arm an identity first (SetAckResponder, a station or beacon arm);
+     * StartRxLoop warns when MACID is still all-zero. One identity only: an
+     * ACK responder on another address overwrites the MACID a beamformee
+     * arm wrote, and the sounding frames no longer pass.
      * Jaguar2, Jaguar3 and the RTL8733B; silently inert elsewhere. */
     bool own_addr_only = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and

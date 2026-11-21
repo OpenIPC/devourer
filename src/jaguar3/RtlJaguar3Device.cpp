@@ -111,6 +111,10 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
    * the TX path (InitWrite, cold + warm); the RX-only
    * Init path has not been measured with it on a ground-station card. */
   _hal.rtw_hal_init(channel);  /* full vendor-source bring-up */
+  /* rtw_hal_init wrote this session's monitor filter maps. A TX-only
+   * InitWrite earlier on this object no longer applies: re-opening the maps
+   * in StartRxLoop would undo the beamformee arm's RXFLTMAP1 below. */
+  _rx_filters_closed = false;
   /* Tune the channel/bandwidth (5/10 MHz ChannelWidth re-clocks to narrowband),
    * then run IQK calibration (it reads RF18 for the tuned channel).
    *
@@ -275,6 +279,17 @@ void RtlJaguar3Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
         _device, _logger, devourer::tonemask::Family::JGR3, _channel, 2,
         _cfg.rx.csi_mask ? _cfg.rx.csi_mask->c_str() : nullptr,
         _cfg.rx.nbi ? _cfg.rx.nbi->c_str() : nullptr);
+  }
+
+  /* rx.own_addr_only passes only unicast to MACID, which this bring-up never
+   * programs: say so if nothing has armed an identity by now. */
+  static constexpr uint8_t kNoMac[6] = {};
+  if (_cfg.rx.own_addr_only) {
+    std::lock_guard<std::mutex> lk(_reg_mu); /* against the coex tick */
+    if (devourer::ack::macid_is(_device, kNoMac))
+      _logger->warn("Jaguar3: rx.own_addr_only with MACID 00:00:00:00:00:00: no "
+                    "unicast passes until SetAckResponder or a station or beacon "
+                    "arm sets an identity");
   }
 
   _logger->info("Jaguar3: entering RX loop (kernel-style async URB queue)");

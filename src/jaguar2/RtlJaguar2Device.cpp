@@ -664,6 +664,14 @@ void RtlJaguar2Device::start_rx_loop(Action_ParsedRadioPacket packetProcessor, b
   if (_cfg.rx.csi_mask || _cfg.rx.nbi)
     _hal.note_tone_mask_armed();
 
+  /* rx.own_addr_only passes only unicast to MACID, which this bring-up never
+   * programs: say so if nothing has armed an identity by now. */
+  static constexpr uint8_t kNoMac[6] = {};
+  if (_cfg.rx.own_addr_only && devourer::ack::macid_is(_device, kNoMac))
+    _logger->warn("Jaguar2: rx.own_addr_only with MACID 00:00:00:00:00:00: no "
+                  "unicast passes until SetAckResponder or a station or beacon "
+                  "arm sets an identity");
+
   _logger->info("RtlJaguar2Device: entering RX loop (ch={})", _channel.Channel);
 
   /* Closed-loop CFO tracking on the receiver (#217): tick the controller on a

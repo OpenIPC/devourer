@@ -317,18 +317,32 @@ struct DeviceConfig {
      * MGMT (0x12, HIGH), so ac_lifetime_us can reach them; management and
      * control frames keep MGMT, and a USB-aggregated URB never mixes the
      * two. A SetAmpduMode TID or DEVOURER_TX_QSEL still wins, and the
-     * endpoint follows the final QSEL. Applied by Jaguar1 on the RTL8812A
-     * with three bulk-OUT endpoints (the 8814A, 8821A and two-endpoint parts
-     * are unmeasured and log that it is not applied); other backends ignore
-     * it. AdapterCaps::tx_ac_lifetime_ok says whether this adapter applies
-     * it. Default off: descriptors and endpoints unchanged. */
+     * endpoint follows the final QSEL. Applied with three bulk-OUT
+     * endpoints by Jaguar1 on the RTL8812A and Jaguar2 on the RTL8822B;
+     * Jaguar3 already puts DATA on BE whenever it has three endpoints
+     * (jaguar3/TxQueueMap.h). Unmeasured parts sharing that code (8814A,
+     * 8821A, 8821C, two-endpoint adapters) log that it is not applied;
+     * other backends ignore it. AdapterCaps::tx_ac_lifetime_ok says whether
+     * this adapter applies it. Default off: descriptors and endpoints
+     * unchanged. */
     bool data_on_be = false;
+    /* env: DEVOURER_TX_BE_FAST_RETRY=1 — at TX bring-up, clear the BE
+     * queue's EDCA TXOP limit and pull its CWmax down to its CWmin
+     * (REG_EDCA_BE_PARAM 0x0508; AIFS and CWmin kept), so retries on BE
+     * re-air back to back the way MGMT's do instead of doubling the window
+     * up to 1023 slots. Not the hardware "Fast EDCA" thresholds. Applied on
+     * the RTL8822B. Not on the RTL8812A, where clearing its
+     * 3 ms BE TXOP cut saturated throughput by up to two thirds and the
+     * lifetime alone holds the bound; it logs that it is ignored there. The
+     * counterpart: BE gives up exponential backoff, as MGMT already has, so
+     * it contends harder than stock BE against other stations' traffic. */
+    bool be_fast_retry = false;
     /* env: DEVOURER_TX_AC_LIFETIME_US — the MAC drops a frame from an AC
      * queue (VO/VI/BE/BK) once it has been queued this long, mid retry chain
      * included (REG_LIFETIME_EN 0x0426 bits 0..3, other bits kept;
      * REG_PKT_LIFE_TIME 0x04C0; 256 us units, rounded up, max ~16.8 s).
      * 0 = off: no register touched. MGMT is never aged, so it needs
-     * data_on_be. Same scope as data_on_be. Measured on one RTL8812AU,
+     * data_on_be. Applied on the RTL8812A and RTL8822B. Measured on one RTL8812AU,
      * 500 fps of 1400 B at MCS4, retry 16, a peer that hears but never ACKs:
      * a delivered age max of 68.8-71 ms at 68000 and 21.0 ms at 20000, against
      * 3-9.5 s stock (the frames wait out every retry). The counterpart: a

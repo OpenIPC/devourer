@@ -874,15 +874,20 @@ bool RtlJaguarDevice::ac_queue_ok() const {
 }
 
 void RtlJaguarDevice::apply_ac_tx_queue_knobs() {
-  if (!_cfg.tx.data_on_be && !_cfg.tx.ac_lifetime_us)
+  if (!_cfg.tx.data_on_be && !_cfg.tx.ac_lifetime_us && !_cfg.tx.be_fast_retry)
     return;
   if (!ac_queue_ok()) {
     _logger->warn("Jaguar1: tx.data_on_be / tx.ac_lifetime_us not applied: "
                   "measured on the RTL8812A with three bulk-OUT endpoints only");
     return;
   }
+  devourer::DeviceConfig::Tx tx = _cfg.tx;
+  if (tx.be_fast_retry)
+    _logger->warn("Jaguar1: tx.be_fast_retry is not applied on the RTL8812A "
+                  "(it cut saturated throughput; the lifetime holds the bound)");
+  tx.be_fast_retry = false;
   std::lock_guard<std::recursive_mutex> lock(_port0_mu);
-  if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+  if (!devourer::apply_ac_tx_queue(_device, tx))
     throw std::runtime_error("Jaguar1: AC lifetime could not be set");
 }
 

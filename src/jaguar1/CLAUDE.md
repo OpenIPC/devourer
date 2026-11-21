@@ -158,6 +158,7 @@ Measured on one 8812AU sending to an MT7612U, channel 100, near field:
 |---|---|---|---|
 | Peer never ACKs, delivered age max (10 s run) | 3.3 s | 3.1 s | 21.0 ms at 20000, 68.8 ms at 68000 |
 | Saturated MCS2, Mbit/s (7 s runs, interleaved) | 9.5 / 10.6 / 10.9 | 10.1 / 10.7 | 11.6 / 11.8 |
+| Unicast CCX reports seen as unicast | 0 | all | all |
 
 Stock's age grows with the run (9.5 s in a 14 s run): frames wait out every
 retry. Run-to-run spread on the saturated cell is about 2 Mbit/s.
@@ -167,3 +168,7 @@ a lifetime) is deliberately not offered here: on the 8812A it cut saturated
 MCS2 to 3.5-10.1 Mbit/s, and the lifetime alone holds the bound (68.7 ms
 with it, 68.9 ms without).
 
+The TX descriptor's BMC bit follows addr1 on the 8812A. It was a constant 1,
+which the firmware echoes into the CCX report, so every unicast report read
+as a group frame. Delivery and retries were unchanged across the switch. The
+8814A and 8821A keep the constant: unmeasured.

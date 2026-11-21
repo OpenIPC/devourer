@@ -1598,7 +1598,15 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
     rate_id = 9;
   }
 
-  SET_TX_DESC_BMC_8812(usb_frame, 1);
+  /* BMC: on the RTL8812A it follows addr1's group bit. The firmware echoes
+   * it in the CCX TX report (TxReport::bmc), so a constant 1 made every
+   * unicast report read as a group frame; the MAC takes the ACK decision
+   * from addr1 either way (measured: same delivery and retries). The 8814A
+   * and 8821A keep the constant 1: unmeasured there. */
+  const bool is_8812 = _eepromManager->version_id.ICType == CHIP_8812;
+  SET_TX_DESC_BMC_8812(
+      usb_frame, !is_8812 || (real_packet_length >= 10 &&
+                              (packet[radiotap_length + 4] & 0x01)) ? 1 : 0);
   SET_TX_DESC_RATE_ID_8812(usb_frame, static_cast<uint8_t>(rate_id));
 
   /* DEVOURER_TX_DATA_BE: DATA frames ride BE (QSEL 0), where

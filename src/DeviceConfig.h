@@ -312,6 +312,28 @@ struct DeviceConfig {
      * retries re-air at the descriptor rate. See the RetryFallback enum for
      * why there is no floor form. */
     RetryFallback retry_fallback = RetryFallback::Default;
+    /* env: DEVOURER_TX_DATA_BE=1 — DATA frames (802.11 type 2) ride the BE
+     * queue (descriptor QSEL 0) and its LOW bulk-OUT endpoint instead of
+     * MGMT (0x12, HIGH), so ac_lifetime_us can reach them; management and
+     * control frames keep MGMT, and a USB-aggregated URB never mixes the
+     * two. A SetAmpduMode TID or DEVOURER_TX_QSEL still wins, and the
+     * endpoint follows the final QSEL. Applied by Jaguar1 on the RTL8812A
+     * with three bulk-OUT endpoints (the 8814A, 8821A and two-endpoint parts
+     * are unmeasured and log that it is not applied); other backends ignore
+     * it. Default off: descriptors and endpoints unchanged. */
+    bool data_on_be = false;
+    /* env: DEVOURER_TX_AC_LIFETIME_US — the MAC drops a frame from an AC
+     * queue (VO/VI/BE/BK) once it has been queued this long, mid retry chain
+     * included (REG_LIFETIME_EN 0x0426 bits 0..3, other bits kept;
+     * REG_PKT_LIFE_TIME 0x04C0; 256 us units, rounded up, max ~16.8 s).
+     * 0 = off: no register touched. MGMT is never aged, so it needs
+     * data_on_be. Same scope as data_on_be. Measured on one RTL8812AU,
+     * 500 fps of 1400 B at MCS4, retry 16, a peer that hears but never ACKs:
+     * a delivered age max of 68.8-71 ms at 68000 and 21.0 ms at 20000, against
+     * 3-9.5 s stock (the frames wait out every retry). The counterpart: a
+     * frame a slow-to-ACK peer would still have taken is dropped as well,
+     * and the drop is reported nowhere; count delivery at the receiver. */
+    unsigned ac_lifetime_us = 0;
     /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
      * one bulk-OUT URB by send_packets (0 = off, the default: send_packets
      * degrades to a per-frame loop and every TX path is byte-identical to

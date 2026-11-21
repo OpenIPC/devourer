@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <climits>
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -180,6 +182,10 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tx.ack_timeout_us = static_cast<int>(v > 255 ? 255 : v);
   if (env_long_strict("DEVOURER_TX_RETRY_LIMIT", &v))
     cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
+  cfg.tx.data_on_be = env_flag("DEVOURER_TX_DATA_BE");
+  if (env_long_strict("DEVOURER_TX_AC_LIFETIME_US", &v) && v > 0)
+    cfg.tx.ac_lifetime_us = static_cast<unsigned>(
+        std::min<unsigned long long>(static_cast<unsigned long long>(v), UINT_MAX));
   if (const char *e = env_str("DEVOURER_TX_RETRY_FALLBACK")) {
     if (str_ieq(e, "off")) {
       cfg.tx.retry_fallback = devourer::RetryFallback::Off;

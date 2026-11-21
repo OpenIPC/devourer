@@ -246,6 +246,32 @@ static void test_desc_8822c() {
 }
 #endif /* DEVOURER_HAVE_JAGUAR3 */
 
+/* A frame in a bulk transfer of its own gets the 8-byte PKT_OFFSET pad exactly
+ * when descriptor + frame is a bulk-MPS multiple, and the padded total is
+ * then never one. */
+static void test_single_block_offset() {
+  using devourer::single_block_pkt_offset;
+  using devourer::usb_bulk_mps;
+  CHECK(usb_bulk_mps(devourer::kUsbSpeedHigh) == 512, "mps high");
+  CHECK(usb_bulk_mps(devourer::kUsbSpeedSuper) == 1024, "mps super");
+  CHECK(usb_bulk_mps(devourer::kUsbSpeedHigh - 1) == 64, "mps full");
+  for (size_t mps : {size_t(64), size_t(512), size_t(1024)}) {
+    for (size_t len = 1; len <= 2400; ++len) {
+      const uint8_t off = single_block_pkt_offset(48, len, mps);
+      const bool multiple = (48 + len) % mps == 0;
+      CHECK(off == (multiple ? 1 : 0), "single: mps %zu len %zu off %u", mps,
+            len, off);
+      CHECK((48 + off * 8 + len) % mps != 0, "single: mps %zu len %zu lands on a multiple",
+            mps, len);
+    }
+  }
+  /* The bench cases: 976-byte MPDUs at USB2 and USB3, 984 as the control. */
+  CHECK(single_block_pkt_offset(48, 976, 512) == 1, "bench 976 usb2");
+  CHECK(single_block_pkt_offset(48, 976, 1024) == 1, "bench 976 usb3");
+  CHECK(single_block_pkt_offset(48, 984, 512) == 0, "bench 984");
+  CHECK(single_block_pkt_offset(48, 976, 0) == 0, "mps 0 never pads");
+}
+
 int main() {
   test_plan_basic();
   test_plan_shim();
@@ -257,6 +283,7 @@ int main() {
 #if defined(DEVOURER_HAVE_JAGUAR3)
   test_desc_8822c();
 #endif
+  test_single_block_offset();
   if (g_fail) {
     std::printf("txagg selftest: %d failure(s)\n", g_fail);
     return 1;

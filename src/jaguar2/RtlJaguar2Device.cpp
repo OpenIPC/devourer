@@ -1532,9 +1532,17 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   const uint16_t rlen = devourer::radiotap_hdr_len(packet, length);
   if (rlen == 0)
     return false;
-  std::vector<uint8_t> usb_frame(jaguar2::TXDESC_SIZE_8822B + (length - rlen),
-                                 0);
-  if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
+  /* A transfer of an exact bulk-MPS multiple never airs on this sync path
+   * (no ZLP): pad 8 bytes behind the descriptor then (TxAggPlan.h). */
+  const size_t frame_len = length - rlen;
+  const uint8_t pkt_offset =
+      _device.is_usb()
+          ? devourer::single_block_pkt_offset(
+                jaguar2::TXDESC_SIZE_8822B, frame_len, devourer::usb_bulk_mps(_device.speed()))
+          : 0;
+  std::vector<uint8_t> usb_frame(
+      jaguar2::TXDESC_SIZE_8822B + static_cast<size_t>(pkt_offset) * 8 + frame_len, 0);
+  if (build_tx_block(packet, length, usb_frame.data(), pkt_offset) == 0)
     return false;
   int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
                                      usb_frame.data(), usb_frame.size(),
@@ -1559,9 +1567,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
 
   devourer::TxAggLimits lim;
   lim.desc_size = jaguar2::TXDESC_SIZE_8822B;
-  lim.bulk_size = _device.speed() >= devourer::kUsbSpeedSuper  ? 1024
-                  : _device.speed() >= devourer::kUsbSpeedHigh ? 512
-                                                               : 64;
+  lim.bulk_size = devourer::usb_bulk_mps(_device.speed());
   /* HalMAC chips parse at most 3 descriptors per bulk transfer (rtw88
    * usb_tx_agg_desc_num / halmac BLK_DESC_NUM) — beyond that the TXDMA
    * misparses (bench-proven on the 8822BU: block 1 re-aired agg-num times).

@@ -37,6 +37,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "Transport.h" /* kUsbSpeed* */
+
 namespace devourer {
 
 struct TxAggLimits {
@@ -129,6 +131,25 @@ inline TxAggPlan plan_tx_agg(const size_t *frame_lens, size_t n,
     p.total += d;
   }
   return p;
+}
+
+/* USB bulk max packet size for a libusb speed (Transport.h kUsbSpeed*). */
+inline size_t usb_bulk_mps(int speed) {
+  return speed >= kUsbSpeedSuper ? 1024 : speed >= kUsbSpeedHigh ? 512 : 64;
+}
+
+/* PKT_OFFSET for a frame sent in a bulk-OUT transfer of its own (no USB TX
+ * aggregation). The sync bulk path sends no ZLP, and a transfer whose length
+ * (descriptor + frame) is an exact bulk-MPS multiple never airs: the chip
+ * neither transmits nor reports it (bench, forced 976-byte MPDUs behind the
+ * 48-byte descriptor: 804 of 807 lost on an 8812EU at USB2, 976 of 1009 on an
+ * 8812BU at USB3; 984 bytes as the control: 2 and 0). The vendor drivers keep
+ * PKT_OFFSET = 1, 8 bytes of pad after the descriptor, in exactly that case
+ * (rtl8822eu_xmit.c / rtl8822bu_xmit.c / rtl8812au_xmit.c, the
+ * rtw_usb_bulk_size_boundary() test). Returns 1 then, else 0. */
+inline uint8_t single_block_pkt_offset(size_t desc_size, size_t frame_len,
+                                       size_t bulk_size) {
+  return bulk_size != 0 && (desc_size + frame_len) % bulk_size == 0 ? 1 : 0;
 }
 
 } /* namespace devourer */

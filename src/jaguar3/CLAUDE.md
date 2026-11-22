@@ -129,6 +129,16 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   aggregated path (`DEVOURER_TX_BATCH=4` + `DEVOURER_TX_USB_AGG=4`) and
   A-MPDU over QoS data ran with 0 failed. Unmeasured: 1-, 2- and 4-endpoint
   parts.
+- **AC lifetime and BE fast retry** (`DeviceConfig::Tx::ac_lifetime_us`,
+  `be_fast_retry`, `src/AcTxQueue.h`) are applied in `InitWrite` on both
+  parts. DATA already rides BE here with three bulk-OUT endpoints
+  (`TxQueueMap.h`), so `data_on_be` adds nothing. Measured 2026-11-22, one
+  unit each sending to an MT7612U, ch 100, near field, against stock master.
+  A peer that never ACKs (500 fps of 1400 B at MCS4, retry 16): delivered
+  age max 7.4 s (8812EU) and 7.0 s (8812CU) stock and still growing, 68.7 /
+  68.8 ms at `ac_lifetime_us=68000`, 20.9 / 20.8 ms at 20000. Saturated MCS2
+  steady state: 8812EU 13.6 Mbit/s stock against 12.0-12.3 with the knobs,
+  8812CU 11.6-12.2 against 10.6-10.9.
 
 ## Bring-up cost and the pipelined register writes
 

@@ -14,7 +14,8 @@ namespace devourer {
  * an AC queue). The addresses are the halmac 88xx ones, the same on Jaguar1
  * (vendor hal_com_reg.h REG_LIFETIME_CTRL 0x0426, REG_PKT_VO_VI/BE_BK_
  * LIFE_TIME 0x04C0/0x04C2), Jaguar2 and Jaguar3. Applied on the parts
- * measured: the RTL8812A (lifetime only) and the RTL8822B.
+ * measured: the RTL8812A (lifetime only), the RTL8822B, RTL8822C and
+ * RTL8822E.
  * Pure arithmetic plus the apply, pinned headless against a fake transport
  * by tests/ac_tx_queue_selftest.cpp. */
 

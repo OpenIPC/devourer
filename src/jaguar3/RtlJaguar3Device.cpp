@@ -1,6 +1,7 @@
 #include "RxFilter.h"
 #include "RtlJaguar3Device.h"
 #include "TxQueueMap.h"
+#include "AcTxQueue.h"
 #include "PktBufWindow.h"
 #include "InitTimer.h"
 
@@ -1201,6 +1202,11 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
       _cfg.tx.ack_timeout_us > 255   ? 255
       : _cfg.tx.ack_timeout_us < 1 ? 1
                                      : _cfg.tx.ack_timeout_us));
+  /* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US: after init_edca_cfg, before
+   * the debug replay (which keeps the last word) and the coex thread.
+   * Both Jaguar3 parts, the RTL8822C and RTL8822E, were measured. */
+  if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+    throw std::runtime_error("Jaguar3: AC-queue options could not be set");
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
     /* Full MAC+BB dump (0x000..0x4ffc — MAC plane, then BB incl. the RF

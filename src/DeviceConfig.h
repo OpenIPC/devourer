@@ -331,7 +331,7 @@ struct DeviceConfig {
      * (REG_EDCA_BE_PARAM 0x0508; AIFS and CWmin kept), so retries on BE
      * re-air back to back the way MGMT's do instead of doubling the window
      * up to 1023 slots. Not the hardware "Fast EDCA" thresholds. Applied on
-     * the RTL8822B. Not on the RTL8812A, where clearing its
+     * the RTL8822B, RTL8822C and RTL8822E. Not on the RTL8812A, where clearing its
      * 3 ms BE TXOP cut saturated throughput by up to two thirds and the
      * lifetime alone holds the bound; it logs that it is ignored there. The
      * counterpart: BE gives up exponential backoff, as MGMT already has, so
@@ -342,7 +342,8 @@ struct DeviceConfig {
      * included (REG_LIFETIME_EN 0x0426 bits 0..3, other bits kept;
      * REG_PKT_LIFE_TIME 0x04C0; 256 us units, rounded up, max ~16.8 s).
      * 0 = off: no register touched. MGMT is never aged, so it needs
-     * data_on_be. Applied on the RTL8812A and RTL8822B. Measured on one RTL8812AU,
+     * data_on_be. Applied on the RTL8812A, RTL8822B, RTL8822C and RTL8822E
+     * (a Jaguar3 part puts DATA on BE by itself, see data_on_be). Measured on one RTL8812AU,
      * 500 fps of 1400 B at MCS4, retry 16, a peer that hears but never ACKs:
      * a delivered age max of 68.8-71 ms at 68000 and 21.0 ms at 20000, against
      * 3-9.5 s stock (the frames wait out every retry). The counterpart: a

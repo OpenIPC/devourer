@@ -318,7 +318,8 @@ struct DeviceConfig {
      * control frames keep MGMT, and a USB-aggregated URB never mixes the
      * two. A SetAmpduMode TID or DEVOURER_TX_QSEL still wins, and the
      * endpoint follows the final QSEL. Applied with three bulk-OUT
-     * endpoints by Jaguar1 on the RTL8812A and Jaguar2 on the RTL8822B;
+     * endpoints by Jaguar1 on the RTL8812A and Jaguar2 on the RTL8822B,
+     * and by the RTL8733B backend (through its existing QSEL endpoint map);
      * Jaguar3 already puts DATA on BE whenever it has three endpoints
      * (jaguar3/TxQueueMap.h). Unmeasured parts sharing that code (8814A,
      * 8821A, 8821C, two-endpoint adapters) log that it is not applied;
@@ -331,7 +332,7 @@ struct DeviceConfig {
      * (REG_EDCA_BE_PARAM 0x0508; AIFS and CWmin kept), so retries on BE
      * re-air back to back the way MGMT's do instead of doubling the window
      * up to 1023 slots. Not the hardware "Fast EDCA" thresholds. Applied on
-     * the RTL8822B, RTL8822C and RTL8822E. Not on the RTL8812A, where clearing its
+     * the RTL8822B, RTL8822C, RTL8822E and RTL8733B. Not on the RTL8812A, where clearing its
      * 3 ms BE TXOP cut saturated throughput by up to two thirds and the
      * lifetime alone holds the bound; it logs that it is ignored there. The
      * counterpart: BE gives up exponential backoff, as MGMT already has, so
@@ -342,8 +343,9 @@ struct DeviceConfig {
      * included (REG_LIFETIME_EN 0x0426 bits 0..3, other bits kept;
      * REG_PKT_LIFE_TIME 0x04C0; 256 us units, rounded up, max ~16.8 s).
      * 0 = off: no register touched. MGMT is never aged, so it needs
-     * data_on_be. Applied on the RTL8812A, RTL8822B, RTL8822C and RTL8822E
-     * (a Jaguar3 part puts DATA on BE by itself, see data_on_be). Measured on one RTL8812AU,
+     * data_on_be. Applied on the RTL8812A, RTL8822B, RTL8822C, RTL8822E and
+     * RTL8733B (a Jaguar3 part puts DATA on BE by itself, see data_on_be).
+     * Measured on one RTL8812AU,
      * 500 fps of 1400 B at MCS4, retry 16, a peer that hears but never ACKs:
      * a delivered age max of 68.8-71 ms at 68000 and 21.0 ms at 20000, against
      * 3-9.5 s stock (the frames wait out every retry). The counterpart: a

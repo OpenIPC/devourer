@@ -524,6 +524,19 @@ same witness reads `paggr` 1.00), at ~305 fps.
   figures below. `SetAmpduMode` zeroes the TID's AC register (0x0500/04/08/0c)
   and restores it on clear; 0x0456 and 0x04BC are programmed too, measured
   inert here.
+- **The same TXOP holds every retry on BE.** With the peer not ACKing, a BE
+  frame's 17 airings took 95.8 ms (≈3 ms apart, then ≈8 ms once the window
+  had doubled), against 8.4 ms on MGMT, which re-airs back to back. Outside
+  A-MPDU, `DeviceConfig::Tx::data_on_be` + `be_fast_retry` (+
+  `ac_lifetime_us`) is the product path (9.2 ms chains); the measurements
+  and their counterparts sit at those fields. Measured 2026-11-22, one
+  8733BU -> MT7612U, ch 100, near field, against stock master; the sender
+  ran on another host, so ages are relative to the run's quickest frame
+  (reads ~0.7 ms low, checked against a same-host run). A peer that never
+  ACKs (500 fps of 1400 B at MCS4, retry 16): delivered age max 131 ms
+  stock, 71 ms at `ac_lifetime_us=68000`, 20.4 ms at 20000, with 2,175 and
+  2,506 frames delivered against 1,254. Saturated MCS2 steady state 11.9-13.3
+  Mbit/s stock and knobs off, 10.7-11.8 with the knobs.
 
 Delivered distinct payload counters per second at the RTL8812EU witness,
 ch36, 1000 B QoS-Data, no-ack (`0/16/7/1/0x20`), ~9 s cells:

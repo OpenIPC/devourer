@@ -865,11 +865,12 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
 
 /* DEVOURER_TX_DATA_BE / _AC_LIFETIME_US are measured on the RTL8812A with
  * three bulk-OUT endpoints only. The 8814A and 8821A share this code but not
- * a measurement, and two-endpoint parts map BE to another pipe; on those the
+ * a measurement, two-endpoint parts map BE to another pipe, and four-endpoint
+ * parts use another queue map (_InitQueuePriority_8812AUsb); on those the
  * knobs are left off rather than guessed. */
 bool RtlJaguarDevice::ac_queue_ok() const {
   return _eepromManager->version_id.ICType == CHIP_8812 &&
-         _device.bulk_out_ep_count() >= 3;
+         _device.bulk_out_ep_count() == 3;
 }
 
 void RtlJaguarDevice::apply_ac_tx_queue_knobs() {

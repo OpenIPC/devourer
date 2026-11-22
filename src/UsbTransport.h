@@ -233,12 +233,17 @@ private:
   Logger_t _logger;
   UsbLinkInfo _info;
 
-  /* Set by transfer_callback when an async TX bulk-OUT completes non-OK
-   * (TIMED_OUT / stall). Consumed at the top of the next tx_async on the TX
-   * thread to re-clear_halt the endpoint — a mid-stream stall (e.g. hardware
-   * NDP generation on some xhci hosts) would otherwise stay wedged, since the
-   * first-send clear_halt only runs once. */
-  std::atomic<bool> _tx_wedged{false};
+  /* One bit per bulk-OUT endpoint number (address & 0x0f), set by
+   * transfer_callback when an async TX on that endpoint completes with a
+   * STALL. Consumed at the top of the next tx_async, which re-clear_halts
+   * every endpoint flagged, not only its own: with per-queue routing
+   * (send_packet_ep) the next frame may use a different endpoint, and a
+   * mid-stream stall (e.g. hardware NDP generation on some xhci hosts) would
+   * otherwise stay wedged. */
+  std::atomic<uint32_t> _tx_wedged_eps{0};
+  /* Bulk-OUT endpoints already given the first-use clear_halt (same bit
+   * layout). Touched only by tx_async. */
+  uint32_t _tx_cleared_eps = 0;
 
   /* TX submission counters (the driver-drop / congestion signal, TxStats.h).
    * The async transfer_callback increments them from the libusb event thread. */

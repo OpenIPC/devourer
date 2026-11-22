@@ -31,7 +31,7 @@ inline constexpr uint8_t kLifetimeEnAc = 0x0f;
 /* REG_PKT_LIFE_TIME: [15:0] the VO/VI lifetime, [31:16] the BE/BK one. */
 inline constexpr uint16_t kRegPktLifeTime = 0x04c0;
 /* Lifetime unit: 256 us, measured on the RTL8812A (a peer that never ACKs:
- * 20000 us gave a delivered age max of 21.0 ms, 68000 us gave 70.1 ms). The
+ * 20000 us gave a delivered age max of 21.0 ms, 68000 us gave 68.8-71 ms). The
  * vendor header's HAL92C_MSDU_LIFE_TIME_UNIT says 128, which would give half;
  * halmac's later chips also convert with `us >> 8`. */
 inline constexpr unsigned kLifetimeUnitUs = 256;

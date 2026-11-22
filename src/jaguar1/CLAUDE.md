@@ -163,6 +163,11 @@ Measured on one 8812AU sending to an MT7612U, channel 100, near field:
 Stock's age grows with the run (9.5 s in a 14 s run): frames wait out every
 retry. Run-to-run spread on the saturated cell is about 2 Mbit/s.
 
+The cost: with the knobs on, a frame still queued at the lifetime is dropped,
+including one a slow-to-ACK peer would still have taken, and the drop is
+reported nowhere; count delivery at the receiver (the full statement is at
+`DeviceConfig::Tx::ac_lifetime_us`).
+
 Clearing the BE TXOP (the "fast retry" the halmac generations can pair with
 a lifetime) is deliberately not offered here: on the 8812A it cut saturated
 MCS2 to 3.5-10.1 Mbit/s, and the lifetime alone holds the bound (68.7 ms

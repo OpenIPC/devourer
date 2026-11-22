@@ -1204,7 +1204,14 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
                                      : _cfg.tx.ack_timeout_us));
   /* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US: after init_edca_cfg, before
    * the debug replay (which keeps the last word) and the coex thread.
-   * Both Jaguar3 parts, the RTL8822C and RTL8822E, were measured. */
+   * Both Jaguar3 parts, the RTL8822C and RTL8822E, were measured, with three
+   * bulk-OUT endpoints; below that DATA stays on MGMT, which is never aged.
+   * Inside the pipelined write batch, so a failed write most likely surfaces
+   * at batch.end() rather than as this throw; bring-up fails either way. */
+  if (_cfg.tx.ac_lifetime_us &&
+      !jaguar3::per_queue_routing(_device.bulk_out_ep_count()))
+    _logger->warn("Jaguar3: tx.ac_lifetime_us does not reach DATA with fewer "
+                  "than three bulk-OUT endpoints (DATA stays on MGMT)");
   if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
     throw std::runtime_error("Jaguar3: AC-queue options could not be set");
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */

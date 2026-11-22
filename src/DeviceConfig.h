@@ -325,7 +325,10 @@ struct DeviceConfig {
      * 8821A, 8821C, two-endpoint adapters) log that it is not applied;
      * other backends ignore it. AdapterCaps::tx_ac_lifetime_ok says whether
      * this adapter applies it. Default off: descriptors and endpoints
-     * unchanged. */
+     * unchanged. On the RTL8733B, DATA on BE keeps the BE queue's 3 ms TXOP
+     * unless be_fast_retry is also set (a BE frame every ~3.3 ms was
+     * measured there, rtl8733b/Rtl8733bDevice.cpp); the 8733B figures are
+     * for all three knobs on. */
     bool data_on_be = false;
     /* env: DEVOURER_TX_BE_FAST_RETRY=1 — at TX bring-up, clear the BE
      * queue's EDCA TXOP limit and pull its CWmax down to its CWmin

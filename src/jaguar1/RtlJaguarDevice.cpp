@@ -877,7 +877,7 @@ void RtlJaguarDevice::apply_ac_tx_queue_knobs() {
   if (!_cfg.tx.data_on_be && !_cfg.tx.ac_lifetime_us && !_cfg.tx.be_fast_retry)
     return;
   if (!ac_queue_ok()) {
-    _logger->warn("Jaguar1: tx.data_on_be / tx.ac_lifetime_us not applied: "
+    _logger->warn("Jaguar1: tx.data_on_be / be_fast_retry / ac_lifetime_us not applied: "
                   "measured on the RTL8812A with three bulk-OUT endpoints only");
     return;
   }

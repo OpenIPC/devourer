@@ -61,8 +61,9 @@ constexpr uint32_t pkt_life_time_reg(unsigned us) {
 
 /* Programs be_fast_retry and ac_lifetime_us. Called once per bring-up,
  * after the backend's MAC/EDCA init, before a configured SetAmpduMode is
- * re-applied (the A-MPDU mode then saves and restores the value set here)
- * and before the debug register replay (which keeps the last word).
+ * re-applied (on the RTL8733B the A-MPDU mode then saves and restores the
+ * value set here; Jaguar2/3 SetAmpduMode does not touch EDCA) and before
+ * the debug register replay (which keeps the last word).
  * Neither set: no register access. Returns false if a register write failed;
  * the backends then fail the bring-up, as for a configured ACK responder.
  * A failed write stops there: in particular the AC queues are never enabled

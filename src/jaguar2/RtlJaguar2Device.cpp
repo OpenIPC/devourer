@@ -1555,18 +1555,18 @@ devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   return t;
 }
 
+/* The AC-queue knobs are measured on the RTL8822B with three bulk-OUT
+ * endpoints only; the 8821C shares this code but not a measurement. */
+bool RtlJaguar2Device::ac_queue_ok() const {
+  return _variant == jaguar2::ChipVariant::C8822B &&
+         _device.bulk_out_ep_count() == 3;
+}
+
 /* Bulk-OUT endpoint for a built TXDMA block. Every frame leaves on the
  * first endpoint, as it always has, unless DEVOURER_TX_DATA_BE is set: then
  * the block follows its descriptor QSEL through the 3-bulk-OUT TXDMA_PQ_MAP
  * init_trx_cfg writes (BE/BK -> LOW, VI/VO -> NORMAL, the rest -> HIGH), as
  * Jaguar3 routes, so queue and endpoint agree. */
-/* The AC-queue knobs are measured on the RTL8822B with three bulk-OUT
- * endpoints only; the 8821C shares this code but not a measurement. */
-bool RtlJaguar2Device::ac_queue_ok() const {
-  return _variant == jaguar2::ChipVariant::C8822B &&
-         _device.bulk_out_ep_count() >= 3;
-}
-
 uint8_t RtlJaguar2Device::tx_ep_for(const uint8_t *txdesc) const {
   if (!_cfg.tx.data_on_be || !ac_queue_ok())
     return _device.first_bulk_out_ep();
@@ -1716,8 +1716,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
     if (rc >= 0 && !sent_all)
       _logger->error("8822B aggregated TX short on EP 0x{:02x}: {}/{} "
                      "({} frames dropped)",
-                     _device.first_bulk_out_ep(), rc, urb.size(),
-                     plan.frames());
+                     tx_ep_for(first), rc, urb.size(), plan.frames());
     devourer::Ev(_logger->events(), "tx.agg")
         .f("frames", (unsigned long long)plan.frames())
         .f("bytes", (unsigned long long)urb.size())

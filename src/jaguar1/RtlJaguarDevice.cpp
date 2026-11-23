@@ -1,4 +1,5 @@
 #include "RtlJaguarDevice.h"
+#include "AcTxQueue.h"
 #include "jaguar1/BeaconPort.h"
 #include "BeamformingSounder.h"
 #include "RxFilter.h"
@@ -138,6 +139,7 @@ void RtlJaguarDevice::InitWrite(SelectedChannel channel) {
           "Jaguar1: configured ACK responder could not be armed");
     configured_arm_generation = _active_ack_arm_generation;
   }
+  apply_ac_tx_queue_knobs();
 
   /* Carrier-sense default: EDCCA + primary CCA enabled unless
    * DEVOURER_DIS_CCA. Always applied — the enable path is what programs
@@ -858,7 +860,47 @@ bool RtlJaguarDevice::send_packet(const uint8_t *packet, size_t length) {
   std::vector<uint8_t> usb_frame(TXDESC_SIZE + (length - rlen), 0);
   if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
     return false;
-  return _device.send_packet(usb_frame.data(), usb_frame.size());
+  return _device.send_packet_ep(tx_ep_for(usb_frame.data()), usb_frame.data(), usb_frame.size());
+}
+
+/* DEVOURER_TX_DATA_BE / _AC_LIFETIME_US are measured on the RTL8812A with
+ * three bulk-OUT endpoints only. The 8814A and 8821A share this code but not
+ * a measurement, two-endpoint parts map BE to another pipe, and four-endpoint
+ * parts use another queue map (_InitQueuePriority_8812AUsb); on those the
+ * knobs are left off rather than guessed. */
+bool RtlJaguarDevice::ac_queue_ok() const {
+  return _eepromManager->version_id.ICType == CHIP_8812 &&
+         _device.bulk_out_ep_count() == 3;
+}
+
+void RtlJaguarDevice::apply_ac_tx_queue_knobs() {
+  if (!_cfg.tx.data_on_be && !_cfg.tx.ac_lifetime_us)
+    return;
+  if (!ac_queue_ok()) {
+    _logger->warn("Jaguar1: tx.data_on_be / tx.ac_lifetime_us not applied: "
+                  "measured on the RTL8812A with three bulk-OUT endpoints only");
+    return;
+  }
+  std::lock_guard<std::recursive_mutex> lock(_port0_mu);
+  if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+    throw std::runtime_error("Jaguar1: AC lifetime could not be set");
+}
+
+/* DEVOURER_TX_DATA_BE: the endpoint of the descriptor's queue, as
+ * _InitNormalChipThreeOutEpPriority_8812AUsb maps it (BE/BK -> LOW, VI ->
+ * NORMAL, VO/MGT/HIGH -> HIGH) and the vendor three_out_pipe orders the
+ * pipes (HIGH, NORMAL, LOW). Knob off: the first endpoint, as before. */
+uint8_t RtlJaguarDevice::tx_ep_for(const uint8_t *txdesc) const {
+  if (!_cfg.tx.data_on_be || !ac_queue_ok())
+    return _device.first_bulk_out_ep();
+  switch (txdesc[0x05] & 0x1f) { /* QSEL: dword1 [12:8], SET_TX_DESC_QUEUE_SEL_8812 */
+  case 0: case 1: case 2: case 3: /* BE, BK */
+    return _device.nth_bulk_out_ep(2);
+  case 4: case 5: /* VI */
+    return _device.nth_bulk_out_ep(1);
+  default: /* VO, MGT, HIGH */
+    return _device.first_bulk_out_ep();
+  }
 }
 
 bool RtlJaguarDevice::SetAckResponder(const devourer::MacAddr &mac) {
@@ -1212,6 +1254,7 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
      * build_tx_block when that frame leads the next URB. */
     std::vector<size_t> lens;
     int run_chan = 0; /* 0 = no per-packet CHANNEL seen yet (current channel) */
+    bool run_data = false;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       const uint16_t rlen =
           devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
@@ -1219,6 +1262,16 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
         if (lens.empty())
           ++done; /* skip a malformed leading frame (contract: skipped) */
         break;
+      }
+      /* DEVOURER_TX_DATA_BE: DATA and the rest leave on different endpoints
+       * and one URB goes to one, so a change of frame type ends the run. */
+      if (_cfg.tx.data_on_be && ac_queue_ok()) {
+        const bool data =
+            pkts[i].len > rlen && devourer::dot11_is_data(pkts[i].data[rlen]);
+        if (lens.empty())
+          run_data = data;
+        else if (data != run_data)
+          break;
       }
       const int want =
           devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
@@ -1266,7 +1319,7 @@ size_t RtlJaguarDevice::send_packets(const TxPacketView *pkts, size_t count) {
     SET_TX_DESC_USB_TXAGG_NUM_8812(first, plan.frames());
     rtl8812a_cal_txdesc_chksum(first);
 
-    const bool sent = _device.send_packet(urb.data(), urb.size());
+    const bool sent = _device.send_packet_ep(tx_ep_for(first), urb.data(), urb.size());
     /* Async TX (this generation's deliberate transfer mode): `ok` means the
      * URB was ACCEPTED by the transport — bytes-on-wire resolve later at
      * completion reaping, so there is no `sent` byte count to emit here and
@@ -1546,10 +1599,25 @@ size_t RtlJaguarDevice::build_tx_block(const uint8_t *packet, size_t length,
     rate_id = 9;
   }
 
-  SET_TX_DESC_BMC_8812(usb_frame, 1);
+  /* BMC: on the RTL8812A it follows addr1's group bit. The firmware echoes
+   * it in the CCX TX report (TxReport::bmc), so a constant 1 made every
+   * unicast report read as a group frame; the MAC takes the ACK decision
+   * from addr1 either way (measured: same delivery and retries). The 8814A
+   * and 8821A keep the constant 1: unmeasured there. */
+  const bool is_8812 = _eepromManager->version_id.ICType == CHIP_8812;
+  SET_TX_DESC_BMC_8812(
+      usb_frame, !is_8812 || (real_packet_length >= 10 &&
+                              (packet[radiotap_length + 4] & 0x01)) ? 1 : 0);
   SET_TX_DESC_RATE_ID_8812(usb_frame, static_cast<uint8_t>(rate_id));
 
-  SET_TX_DESC_QUEUE_SEL_8812(usb_frame, 0x12);
+  /* DEVOURER_TX_DATA_BE: DATA frames ride BE (QSEL 0), where
+   * ac_lifetime_us reaches them, and tx_ep_for routes the block to that
+   * queue's endpoint; everything else stays on MGMT (0x12). */
+  SET_TX_DESC_QUEUE_SEL_8812(
+      usb_frame, _cfg.tx.data_on_be && ac_queue_ok() &&
+                         devourer::dot11_is_data(packet[radiotap_length])
+                     ? 0
+                     : 0x12);
   SET_TX_DESC_HWSEQ_EN_8812(usb_frame, static_cast<uint8_t>(1));
   if (!is_8814a) {
     /* 88XXau leaves GID=0 for monitor injection on 8814A. */
@@ -1719,6 +1787,7 @@ void RtlJaguarDevice::Init(Action_ParsedRadioPacket packetProcessor,
     }
     configured_arm_generation = _active_ack_arm_generation;
   }
+  apply_ac_tx_queue_knobs();
 
   /* Carrier-sense default: EDCCA + primary CCA enabled unless
    * DEVOURER_DIS_CCA. Always applied — the enable path is what programs
@@ -2317,6 +2386,7 @@ devourer::AdapterCaps RtlJaguarDevice::GetAdapterCaps() {
    * the vendor retry carve-out (knob inert). */
   c.ack_responder_ok = true;
   c.rx_mac_filters_ok = true;
+  c.tx_ac_lifetime_ok = ac_queue_ok();
   c.tx_retry_limit_ok = _eepromManager->version_id.ICType != CHIP_8814A;
   /* station_mode_ok: false on every Jaguar1 die - ported (StationArm.h),
    * not yet measured by tests/realtek_station_onair.sh; the AdapterCaps

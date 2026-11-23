@@ -90,8 +90,11 @@ bool RtlAdapter::send_packet(uint8_t *packet, size_t length) {
   /* TX endpoint selection (USB semantics; the PCIe transport ignores it):
    * DeviceConfig tx.ep override > first discovered OUT endpoint > historic
    * 8812AU default (0x02). */
-  const uint8_t tx_ep = _tx_ep_override ? *_tx_ep_override
-                                        : first_bulk_out_ep();
+  return send_packet_ep(first_bulk_out_ep(), packet, length);
+}
+
+bool RtlAdapter::send_packet_ep(uint8_t ep, uint8_t *packet, size_t length) {
+  const uint8_t tx_ep = _tx_ep_override ? *_tx_ep_override : ep;
   return _transport->tx_async(tx_ep, packet, length, _tx_timeout_ms);
 }
 

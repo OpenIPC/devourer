@@ -1,6 +1,7 @@
 #include "UsbTransport.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -1152,7 +1153,8 @@ void UsbTransport::transfer_callback(struct libusb_transfer *transfer) {
      * wedge would fire a ~ms clear_halt control transfer per hiccup — a
      * clear_halt storm — now that completions are actually reaped. */
     if (transfer->status == LIBUSB_TRANSFER_STALL)
-      self->_tx_wedged.store(true, std::memory_order_relaxed);
+      self->_tx_wedged_eps.fetch_or(1u << (transfer->endpoint & 0x0f),
+                                    std::memory_order_relaxed);
     /* A CANCELLED completion is quiesce_tx doing its job, not a failure —
      * counting it would show phantom drops at the end of every session. */
     if (transfer->status != LIBUSB_TRANSFER_CANCELLED) {
@@ -1282,10 +1284,19 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   /* Recover a bulk-OUT that a prior async TX wedged (TIMED_OUT / stall). Only
    * the first send used to clear_halt; a mid-stream stall (e.g. hardware NDP
    * generation on some xhci hosts) then stayed wedged forever. */
-  if (_tx_wedged.exchange(false)) {
-    int hr = libusb_clear_halt(_dev_handle, tx_ep);
-    _logger->info("TX EP 0x{:02X} re-clear_halt after wedge rc={}", (int)tx_ep,
-                  hr);
+  for (uint32_t w = _tx_wedged_eps.exchange(0); w; w &= w - 1) {
+    const uint8_t ep = static_cast<uint8_t>(std::countr_zero(w)); /* OUT: bit 7 clear */
+    int hr = libusb_clear_halt(_dev_handle, ep);
+    _logger->info("TX EP 0x{:02X} re-clear_halt after wedge rc={}", (int)ep, hr);
+  }
+  /* Clear any HALT state on a bulk-OUT endpoint before its first use. The
+   * fwdl process can leave a TX EP stalled from the chip side; without
+   * clear_halt the USB controller would NAK every bulk OUT URB to it. Per
+   * endpoint, since per-queue routing sends on more than one. */
+  if (!(_tx_cleared_eps & (1u << (tx_ep & 0x0f)))) {
+    _tx_cleared_eps |= 1u << (tx_ep & 0x0f);
+    int chr = libusb_clear_halt(_dev_handle, tx_ep);
+    _logger->info("libusb_clear_halt(EP 0x{:02X}) rc={}", (int)tx_ep, chr);
   }
 
   /* On the FIRST send only, dump the bulk-OUT bytes to compare against
@@ -1293,11 +1304,6 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
   static bool first_pkt_dump = true;
   if (first_pkt_dump) {
     first_pkt_dump = false;
-    /* Clear any HALT state on the TX EP. The fwdl process can leave the
-     * TX EP in a stalled state from the chip side; without clear_halt the
-     * USB controller would NAK every subsequent bulk OUT URB. */
-    int chr = libusb_clear_halt(_dev_handle, tx_ep);
-    _logger->info("libusb_clear_halt(EP 0x{:02X}) rc={}", (int)tx_ep, chr);
     size_t dump_len = std::min<size_t>(length, 64);
     char hex[64 * 2 + 1] = {0};
     for (size_t k = 0; k < dump_len; ++k) {

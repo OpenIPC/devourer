@@ -86,6 +86,7 @@ inline void emit_adapter_caps(EventSink &sink, IRadio *dev) {
       .f("tx_retry_limit", c.tx_retry_limit_ok ? 1 : 0)
       .f("tx_no_agg", c.tx_no_agg_ok ? 1 : 0)
       .f("rx_mac_filters", c.rx_mac_filters_ok ? 1 : 0)
+      .f("tx_ac_lifetime", c.tx_ac_lifetime_ok ? 1 : 0)
       .f("he_er_su", c.he_er_su_ok ? 1 : 0)
       .f("per_chain_rssi", c.per_chain_rssi ? 1 : 0)
       .f("hw_rx_tsf", c.hw_rx_timestamp ? 1 : 0)

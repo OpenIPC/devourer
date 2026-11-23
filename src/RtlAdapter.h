@@ -138,6 +138,8 @@ public:
   uint8_t rxagg_usb_timeout = 0;
 
   bool send_packet(uint8_t *packet, size_t length);
+  /* send_packet on endpoint `ep` (tx.ep still overrides). */
+  bool send_packet_ep(uint8_t ep, uint8_t *packet, size_t length);
   /* Synchronous TX that blocks until completion or timeout. Returns bytes
    * submitted, or negative on error. */
   int bulk_send_sync(uint8_t *packet, size_t length, int timeout_ms) {

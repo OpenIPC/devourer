@@ -48,17 +48,17 @@ constexpr uint32_t pkt_life_time_reg(unsigned us) {
 /* Programs ac_lifetime_us. Called once per bring-up, after the backend's
  * MAC init and before the debug register replay (which keeps the last
  * word). 0: no register access. Returns false if a register write failed;
- * the backends then fail the bring-up, as for a configured ACK responder. */
+ * the backends then fail the bring-up, as for a configured ACK responder.
+ * A failed lifetime write stops before the enable, so the AC queues are
+ * never enabled on a stale or half-written lifetime. */
 inline bool apply_ac_tx_queue(RtlAdapter &dev, const DeviceConfig::Tx &tx) {
-  bool ok = true;
-  if (tx.ac_lifetime_us > 0) {
-    ok &= dev.rtw_write32(kRegPktLifeTime,
-                          pkt_life_time_reg(tx.ac_lifetime_us));
-    ok &= dev.rtw_write8(kRegLifetimeEn,
-                         static_cast<uint8_t>(dev.rtw_read8(kRegLifetimeEn) |
-                                              kLifetimeEnAc));
-  }
-  return ok;
+  if (tx.ac_lifetime_us == 0)
+    return true;
+  if (!dev.rtw_write32(kRegPktLifeTime, pkt_life_time_reg(tx.ac_lifetime_us)))
+    return false;
+  return dev.rtw_write8(kRegLifetimeEn,
+                        static_cast<uint8_t>(dev.rtw_read8(kRegLifetimeEn) |
+                                             kLifetimeEnAc));
 }
 
 } // namespace devourer

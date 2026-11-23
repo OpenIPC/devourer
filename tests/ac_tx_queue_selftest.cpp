@@ -38,6 +38,7 @@ public:
   bool fail_writes = false;
   bool fail_writes_after_store = false;
   bool throw_writes = false;
+  int fail_first_writes = 0; /* the first N write8 calls fail, later ones succeed */
   int write_calls = 0;
 
   bool is_usb() const override { return true; }
@@ -52,7 +53,7 @@ public:
   bool write8(uint16_t a, uint8_t v) override {
     ++write_calls;
     if (throw_writes) throw std::runtime_error("injected write failure");
-    if (fail_writes) return false;
+    if (fail_writes || write_calls <= fail_first_writes) return false;
     mem[a] = v;
     if (fail_writes_after_store) return false;
     return true;
@@ -118,6 +119,21 @@ static void test_apply() {
     devourer::DeviceConfig::Tx on;
     on.ac_lifetime_us = 1000;
     CHECK(!devourer::apply_ac_tx_queue(dev, on), "failed write not reported");
+  }
+  {
+    /* The lifetime write fails, a later write would succeed: the enable must
+     * not be written, or the AC queues would age on a stale lifetime. */
+    auto regs = std::make_shared<FakeRegs>();
+    RtlAdapter dev(regs, logger);
+    regs->mem[devourer::kRegLifetimeEn] = 0x30;
+    regs->fail_first_writes = 1;
+    devourer::DeviceConfig::Tx on;
+    on.ac_lifetime_us = 1000;
+    CHECK(!devourer::apply_ac_tx_queue(dev, on),
+          "failed lifetime write not reported");
+    CHECK(regs->read8(devourer::kRegLifetimeEn) == 0x30,
+          "enable written after a failed lifetime write: 0x%02x",
+          regs->read8(devourer::kRegLifetimeEn));
   }
 }
 

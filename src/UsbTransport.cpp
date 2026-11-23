@@ -1,6 +1,7 @@
 #include "UsbTransport.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -1284,7 +1285,7 @@ bool UsbTransport::tx_async(uint8_t tx_ep, uint8_t *packet, size_t length,
    * the first send used to clear_halt; a mid-stream stall (e.g. hardware NDP
    * generation on some xhci hosts) then stayed wedged forever. */
   for (uint32_t w = _tx_wedged_eps.exchange(0); w; w &= w - 1) {
-    const uint8_t ep = static_cast<uint8_t>(__builtin_ctz(w)); /* OUT: bit 7 clear */
+    const uint8_t ep = static_cast<uint8_t>(std::countr_zero(w)); /* OUT: bit 7 clear */
     int hr = libusb_clear_halt(_dev_handle, ep);
     _logger->info("TX EP 0x{:02X} re-clear_halt after wedge rc={}", (int)ep, hr);
   }

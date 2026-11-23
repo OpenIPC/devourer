@@ -356,6 +356,13 @@ struct AdapterCaps {
    * each). False elsewhere: the knobs are ignored and the host sees every
    * frame. */
   bool rx_mac_filters_ok = false;
+  /* DeviceConfig::Tx::data_on_be and ac_lifetime_us are applied: DATA rides
+   * an AC queue and the MAC ages it out at the lifetime. TRUE on Jaguar1's
+   * RTL8812A with exactly three bulk-OUT endpoints (on air: one 8812AU).
+   * False elsewhere, including the 8814A, 8821A and two- or four-endpoint
+   * parts: the knobs are ignored (with a warn log) and DATA keeps MGMT,
+   * which is never aged. */
+  bool tx_ac_lifetime_ok = false;
 
   /* --- feature flags --- */
   /* Per-packet TX power: a per-frame power trim driven by radiotap

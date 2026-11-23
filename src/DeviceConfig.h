@@ -320,6 +320,7 @@ struct DeviceConfig {
      * endpoint follows the final QSEL. Applied by Jaguar1 on the RTL8812A
      * with three bulk-OUT endpoints (the 8814A, 8821A and two-endpoint parts
      * are unmeasured and log that it is not applied); other backends ignore
+     * it. AdapterCaps::tx_ac_lifetime_ok says whether this adapter applies
      * it. Default off: descriptors and endpoints unchanged. */
     bool data_on_be = false;
     /* env: DEVOURER_TX_AC_LIFETIME_US — the MAC drops a frame from an AC

@@ -279,6 +279,7 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
       _cfg.tx.ack_timeout_us > 255   ? 255
       : _cfg.tx.ack_timeout_us < 1 ? 1
                                      : _cfg.tx.ack_timeout_us));
+  apply_ac_tx_queue_knobs();
 
   /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
    * (issue #217, the narrowband CFO lever). */
@@ -923,20 +924,6 @@ void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
       !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
     throw std::runtime_error(
         "Jaguar2: configured ACK responder could not be armed");
-  /* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US: after MAC init, before a
-   * configured A-MPDU mode and the debug replay. */
-  if (_cfg.tx.data_on_be || _cfg.tx.be_fast_retry || _cfg.tx.ac_lifetime_us) {
-    if (!ac_queue_ok()) {
-      _logger->warn("Jaguar2: tx.data_on_be / be_fast_retry / ac_lifetime_us "
-                    "not applied: measured on the RTL8822B with three "
-                    "bulk-OUT endpoints only");
-    } else {
-      std::lock_guard<std::mutex> lk(_reg_mu);
-      if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
-        throw std::runtime_error(
-            "Jaguar2: AC-queue options could not be set");
-    }
-  }
   if (_cfg.tx.ampdu)
     SetAmpduMode(*_cfg.tx.ampdu); /* DEVOURER_TX_AMPDU_MODE */
   apply_replay_wseq();
@@ -1450,6 +1437,7 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * bench cell yet, so its flags stay false-as-unmeasured. */
   c.ack_responder_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.rx_mac_filters_ok = true;
+  c.tx_ac_lifetime_ok = c.tx_be_fast_retry_ok = ac_queue_ok();
   c.tx_retry_limit_ok = _variant == jaguar2::ChipVariant::C8822B;
   /* station_mode_ok: the 8822B die only - both halves measured on one
    * RTL8812BU by tests/realtek_station_onair.sh (numbers and limits at the
@@ -1560,6 +1548,23 @@ devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
 bool RtlJaguar2Device::ac_queue_ok() const {
   return _variant == jaguar2::ChipVariant::C8822B &&
          _device.bulk_out_ep_count() == 3;
+}
+
+/* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US, from bring_up, so both Init
+ * and InitWrite program them: data_on_be routes DATA to BE after either.
+ * After MAC init, before a configured A-MPDU mode and the debug replay. */
+void RtlJaguar2Device::apply_ac_tx_queue_knobs() {
+  if (!devourer::ac_tx_queue_requested(_cfg.tx))
+    return;
+  if (!ac_queue_ok()) {
+    _logger->warn("Jaguar2: tx.data_on_be / be_fast_retry / ac_lifetime_us "
+                  "not applied: measured on the RTL8822B with three "
+                  "bulk-OUT endpoints only");
+    return;
+  }
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+    throw std::runtime_error("Jaguar2: AC-queue options could not be set");
 }
 
 /* Bulk-OUT endpoint for a built TXDMA block. Every frame leaves on the

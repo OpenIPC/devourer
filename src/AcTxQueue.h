@@ -59,6 +59,12 @@ constexpr uint32_t pkt_life_time_reg(unsigned us) {
   return (units << 16) | units;
 }
 
+/* Any of the AC-queue knobs set (data_on_be, be_fast_retry, ac_lifetime_us):
+ * the backends warn once when the adapter does not apply them. */
+constexpr bool ac_tx_queue_requested(const DeviceConfig::Tx &tx) {
+  return tx.data_on_be || tx.be_fast_retry || tx.ac_lifetime_us > 0;
+}
+
 /* Programs be_fast_retry and ac_lifetime_us. Called once per bring-up,
  * after the backend's MAC/EDCA init, before a configured SetAmpduMode is
  * re-applied (on the RTL8733B the A-MPDU mode then saves and restores the

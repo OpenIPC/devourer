@@ -166,11 +166,11 @@ Jaguar1 (shared `PhyTableLoader`).
   `0x0000a42b`: TXOP limit already 0 (the backend never writes BE), CW
   15..1023. With the peer not ACKing (RTL8812BU, MCS4, retry 16) a BE
   frame's 17 airings took 63.8 ms against 8.4 ms on MGMT, all from the
-  window doubling. `DeviceConfig::Tx::be_fast_retry` pins CWmax to CWmin
-  (9.2 ms); `data_on_be` is what puts DATA on BE here, routed to the LOW
-  endpoint so QSEL and endpoint agree; with it off every frame stays on the
-  first endpoint, as before. Applied on the 8822B with three bulk-OUT
-  endpoints only (`ac_queue_ok`); the 8821C logs that it is not applied.
+  window doubling; `be_fast_retry` brought it to 9.2 ms. The knob semantics
+  live in `DeviceConfig::Tx` (`data_on_be`, `be_fast_retry`,
+  `ac_lifetime_us`). Here: applied on the 8822B with three bulk-OUT
+  endpoints only (`ac_queue_ok`, `AdapterCaps::tx_ac_lifetime_ok`), from
+  both `Init` and `InitWrite`; the 8821C logs that it is not applied.
   Measured on one 8812BU sending to an MT7612U, ch 100, near field, against
   stock master: a peer that never ACKs, delivered age max 1.18 s stock and
   with the knobs off, 68.8 ms at `ac_lifetime_us=68000`, 20.8 ms at 20000

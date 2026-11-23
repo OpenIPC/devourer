@@ -473,6 +473,8 @@ private:
    * captured kernel register-write stream verbatim at the end of InitWrite —
    * the hardware-diff lever (same as Jaguar2's; found the 8822B RF18 bug). */
   void apply_replay_wseq();
+  bool ac_queue_ok() const;
+  void apply_ac_tx_queue_knobs();
   /* 8822E eFEM (rfe 21-24) GPIO pin-function routing — kernel-parity port of
    * _efem_pinmux_config/pinmux_set_func_8822e for RFE_CTRL_3/5/7/8/9/11.
    * Routes the DPDT antenna transfer switch to the RFE engine (hardware

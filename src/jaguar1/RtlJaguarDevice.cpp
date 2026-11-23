@@ -874,7 +874,7 @@ bool RtlJaguarDevice::ac_queue_ok() const {
 }
 
 void RtlJaguarDevice::apply_ac_tx_queue_knobs() {
-  if (!_cfg.tx.data_on_be && !_cfg.tx.ac_lifetime_us && !_cfg.tx.be_fast_retry)
+  if (!devourer::ac_tx_queue_requested(_cfg.tx))
     return;
   if (!ac_queue_ok()) {
     _logger->warn("Jaguar1: tx.data_on_be / be_fast_retry / ac_lifetime_us not applied: "

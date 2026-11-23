@@ -324,19 +324,20 @@ struct DeviceConfig {
      * (jaguar3/TxQueueMap.h). Unmeasured parts sharing that code (8814A,
      * 8821A, 8821C, two-endpoint adapters) log that it is not applied;
      * other backends ignore it. AdapterCaps::tx_ac_lifetime_ok says whether
-     * this adapter applies it. Default off: descriptors and endpoints
+     * the lifetime reaches DATA on this adapter. Default off: descriptors and endpoints
      * unchanged. On the RTL8733B, DATA on BE keeps the BE queue's 3 ms TXOP
      * unless be_fast_retry is also set (a BE frame every ~3.3 ms was
      * measured there, rtl8733b/Rtl8733bDevice.cpp); the 8733B figures are
      * for all three knobs on. */
     bool data_on_be = false;
-    /* env: DEVOURER_TX_BE_FAST_RETRY=1 — at TX bring-up, clear the BE
-     * queue's EDCA TXOP limit and pull its CWmax down to its CWmin
+    /* env: DEVOURER_TX_BE_FAST_RETRY=1 — at bring-up, clear the BE queue's
+     * EDCA TXOP limit and pull its CWmax down to its CWmin
      * (REG_EDCA_BE_PARAM 0x0508; AIFS and CWmin kept), so retries on BE
      * re-air back to back the way MGMT's do instead of doubling the window
      * up to 1023 slots. Not the hardware "Fast EDCA" thresholds. Applied on
-     * the RTL8822B, RTL8822C, RTL8822E and RTL8733B. Not on the RTL8812A, where clearing its
-     * 3 ms BE TXOP cut saturated throughput by up to two thirds and the
+     * the RTL8822B, RTL8822C, RTL8822E and RTL8733B
+     * (AdapterCaps::tx_be_fast_retry_ok). Not on the RTL8812A, where clearing
+     * its 3 ms BE TXOP cut saturated throughput by up to two thirds and the
      * lifetime alone holds the bound; it logs that it is ignored there. The
      * counterpart: BE gives up exponential backoff, as MGMT already has, so
      * it contends harder than stock BE against other stations' traffic. */
@@ -347,7 +348,8 @@ struct DeviceConfig {
      * REG_PKT_LIFE_TIME 0x04C0; 256 us units, rounded up, max ~16.8 s).
      * 0 = off: no register touched. MGMT is never aged, so it needs
      * data_on_be. Applied on the RTL8812A, RTL8822B, RTL8822C, RTL8822E and
-     * RTL8733B (a Jaguar3 part puts DATA on BE by itself, see data_on_be).
+     * RTL8733B (AdapterCaps::tx_ac_lifetime_ok; a Jaguar3 part puts DATA on
+     * BE by itself, see data_on_be).
      * Measured on one RTL8812AU,
      * 500 fps of 1400 B at MCS4, retry 16, a peer that hears but never ACKs:
      * a delivered age max of 68.8-71 ms at 68000 and 21.0 ms at 20000, against

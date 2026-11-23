@@ -74,6 +74,7 @@ public:
   /* DEVOURER_TX_DATA_BE endpoint routing (RtlJaguar2Device.cpp). */
   uint8_t tx_ep_for(const uint8_t *txdesc) const;
   bool ac_queue_ok() const;
+  void apply_ac_tx_queue_knobs();
   /* Batch TX with USB aggregation (IRadio contract): with
    * cfg.tx.usb_agg_max > 1 consecutive frames are packed into shared bulk-OUT
    * URBs — one [txdesc][frame] block per frame, first descriptor carrying the

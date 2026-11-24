@@ -355,7 +355,8 @@ struct DeviceConfig {
      * a delivered age max of 68.8-71 ms at 68000 and 21.0 ms at 20000, against
      * 3-9.5 s stock (the frames wait out every retry). The counterpart: a
      * frame a slow-to-ACK peer would still have taken is dropped as well,
-     * and the drop is reported nowhere; count delivery at the receiver. */
+     * and the drop is reported nowhere; count delivery at the receiver.
+     * Harness: tests/ac_lifetime_onair.sh. */
     unsigned ac_lifetime_us = 0;
     /* env: DEVOURER_TX_USB_AGG — USB TX aggregation: max frames packed into
      * one bulk-OUT URB by send_packets (0 = off, the default: send_packets

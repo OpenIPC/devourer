@@ -600,7 +600,7 @@ paths) and the HDZero at the "further" position on ch 140, two runs each:
 | IGI | above -83 dBm | level | `nhm_env` |
 |---|---|---|---|
 | 0x20 (control) | 100 % | ≥ -75 | 99 |
-| 0x35 (the default 40/80 MHz `wide_tx_igi_floor`) | 100 % | ≥ -75 | **0** |
+| 0x35 (the default 40/80 MHz `wide_tx_igi_floor`) | 100 % | ≥ -75 | **0-3** |
 
 What these numbers do not cover:
 

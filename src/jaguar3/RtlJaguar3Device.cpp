@@ -1,6 +1,7 @@
 #include "RxFilter.h"
 #include "RtlJaguar3Device.h"
 #include "TxQueueMap.h"
+#include "AcTxQueue.h"
 #include "PktBufWindow.h"
 #include "InitTimer.h"
 
@@ -203,6 +204,7 @@ void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
       !SetAckResponder(*_cfg.rx.ack_responder)) /* DEVOURER_ACK_RESPONDER */
     throw std::runtime_error(
         "Jaguar3: configured ACK responder could not be armed");
+  apply_ac_tx_queue_knobs();
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ — end of both bring-ups,
                         * like Jaguar2's. */
   if (_cfg.debug.bb_dump) {
@@ -845,6 +847,27 @@ void RtlJaguar3Device::apply_dpdt_route_8822e() {
   }
 }
 
+/* Three bulk-OUT endpoints: DATA rides BE (TxQueueMap.h), where the
+ * lifetime reaches it. */
+bool RtlJaguar3Device::ac_queue_ok() const {
+  return jaguar3::per_queue_routing(_device.bulk_out_ep_count());
+}
+
+/* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US, from both bring-ups (Init
+ * and InitWrite): with three bulk-OUT endpoints DATA rides BE after either
+ * (TxQueueMap.h), so the lifetime must be programmed after either. After
+ * init_edca_cfg, before the debug replay (which keeps the last word) and
+ * before the coex thread starts, so no _reg_mu. Both Jaguar3 parts, the
+ * RTL8822C and RTL8822E, were measured with three bulk-OUT endpoints; below
+ * that DATA stays on MGMT, which is never aged. */
+void RtlJaguar3Device::apply_ac_tx_queue_knobs() {
+  if (_cfg.tx.ac_lifetime_us && !ac_queue_ok())
+    _logger->warn("Jaguar3: tx.ac_lifetime_us does not reach DATA with fewer "
+                  "than three bulk-OUT endpoints (DATA stays on MGMT)");
+  if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+    throw std::runtime_error("Jaguar3: AC-queue options could not be set");
+}
+
 /* Golden-init replay — same file format as Jaguar2's ("%x %u %llx" = addr
  * width value per line, tests/decode_wseq.py output). */
 void RtlJaguar3Device::apply_replay_wseq() {
@@ -1201,6 +1224,10 @@ void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
       _cfg.tx.ack_timeout_us > 255   ? 255
       : _cfg.tx.ack_timeout_us < 1 ? 1
                                      : _cfg.tx.ack_timeout_us));
+  /* Inside the pipelined write batch, so a failed write most likely surfaces
+   * at batch.end() rather than as the helper's throw; bring-up fails either
+   * way. */
+  apply_ac_tx_queue_knobs();
   apply_replay_wseq(); /* DEVOURER_REPLAY_WSEQ golden-init replay (debug) */
   if (_cfg.debug.bb_dump) {
     /* Full MAC+BB dump (0x000..0x4ffc — MAC plane, then BB incl. the RF
@@ -1991,6 +2018,8 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   /* TxMode::no_agg: AGG_EN=0 + BK=1 in build_tx_block. */
   c.tx_no_agg_ok = true;
   c.rx_mac_filters_ok = true;
+  c.tx_ac_lifetime_ok = ac_queue_ok();
+  c.tx_be_fast_retry_ok = true;
   /* Per-packet TX power: the TXPWR_OFSET_TYPE bank selector + programmable
    * 0x1e70 offset banks (SetTxPacketPowerOffsetQdb / radiotap DBM_TX_POWER;
    * TxPktPwrBanks.h). Continuous in step_qdb units, ±63/-64 index travel, 2

@@ -1,9 +1,12 @@
 /* Headless guard for src/AcTxQueue.h, the register arithmetic behind
- * DeviceConfig::Tx::ac_lifetime_us:
+ * DeviceConfig::Tx::be_fast_retry and ac_lifetime_us:
+ *   - edca_fast_retry: TXOP limit cleared, CWmax pulled down to CWmin,
+ *     AIFS and CWmin kept, on the vendor BE words of every generation that
+ *     applies it;
  *   - pkt_life_time_reg: 256 us units rounded up, both halves equal,
  *     clamped to the 16-bit field;
  *   - apply_ac_tx_queue through an RtlAdapter on a fake transport (the
- *     ack_responder_selftest shape): nothing touched with the lifetime off,
+ *     ack_responder_selftest shape): nothing touched with both options off,
  *     REG_LIFETIME_EN's other bits preserved, a failed write reported;
  *   - dot11_is_data on the Frame Control type bits.
  * Prints the failing case and exits nonzero. */
@@ -77,6 +80,27 @@ public:
 
 } // namespace
 
+static void test_edca() {
+  using devourer::edca_fast_retry;
+  /* RTL8733B / Jaguar1 / Jaguar3 vendor BE: TXOP 0x5e, CW 15..1023, AIFS
+   * 0x2b. Jaguar2's power-on BE (TXOP already 0). Jaguar3 5 MHz BE. */
+  CHECK(edca_fast_retry(0x005ea42bu) == 0x0000442bu, "8733B/J3 BE -> 0x%08x",
+        edca_fast_retry(0x005ea42bu));
+  CHECK(edca_fast_retry(0x0000a42bu) == 0x0000442bu, "J2 BE -> 0x%08x",
+        edca_fast_retry(0x0000a42bu));
+  CHECK(edca_fast_retry(0x005ea48eu) == 0x0000448eu, "J3 5M BE -> 0x%08x",
+        edca_fast_retry(0x005ea48eu));
+  /* Every word: TXOP 0, ECWmax == ECWmin, AIFS and ECWmin unchanged. */
+  for (uint32_t w : {0x00000000u, 0xffffffffu, 0x002fa226u, 0x0000a44fu,
+                     0x07ff3f01u}) {
+    const uint32_t f = edca_fast_retry(w);
+    CHECK((f >> 16) == 0, "0x%08x: TXOP left 0x%x", w, f >> 16);
+    CHECK(((f >> 12) & 0xf) == ((w >> 8) & 0xf), "0x%08x: ECWmax 0x%x", w,
+          (f >> 12) & 0xf);
+    CHECK((f & 0xfff) == (w & 0xfff), "0x%08x: AIFS/ECWmin changed", w);
+  }
+}
+
 static void test_lifetime() {
   using devourer::pkt_life_time_reg;
   CHECK(pkt_life_time_reg(30000) == 0x00760076u, "30 ms -> 0x%08x",
@@ -96,28 +120,40 @@ static void test_apply() {
     RtlAdapter dev(regs, logger);
     devourer::DeviceConfig::Tx off;
     off.data_on_be = true; /* the endpoint/QSEL knob alone touches no register */
-    CHECK(devourer::apply_ac_tx_queue(dev, off), "off: reported failure");
-    CHECK(regs->write_calls == 0, "off: %d register writes",
+    CHECK(devourer::apply_ac_tx_queue(dev, off), "both off: reported failure");
+    CHECK(regs->write_calls == 0, "both off: %d register writes",
           regs->write_calls);
   }
   {
     auto regs = std::make_shared<FakeRegs>();
     RtlAdapter dev(regs, logger);
+    regs->write32(devourer::kRegEdcaBeParam, 0x005ea42bu);
     regs->write8(devourer::kRegLifetimeEn, 0x30); /* bits 4, 5: others' */
     devourer::DeviceConfig::Tx on;
+    on.be_fast_retry = true;
     on.ac_lifetime_us = 60000;
     CHECK(devourer::apply_ac_tx_queue(dev, on), "on: reported failure");
+    CHECK(regs->read32(devourer::kRegEdcaBeParam) == 0x0000442bu, "BE 0x%08x",
+          regs->read32(devourer::kRegEdcaBeParam));
     CHECK(regs->read8(devourer::kRegLifetimeEn) == 0x3f, "LIFETIME_EN 0x%02x",
           regs->read8(devourer::kRegLifetimeEn));
     CHECK(regs->read32(devourer::kRegPktLifeTime) == 0x00eb00ebu,
           "PKT_LIFE_TIME 0x%08x", regs->read32(devourer::kRegPktLifeTime));
+    /* Lifetime alone leaves the EDCA word alone. */
+    regs->write32(devourer::kRegEdcaBeParam, 0x005ea42bu);
+    devourer::DeviceConfig::Tx lt;
+    lt.ac_lifetime_us = 1000;
+    CHECK(devourer::apply_ac_tx_queue(dev, lt), "lifetime: reported failure");
+    CHECK(regs->read32(devourer::kRegEdcaBeParam) == 0x005ea42bu,
+          "lifetime alone moved BE to 0x%08x",
+          regs->read32(devourer::kRegEdcaBeParam));
   }
   {
     auto regs = std::make_shared<FakeRegs>();
     RtlAdapter dev(regs, logger);
     regs->fail_writes = true;
     devourer::DeviceConfig::Tx on;
-    on.ac_lifetime_us = 1000;
+    on.be_fast_retry = true;
     CHECK(!devourer::apply_ac_tx_queue(dev, on), "failed write not reported");
   }
   {
@@ -145,6 +181,7 @@ static void test_is_data() {
 }
 
 int main() {
+  test_edca();
   test_lifetime();
   test_apply();
   test_is_data();

@@ -183,6 +183,7 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (env_long_strict("DEVOURER_TX_RETRY_LIMIT", &v))
     cfg.tx.retry_limit = static_cast<int>(v < 0 ? 0 : (v > 63 ? 63 : v));
   cfg.tx.data_on_be = env_flag("DEVOURER_TX_DATA_BE");
+  cfg.tx.be_fast_retry = env_flag("DEVOURER_TX_BE_FAST_RETRY");
   if (env_long_strict("DEVOURER_TX_AC_LIFETIME_US", &v) && v > 0)
     cfg.tx.ac_lifetime_us = static_cast<unsigned>(
         std::min<unsigned long long>(static_cast<unsigned long long>(v), UINT_MAX));

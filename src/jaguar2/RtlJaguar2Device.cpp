@@ -1,6 +1,7 @@
 #include "RxFilter.h"
 #include "RtlJaguar2Device.h"
 #include "PktBufWindow.h"
+#include "AcTxQueue.h"
 
 #include <algorithm>
 #include <climits>
@@ -278,6 +279,7 @@ void RtlJaguar2Device::bring_up(SelectedChannel channel) {
       _cfg.tx.ack_timeout_us > 255   ? 255
       : _cfg.tx.ack_timeout_us < 1 ? 1
                                      : _cfg.tx.ack_timeout_us));
+  apply_ac_tx_queue_knobs();
 
   /* DEVOURER_XTAL_CAP — apply the crystal-cap trim once the AFE is up
    * (issue #217, the narrowband CFO lever). */
@@ -1435,6 +1437,7 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
    * bench cell yet, so its flags stay false-as-unmeasured. */
   c.ack_responder_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.rx_mac_filters_ok = true;
+  c.tx_ac_lifetime_ok = c.tx_be_fast_retry_ok = ac_queue_ok();
   c.tx_retry_limit_ok = _variant == jaguar2::ChipVariant::C8822B;
   /* station_mode_ok: the 8822B die only - both halves measured on one
    * RTL8812BU by tests/realtek_station_onair.sh (numbers and limits at the
@@ -1540,6 +1543,48 @@ devourer::ThermalStatus RtlJaguar2Device::GetThermalStatus() {
   return t;
 }
 
+/* The AC-queue knobs are measured on the RTL8822B with three bulk-OUT
+ * endpoints only; the 8821C shares this code but not a measurement. */
+bool RtlJaguar2Device::ac_queue_ok() const {
+  return _variant == jaguar2::ChipVariant::C8822B &&
+         _device.bulk_out_ep_count() == 3;
+}
+
+/* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US, from bring_up, so both Init
+ * and InitWrite program them: data_on_be routes DATA to BE after either.
+ * After MAC init, before a configured A-MPDU mode and the debug replay. */
+void RtlJaguar2Device::apply_ac_tx_queue_knobs() {
+  if (!devourer::ac_tx_queue_requested(_cfg.tx))
+    return;
+  if (!ac_queue_ok()) {
+    _logger->warn("Jaguar2: tx.data_on_be / be_fast_retry / ac_lifetime_us "
+                  "not applied: measured on the RTL8822B with three "
+                  "bulk-OUT endpoints only");
+    return;
+  }
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+    throw std::runtime_error("Jaguar2: AC-queue options could not be set");
+}
+
+/* Bulk-OUT endpoint for a built TXDMA block. Every frame leaves on the
+ * first endpoint, as it always has, unless DEVOURER_TX_DATA_BE is set: then
+ * the block follows its descriptor QSEL through the 3-bulk-OUT TXDMA_PQ_MAP
+ * init_trx_cfg writes (BE/BK -> LOW, VI/VO -> NORMAL, the rest -> HIGH), as
+ * Jaguar3 routes, so queue and endpoint agree. */
+uint8_t RtlJaguar2Device::tx_ep_for(const uint8_t *txdesc) const {
+  if (!_cfg.tx.data_on_be || !ac_queue_ok())
+    return _device.first_bulk_out_ep();
+  switch (txdesc[0x05] & 0x1f) { /* QSEL: dword1 [12:8], SET_TX_DESC_QSEL_8822B */
+  case 0: case 1: case 2: case 3:
+    return _device.nth_bulk_out_ep(2);
+  case 4: case 5: case 6: case 7:
+    return _device.nth_bulk_out_ep(1);
+  default:
+    return _device.first_bulk_out_ep();
+  }
+}
+
 bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
   /* Build one TXDMA block (48-byte descriptor + frame, build_tx_block) and
    * synchronously bulk-OUT. The TX antenna paths are enabled during bring_up,
@@ -1559,7 +1604,7 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
       jaguar2::TXDESC_SIZE_8822B + static_cast<size_t>(pkt_offset) * 8 + frame_len, 0);
   if (build_tx_block(packet, length, usb_frame.data(), pkt_offset) == 0)
     return false;
-  int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
+  int rc = _device.bulk_send_data_sync_ep(tx_ep_for(usb_frame.data()),
                                      usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
   /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` would also cover
@@ -1599,6 +1644,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
      * build_tx_block when that frame leads the next URB. */
     std::vector<size_t> lens;
     int run_chan = 0; /* 0 = no per-packet CHANNEL seen yet (current channel) */
+    bool run_data = false;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       const uint16_t rlen =
           devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
@@ -1606,6 +1652,16 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
         if (lens.empty())
           ++done; /* skip a malformed leading frame (contract: skipped) */
         break;
+      }
+      /* DEVOURER_TX_DATA_BE: DATA and the rest leave on different endpoints
+       * and one URB goes to one — a change of frame type ends the run. */
+      if (_cfg.tx.data_on_be && ac_queue_ok()) {
+        const bool data =
+            pkts[i].len > rlen && devourer::dot11_is_data(pkts[i].data[rlen]);
+        if (lens.empty())
+          run_data = data;
+        else if (data != run_data)
+          break;
       }
       const int want =
           devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
@@ -1653,7 +1709,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
     SET_TX_DESC_DMA_TXAGG_NUM_8822B(first, plan.frames());
     jaguar2::cal_txdesc_chksum_8822b(first);
 
-    const int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
+    const int rc = _device.bulk_send_data_sync_ep(tx_ep_for(first),
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/50);
     /* Full write or nothing submitted: a truncated URB means the chip got a
@@ -1665,8 +1721,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
     if (rc >= 0 && !sent_all)
       _logger->error("8822B aggregated TX short on EP 0x{:02x}: {}/{} "
                      "({} frames dropped)",
-                     _device.first_bulk_out_ep(), rc, urb.size(),
-                     plan.frames());
+                     tx_ep_for(first), rc, urb.size(), plan.frames());
     devourer::Ev(_logger->events(), "tx.agg")
         .f("frames", (unsigned long long)plan.frames())
         .f("bytes", (unsigned long long)urb.size())
@@ -1899,6 +1954,13 @@ size_t RtlJaguar2Device::build_tx_block(const uint8_t *packet, size_t length,
    * has the measurement). Same checksummed span as the retry limit. */
   if (_cfg.tx.retry_fallback == devourer::RetryFallback::Off)
     SET_TX_DESC_DISDATAFB_8822B(out, 1);
+  /* DEVOURER_TX_DATA_BE: DATA frames ride BE (QSEL 0) and tx_ep_for routes
+   * the block to that queue's endpoint; a SetAmpduMode TID or
+   * DEVOURER_TX_QSEL below wins, and the endpoint follows it. Checksummed
+   * span. */
+  if (_cfg.tx.data_on_be && ac_queue_ok() && frame_len >= 1 &&
+      devourer::dot11_is_data(dot11[0]))
+    SET_TX_DESC_QSEL_8822B(out, 0);
   jaguar2::cal_txdesc_chksum_8822b(out);
   const devourer::AmpduMode am = _ampdu; /* one lock-free load */
   if (am.enabled || _cfg.debug.tx_qsel || _cfg.debug.tx_ampdu_max) {

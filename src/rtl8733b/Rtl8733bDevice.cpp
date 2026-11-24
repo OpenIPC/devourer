@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "AcTxQueue.h"
 #include "AckResponder.h" /* hardware ACK responder recipe */
 #include "RateDefinitions.h"
 #include "RadiotapPeek.h" /* send_packets batch pre-parse */
@@ -249,6 +250,10 @@ void Rtl8733bDevice::InitWrite(SelectedChannel channel) {
       throw std::runtime_error("RTL8733B monitor RX configuration failed");
     _tx_ready = true;
     _tx_submits = 0;
+    /* DEVOURER_TX_BE_FAST_RETRY / _AC_LIFETIME_US, after init_edca and
+     * before the A-MPDU mode captures the EDCA word it later restores. */
+    if (!devourer::apply_ac_tx_queue(_device, _cfg.tx))
+      throw std::runtime_error("RTL8733B AC-queue options could not be set");
     /* DEVOURER_TX_AMPDU_MODE: MAC init rewrote the pacing registers, so a
      * recorded mode is re-applied on every TX bring-up. */
     if (_cfg.tx.ampdu && !_ampdu.enabled)
@@ -793,6 +798,7 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
      * outright and it must not be packed beside frames that would have
      * aired. */
     std::vector<size_t> lens;
+    bool run_data = false;
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       /* A null view is treated exactly like a malformed one: it ends the run
        * and, if it led, is skipped per the IRadio::send_packets
@@ -803,6 +809,17 @@ size_t Rtl8733bDevice::send_packets(const TxPacketView *pkts, size_t count) {
               : devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
       if (rlen == 0)
         break;
+      /* DEVOURER_TX_DATA_BE: DATA rides BE and everything else MGMT, on
+       * different endpoints, and one URB goes to one endpoint — a change of
+       * frame type ends the run. */
+      if (_cfg.tx.data_on_be) {
+        const bool data =
+            pkts[i].len > rlen && devourer::dot11_is_data(pkts[i].data[rlen]);
+        if (lens.empty())
+          run_data = data;
+        else if (data != run_data)
+          break;
+      }
       const int want =
           devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
       if (want > 0 && want != _channel.Channel) {
@@ -1044,6 +1061,10 @@ size_t Rtl8733bDevice::build_tx_block(const uint8_t *packet, size_t length,
   cfg.short_gi = short_gi;
   cfg.ldpc = ldpc;
   cfg.bmc = bmc;
+  /* DEVOURER_TX_DATA_BE: DATA frames ride BE; send_packet / send_packets
+   * route the block to the BE queue's endpoint through ep_for_qsel. */
+  if (_cfg.tx.data_on_be && devourer::dot11_is_data(dot11[0]))
+    cfg.qsel = 0;
   if (_ampdu.enabled) {
     cfg.qsel = static_cast<uint8_t>(_ampdu.tid & 0x07);
     cfg.agg_en = true;
@@ -1379,6 +1400,8 @@ devourer::AdapterCaps Rtl8733bDevice::GetAdapterCaps() {
    * src/rtl8733b/CLAUDE.md "Hardware ARQ"). */
   caps.ack_responder_ok = true;
   caps.rx_mac_filters_ok = true;
+  caps.tx_ac_lifetime_ok = true;
+  caps.tx_be_fast_retry_ok = true;
   caps.tx_retry_limit_ok = true;
   /* RX-LDPC measured absent, as the vendor HAL declares: 0 of 1542 MCS7/20
    * LDPC frames from an RTL8822BU decoded on the b733 against 1435/1542

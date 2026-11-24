@@ -1817,7 +1817,7 @@ target_include_directories(RxFilterSelftest PRIVATE src)
 add_test(NAME rx_filter COMMAND RxFilterSelftest)
 
 # Headless guard for the AC-queue register arithmetic (src/AcTxQueue.h) behind
-# DeviceConfig::Tx::ac_lifetime_us.
+# DeviceConfig::Tx::be_fast_retry / ac_lifetime_us.
 add_executable(AcTxQueueSelftest tests/ac_tx_queue_selftest.cpp)
 target_link_libraries(AcTxQueueSelftest PRIVATE devourer PkgConfig::libusb)
 target_include_directories(AcTxQueueSelftest PRIVATE src)

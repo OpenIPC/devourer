@@ -311,10 +311,8 @@ those are the ones listed below.
   submitted, so first-light and regression captures get a clean teardown
   instead of a killed timed flood.
 - `DEVOURER_TX_VIA_INIT=<ms>` — txdemo brings the chip up through `Init()`
-  on its RX thread instead of `InitWrite()`, waits that long, then injects as
-  usual. For checking that a bring-up setting is there after either entry
-  point (`tests/ac_lifetime_onair.sh`); not on the RTL8733B, which cannot
-  send after `Init()`.
+  instead of `InitWrite()` before injecting; contract and backend limits at
+  its comment in `examples/tx/main.cpp`, harness `tests/ac_lifetime_onair.sh`.
 - `DEVOURER_TX_BEACON_TU=N` — txdemo arms a hardware TBTT beacon at N TU
   before injecting, on Jaguar2/3 only (unset/`0` = off); contract at its
   comment in

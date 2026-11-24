@@ -1075,8 +1075,10 @@ int main(int argc, char **argv) {
    * inject as usual. For checking that something a backend programs at
    * bring-up is there after either entry point (tests/ac_lifetime_onair.sh).
    * Init() only returns when its RX loop ends and nothing signals "brought
-   * up", so the value is how long to wait for it before the first send.
-   * Only for backends that can send after Init(): the RTL8733B cannot. */
+   * up", so the value is how long to wait for it before the first send: it
+   * has to cover the bring-up, and a send before that is not caught here.
+   * Jaguar1/2/3 only (run on an RTL8812AU, 8812BU and 8812CU): the RTL8733B
+   * and Kestrel do not enable TX from Init(), so every send is refused. */
   long via_init_ms = 0;
   if (const char *e = std::getenv("DEVOURER_TX_VIA_INIT"))
     via_init_ms = std::strtol(e, nullptr, 0);
@@ -1096,7 +1098,10 @@ int main(int argc, char **argv) {
    * one-bit-at-a-time form of DEVOURER_DIS_CCA (IRtlRadio::SetCcaGates) for
    * telling a preamble deferral from an energy deferral on a band where
    * injection stalls. Demo-local; applied once the MAC is up. */
-  if (const char *g = std::getenv("DEVOURER_CCA_GATES")) {
+  auto apply_cca_gates = [&] {
+    const char *g = std::getenv("DEVOURER_CCA_GATES");
+    if (!g)
+      return;
     int p = 0, e = 0;
     if (sscanf(g, "%d,%d", &p, &e) == 2) {
       auto *rtl = dynamic_cast<IRtlRadio *>(rtlDevice);
@@ -1106,7 +1111,9 @@ int main(int argc, char **argv) {
     } else {
       logger->error("DEVOURER_CCA_GATES: want <primary>,<edcca> (0/1 each)");
     }
-  }
+  };
+  if (!via_init) /* via Init() the MAC is not up yet: applied after the wait */
+    apply_cca_gates();
 
   write_sentinel(0xBEEF, "post-init/pre-TX");
   devourer::Ev(*g_ev, "init.timing")
@@ -1178,6 +1185,7 @@ int main(int argc, char **argv) {
     }
     logger->info("DEVOURER_TX_VIA_INIT: brought up through Init(), waited {} ms",
                  via_init_ms);
+    apply_cca_gates();
   }
 
   /* DEVOURER_STA_IDENTITY: arm before the first frame, once the RX loop is

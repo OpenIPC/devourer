@@ -7,8 +7,11 @@ line prefixed with the host monotonic time it arrived at.
 
 A frame's submit time is interpolated between txdemo's tx.frame anchors (it
 emits one in 500), and its age is the witness arrival of its last copy minus
-that. Exit 0 = every lifetime arm bounded and the control unbounded, 1 = a
-lifetime arm failed, 2 = the run cannot be judged (no control, nothing heard).
+that. Frames outside the anchored range are not scored: their submit time
+would be an extrapolation. Exit 0 = every lifetime arm bounded and the
+control unbounded, 1 = a lifetime arm failed (a transmitter that did not
+finish its frames included), 2 = the run cannot be judged (no lifetime arm,
+no control, nothing heard).
 """
 import argparse
 import bisect
@@ -40,6 +43,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--tol-ms", type=float, default=15.0)
+    ap.add_argument("--frames", type=int, default=0,
+                    help="frames each arm was asked to send (0 = unchecked)")
     a = ap.parse_args()
 
     marks = [l.split() for l in open(os.path.join(a.out, "marks"))]
@@ -48,6 +53,7 @@ def main():
            if not e.get("crc")]
 
     rows = []  # (arm, lifetime_ms, p50, p99, max, failed sends)
+    incomplete = []  # lifetime arms whose transmitter did not finish
     print(f"{'arm':<14}{'sent':>6}{'fail':>6}{'tx_s':>7}{'heard':>7}"
           f"{'copies':>8}{'age_p50':>10}{'age_p99':>10}{'age_max':>10}"
           "   (ms, last copy)")
@@ -59,6 +65,16 @@ def main():
         failed = 0
         for _, e in stamped(path, "tx.stats"):
             failed = e["failed"]
+        try:
+            rc = int(open(os.path.join(a.out, f"tx-{n}.rc")).read())
+        except (OSError, ValueError):
+            rc = 0
+        done = anchors[-1][0] if anchors else 0
+        # The last anchor is the last multiple of 500 at or below the bound.
+        if arm_lifetime_ms(arm) is not None and (
+                rc != 0 or done < a.frames - a.frames % 500):
+            incomplete.append(f"{arm}: txdemo exit {rc}, {done} of "
+                              f"{a.frames} frames")
         if len(anchors) < 2:
             print(f"{arm:<14} no tx.frame anchors (the DUT sent nothing)")
             rows.append((arm, arm_lifetime_ms(arm), None, None, None, failed))
@@ -74,7 +90,7 @@ def main():
 
         last, copies = {}, {}
         for t, p in wit:
-            if t0 <= t < t1:
+            if t0 <= t < t1 and counts[0] <= p + 1 <= counts[-1]:
                 last[p] = t
                 copies[p] = copies.get(p, 0) + 1
         if not last:
@@ -94,8 +110,8 @@ def main():
 
     lifetimes = [r[1] for r in rows if r[1] is not None]
     if not lifetimes:
-        print("[aclife] no lifetime arm: nothing to judge")
-        return 0
+        print("[aclife] ABORT: no lifetime arm, nothing to judge")
+        return 2
     # Every control must be clearly older than each bound it is compared
     # with. A control whose sends started failing counts too: the queue
     # filled, which is the unbounded case at its worst (on some parts txdemo
@@ -109,7 +125,9 @@ def main():
               "older than the lifetime - the peer ACKs or the retry chain is "
               "short")
         return 2
-    bad = 0
+    bad = len(incomplete)
+    for line in incomplete:
+        print(f"[aclife] FAIL {line}")
     for arm, life, p50, p99, _, _ in rows:
         if life is None:
             continue

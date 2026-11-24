@@ -27,7 +27,8 @@
 # Jaguar3 and RTL8733B parts measured); that is a separate bench
 # (tests/bench_onair.py).
 #
-# The RTL8733B cannot send after Init(), so leave the init: arms out there.
+# The init: arms are for Jaguar1/2/3: the RTL8733B and Kestrel cannot send
+# after Init(), so leave them out of ARMS there.
 # BE_FAST_RETRY=0 for Jaguar1, which ignores that knob and says so.
 #
 #   sudo bash tests/ac_lifetime_onair.sh
@@ -54,7 +55,7 @@ if [ -z "${TX_SA:-}" ]; then  # run-unique, so ambient traffic is excluded
     $((($$ >> 16) & 255)) $((($$ >> 8) & 255)) $(($$ & 255))
 fi
 OUT=${OUT:-/tmp/ac_lifetime}
-BLACKLIST=/run/modprobe.d/zz-temp-blacklist-ac-lifetime.conf
+BLACKLIST=/run/modprobe.d/zz-temp-blacklist-ac-lifetime-$$.conf
 MODS="rtw88_8812au rtw88_8821au rtw88_8814au rtw88_8822bu rtw88_8821cu
       rtw88_8822cu rtw88_8733bu rtw89_8852bu rtw89_8852cu"
 
@@ -63,21 +64,23 @@ for b in txdemo rxdemo; do
 done
 rm -rf "${OUT:?}"; mkdir -p "$OUT"
 
-WIT_P=""; TX_P=""
-esc_build=$(printf '%s' "$BUILD" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
+# WIT_P / TX_P are the demos themselves (their output goes to the stamper
+# through a process substitution, not a pipeline), so cleanup signals exactly
+# what this run started and wait returns the transmitter's own status.
+WIT_P=""; TX_P=""; BL_MINE=0
 cleanup() {
   trap - EXIT INT TERM
   for p in "$TX_P" "$WIT_P"; do [ -n "$p" ] && kill -INT "$p" 2>/dev/null; done
-  sleep 1
-  for b in txdemo rxdemo; do pkill -INT -f "^$esc_build/$b\$" 2>/dev/null; done
-  rm -f "$BLACKLIST"
   wait 2>/dev/null
+  [ "$BL_MINE" = 1 ] && rm -f "$BLACKLIST"
 }
 trap cleanup EXIT INT TERM
 
 # The in-tree drivers re-probe a dongle at every enumeration; modprobe -r alone
 # does not survive that.
-mkdir -p "$(dirname "$BLACKLIST")"; : >"$BLACKLIST"
+mkdir -p "$(dirname "$BLACKLIST")"
+[ -e "$BLACKLIST" ] && { echo "[aclife] $BLACKLIST exists - not mine"; exit 2; }
+: >"$BLACKLIST"; BL_MINE=1
 for m in $MODS; do
   echo "blacklist $m" >>"$BLACKLIST"; modprobe -r "$m" 2>/dev/null
 done
@@ -93,10 +96,10 @@ for l in sys.stdin:
 env DEVOURER_VID="$WIT_VID" DEVOURER_PID="$WIT_PID" DEVOURER_CHANNEL="$CH" \
     DEVOURER_RX_PCTR=1 DEVOURER_RX_AGG_SA="$TX_SA" \
     DEVOURER_LOG_LEVEL=warn DEVOURER_EVENTS=stdout \
-    "$BUILD/rxdemo" 2>"$OUT/wit.err" | stamp >"$OUT/wit.jsonl" &
+    "$BUILD/rxdemo" 2>"$OUT/wit.err" > >(stamp >"$OUT/wit.jsonl") &
 WIT_P=$!
 sleep 8
-pgrep -f "^$esc_build/rxdemo\$" >/dev/null || {
+kill -0 "$WIT_P" 2>/dev/null || {
   echo "[aclife] PREFLIGHT FAIL: the witness did not come up"
   tail -5 "$OUT/wit.err"; exit 2; }
 
@@ -112,14 +115,18 @@ for arm in $ARMS; do
   esac
   f="$OUT/tx-$n"
   echo "$n $arm $(now_ns)" >>"$OUT/marks"
-  env DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" DEVOURER_CHANNEL="$CH" \
+  # The four knobs under test are unset first: a caller's environment
+  # (sudo -E) must not turn a control into a knob arm or pick the bring-up.
+  env -u DEVOURER_TX_DATA_BE -u DEVOURER_TX_BE_FAST_RETRY \
+      -u DEVOURER_TX_AC_LIFETIME_US -u DEVOURER_TX_VIA_INIT \
+      DEVOURER_VID="$DUT_VID" DEVOURER_PID="$DUT_PID" DEVOURER_CHANNEL="$CH" \
       DEVOURER_TX_QOS_DATA=1 DEVOURER_TX_RA="$RA" DEVOURER_TX_SA="$TX_SA" \
       DEVOURER_TX_RATE="$RATE" DEVOURER_TX_PAYLOAD_BYTES="$PAYLOAD" \
       DEVOURER_TX_GAP_US="$GAP_US" DEVOURER_TX_FRAMES="$FRAMES" \
       DEVOURER_TX_RETRY_LIMIT="$RETRY" DEVOURER_TX_PWR_OFFSET_QDB="$PWR_QDB" \
       DEVOURER_LOG_LEVEL=warn DEVOURER_EVENTS=stdout "${knobs[@]}" \
-      timeout -s INT "$ARM_TIMEOUT" "$BUILD/txdemo" 2>"$f.err" |
-    stamp >"$f.jsonl" &
+      timeout -s INT "$ARM_TIMEOUT" "$BUILD/txdemo" 2>"$f.err" \
+      > >(stamp >"$f.jsonl") &
   TX_P=$!
   if [ "$n" = 1 ]; then
     # Fail in seconds, not after every arm: is the witness hearing the DUT?
@@ -130,10 +137,12 @@ for arm in $ARMS; do
       tail -5 "$f.err" "$OUT/wit.err"; exit 2; }
     echo "[aclife] preflight ok: $hits witness frames"
   fi
-  wait "$TX_P"; TX_P=""
+  wait "$TX_P"; echo $? >"$f.rc"; TX_P=""   # 124 = ARM_TIMEOUT cut it short
   grep -hE "not applied|does not reach|VIA_INIT: Init" "$f.err" | head -4
   sleep 3   # let the queue's tail air and the witness flush
 done
 echo "end end $(now_ns)" >>"$OUT/marks"
-kill -INT "$WIT_P" 2>/dev/null; sleep 1; WIT_P=""
-python3 "$ROOT/tests/ac_lifetime_analyze.py" "$OUT" --tol-ms "$TOL_MS"
+kill -INT "$WIT_P" 2>/dev/null; wait "$WIT_P" 2>/dev/null; WIT_P=""
+sleep 1   # the stampers drain after their demo exits
+python3 "$ROOT/tests/ac_lifetime_analyze.py" "$OUT" --tol-ms "$TOL_MS" \
+    --frames "$FRAMES"

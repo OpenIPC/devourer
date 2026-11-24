@@ -310,6 +310,9 @@ those are the ones listed below.
   unbounded). Exits through the ordinary `Stop()` path once N frames have been
   submitted, so first-light and regression captures get a clean teardown
   instead of a killed timed flood.
+- `DEVOURER_TX_VIA_INIT=<ms>` — txdemo brings the chip up through `Init()`
+  instead of `InitWrite()` before injecting; contract and backend limits at
+  its comment in `examples/tx/main.cpp`, harness `tests/ac_lifetime_onair.sh`.
 - `DEVOURER_TX_BEACON_TU=N` — txdemo arms a hardware TBTT beacon at N TU
   before injecting, on Jaguar2/3 only (unset/`0` = off); contract at its
   comment in

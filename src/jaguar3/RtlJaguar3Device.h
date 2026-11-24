@@ -277,7 +277,7 @@ private:
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
     /* A CLM arm rewrites CCX dwords the busy-NHM recipe cache holds
      * (period low half, ctrl bit0): recompose it on the next ArmNhmBusy. */
-    _nhm_busy_ready = false;
+    nhm_busy_forget();
     const Read32 rd = [this](uint16_t a) {
       return _device.rtw_read<uint32_t>(a);
     };
@@ -434,6 +434,14 @@ private:
    * channel set and by Init/InitWrite. */
   bool _nhm_busy_ready = false;
   uint32_t _nhm_busy_1e40 = 0, _nhm_busy_1e60 = 0;
+  /* A window armed by ArmNhmBusy whose result still describes the current
+   * channel: ReadNhmBusy answers only while it is set. A hop clears it but
+   * keeps the recipe (the hop does not touch 0x1e40/0x1e60). */
+  bool _nhm_busy_armed = false;
+  void nhm_busy_forget() {
+    _nhm_busy_ready = false;
+    _nhm_busy_armed = false;
+  }
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   devourer::RxPathActivityAccumulator _rxpaths;

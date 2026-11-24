@@ -354,7 +354,10 @@ static const uint32_t g_rx_busy_ms = []() -> uint32_t {
  * window), then a CLM busy window of N ms (ArmChannelBusy), then one
  * GetRxEnergy(with_nhm) for the IGI-relative nhm_env. Sequential because each
  * re-arms the shared engine and would spoil the others. One `rx.busycmp`
- * event per round. 0 = disabled. */
+ * event per round. 0 = disabled; capped at 240, CLM's own maximum, so both
+ * windows span the same time. The FA/CCA delta is also reset by the Jaguar3
+ * coex thread's ~2 s fa_stats tick, so a window that tick lands in reports
+ * only the counts since it. */
 static const uint32_t g_rx_nhm_busy_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_RX_NHM_BUSY_MS");
   if (!e)
@@ -363,7 +366,7 @@ static const uint32_t g_rx_nhm_busy_ms = []() -> uint32_t {
   const unsigned long v = std::strtoul(e, &end, 0);
   if (end == e || *end != '\0' || *e == '-')
     return 0u;
-  return static_cast<uint32_t>(v > 262 ? 262 : v); /* NHM period: 65535 x 4 us */
+  return static_cast<uint32_t>(v > 240 ? 240 : v);
 }();
 
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
@@ -1915,10 +1918,10 @@ int main(int argc, char **argv) {
       bool told_refused = false;
       while (!busycmp_stop.load()) {
         try {
-          /* 1. absolute NHM window + FA/CCA + frames over the same N ms */
-          dev->GetRxEnergy(false); /* reset the FA/CCA counters (no CCX access) */
-          const int f0 = g_rx_count.load();
-          const auto t0 = std::chrono::steady_clock::now();
+          /* 1. absolute NHM window + FA/CCA + frames over the same N ms.
+           * Arm first: a refused arm touches nothing, and the counter reset
+           * (which leaves an in-flight NHM window intact) and the frame
+           * snapshot then start with the window, not before its setup. */
           if (!dev->ArmNhmBusy(period)) {
             if (!told_refused)
               logger->info("DEVOURER_RX_NHM_BUSY_MS: arm refused (not Jaguar3, "
@@ -1927,6 +1930,9 @@ int main(int argc, char **argv) {
             nap(500);
             continue;
           }
+          dev->GetRxEnergy(false); /* reset the FA/CCA counters (no CCX access) */
+          const int f0 = g_rx_count.load();
+          const auto t0 = std::chrono::steady_clock::now();
           nap(g_rx_nhm_busy_ms);
           NhmBusy nb = dev->ReadNhmBusy();
           for (int i = 0; i < 5 && !nb.valid && !busycmp_stop.load(); ++i) {

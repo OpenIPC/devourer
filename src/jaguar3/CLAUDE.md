@@ -268,9 +268,11 @@ comparison with CLM / `fa_ofdm` / `nhm_env`: `docs/rx-spectrum-sensing.md`
 - **Recipe cache.** Holds the composed `0x1e40`/`0x1e60` dwords, which the
   CLM busy window shares; cleared by `with_ccx` (a CLM arm), by
   `GetRxEnergy(with_nhm)` — including via `GetRxQuality()` —, by
-  `SetMonitorChannel`, `FastSetBandwidth`, `Init` and `InitWrite`. It
-  survives `FastRetune` (the hop does not touch `0x1e40`/`0x1e60`), so a
-  window in flight across a hop spans both channels — arm after the hop.
+  `SetMonitorChannel`, `FastSetBandwidth`, `Stop`, `Init` and `InitWrite`.
+  It survives `FastRetune` (the hop does not touch `0x1e40`/`0x1e60`), but a
+  window armed before the hop reads back invalid rather than as a blend of
+  two channels. `Stop` does not clear `_brought_up`, so an arm issued after
+  it still succeeds — the same residual `ArmChannelBusy` carries (#443).
 - **The FA/CCA counter reset does not touch it.** phydm's "reset all
   counter" (`0x1eb4[25]`, pulsed by `GetRxEnergy` and the coex thread's ~2 s
   `fa_stats` tick) leaves an in-flight window intact. Measured on one

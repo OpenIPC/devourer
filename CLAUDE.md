@@ -341,7 +341,7 @@ those are the ones listed below.
   receiver anything".
 - `DEVOURER_RX_NHM_BUSY_MS=N` (rxdemo, Jaguar3) — three busy sensors in turn
   on one card, one `rx.busycmp` event per round: an absolute-threshold NHM
-  window of N ms (`IRtlRadio::ArmNhmBusy`, max 262) with the FA/CCA delta and
+  window of N ms (`IRtlRadio::ArmNhmBusy`, max 240) with the FA/CCA delta and
   decoded frames over that same window, an armed CLM window of N ms, then one
   `GetRxEnergy(true)` for `nhm_env`. Sequential because each re-arms the
   shared CCX engine; refused with the other CCX pollers. Results:
@@ -531,8 +531,10 @@ them chip-specific: plain `fa_ofdm` outperformed both new sensors on every part
 measured against an SDR carrier, so there this buys an airtime unit and a
 non-railing ratio rather than a new detection — but against two FPV video
 transmitters on their own channel `fa_ofdm` and `clm` both stayed at the quiet
-channel's level (one 8812EU sensor, 20 MHz only; Jaguar3 absolute-threshold
-NHM, below); `nhm_env` is referenced to the live IGI, so it is only dependable
+channel's level, while on the HDZero's adjacent channel both woke (`fa_ofdm`
+285-359, CLM 8-13 / 250 ms) (one 8812EU sensor, 20 MHz only; table in
+`docs/rx-spectrum-sensing.md` "Busy airtime above a fixed level");
+`nhm_env` is referenced to the live IGI, so it is only dependable
 where DIG is not free to walk the gain out from under it (the per-generation
 windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
 a sample, not a measurement.

@@ -43,6 +43,35 @@ inline int32_t sign_conversion(int32_t value, uint32_t total_bit) {
   return value;
 }
 
+/* Absolute NHM thresholds (Jaguar3 busy-airtime NHM, IRtlRadio::ArmNhmBusy).
+ * read_nhm (NhmReader.h) sets its thresholds from the live IGI, so a bucket
+ * means a different dBm whenever IGI moves; these are fixed. Unit PWdB
+ * U(8,1): th = 2*(dBm + 110). phydm's 11k table starts at -92 dBm, which
+ * clips a real 20 MHz 5 GHz floor (~-95); this one reaches -104 in the same
+ * 3 dB steps (phydm's NHM_DBG 1-dB mode shows the thresholds are free),
+ * 5 dB steps above -80, top bucket = above -70. */
+inline constexpr uint8_t nhm_th_from_dbm(int dbm) {
+  return static_cast<uint8_t>(2 * (dbm + 110));
+}
+
+inline constexpr int8_t kNhmAbsThDbm[11] = {-104, -101, -98, -95, -92, -89,
+                                             -86,  -83,  -80, -75, -70};
+
+inline void nhm_abs_thresholds(uint8_t th[11]) {
+  for (int i = 0; i < 11; i++)
+    th[i] = nhm_th_from_dbm(kNhmAbsThDbm[i]);
+}
+
+/* First bucket whose lower edge is `dbm` (bucket i >= 1 starts at
+ * kNhmAbsThDbm[i-1]), or -1 when `dbm` is not one of the edges: the share of
+ * buckets [result..11] is the airtime above `dbm`. */
+inline constexpr int nhm_abs_bucket_from(int dbm) {
+  for (int i = 0; i < 11; i++)
+    if (kNhmAbsThDbm[i] == dbm)
+      return i + 1;
+  return -1;
+}
+
 } // namespace nf
 } // namespace devourer
 

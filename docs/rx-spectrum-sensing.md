@@ -548,6 +548,78 @@ its first submit, and the harness now waits for that before the loaded arms.
 Why it takes that long is an open question on the Jaguar2 TX path, not on
 this sensor.
 
+## Busy airtime above a fixed level (`ArmNhmBusy`, Jaguar3)
+
+`IRtlRadio::ArmNhmBusy(period_4us)` / `ReadNhmBusy()` arm the NHM half of the
+CCX engine for the caller's own window (up to 65535 ticks, 262 ms) with
+**absolute** thresholds, `nf::kNhmAbsThDbm` in `src/NoiseFloorMath.h`
+(-104 … -70 dBm), CCA-busy samples counted and own TX excluded. The share of
+the buckets from `nf::nhm_abs_bucket_from(dbm)` up is the airtime above
+`dbm`. This is not the naive `nhm_busy` that rails on a quiet channel: the
+edges do not follow IGI, so a quiet 5 GHz floor stays in the -98…-89 dBm
+buckets and the share above -83 dBm reads 0-0.4 %. Jaguar3 only; the
+register recipe and its caveats are in `src/jaguar3/CLAUDE.md`
+"Busy-airtime NHM".
+
+It exists for the row the CLM section above leaves open: two FPV video
+transmitters on their own channel, which neither `clm` nor `fa_ofdm` saw.
+`rxdemo` `DEVOURER_RX_NHM_BUSY_MS=250` runs the three sensors in turn on one
+card (an absolute-NHM window with the FA/CCA delta and decoded frames over
+that same window, then an armed CLM window, then one `GetRxEnergy(true)` for
+`nhm_env`, so none spoils another) and emits one `rx.busycmp` event per round.
+One RTL8812EU sensor, 20 MHz, medians over three 20 s runs per row:
+
+| channel / emitter | above -83 dBm | level (top bucket ≥ 5 %) | `nhm_env` | `fa_ofdm` / 250 ms | CLM (250 ms window) |
+|---|---|---|---|---|---|
+| quiet (ch 136/140/153/157) | 0-0.4 % | ≥ -95…-92 | 0 | 26-35 | 0 |
+| HDZero VTX (5695 MHz), ch 140, 1 m | 100 % | ≥ -70 | 100 | **0** | **0** |
+| same, other room ~8 m | 100 % | ≥ -70 | 100 | 14-16 | **0** |
+| same, further | 100 % | ≥ -75 | 99 | 21-24 | **0** |
+| same, further, adjacent ch 136 | 93-95 % | ≥ -80 | 53-60 | 285-359 | 8-13 |
+| analog FM VTX (5769 MHz), ch 153, 1 m | 100 % | ≥ -70 | 100 | 7-36 | 0-1 |
+| same, adjacent ch 157 | 100 % | ≥ -80 | 100 | 12-28 | 0 |
+
+On its own channel neither transmitter moves `fa_ofdm` above the quiet
+channel's count (a strong one silences it) and CLM stays at 0; the HDZero's
+adjacent channel is the one place both counters wake. That is the
+counterpart to the SDR-carrier result above, where `fa_ofdm` was the most
+sensitive counter: a 5 MHz carrier is not what these emitters look like to
+the baseband. `nhm_env` sees both at this IGI (30-32, inside the 20 MHz DIG
+window).
+
+Does the energy matter? An HT40 MCS3 downlink on 140+144 (the HDZero inside
+the 140 secondary) delivered 1801-1862/0/0 clean/truncated/dropped frames per
+30 s with the VTX off and 858/25-30/51-76 with it at the "further" position,
+8-11 % of frames lost (two runs each); the same link at 20 MHz on 144 alone,
+VTX only adjacent, stayed clean.
+
+**The IGI-relative reading follows the gain, the absolute one does not.**
+With IGI pinned by a direct `0x1d70` write (`DEVOURER_SKIP_DIG=1`, both
+paths) and the HDZero at the "further" position on ch 140, two runs each:
+
+| IGI | above -83 dBm | level | `nhm_env` |
+|---|---|---|---|
+| 0x20 (control) | 100 % | ≥ -75 | 99 |
+| 0x35 (the default 40/80 MHz `wide_tx_igi_floor`) | 100 % | ≥ -75 | **0** |
+
+What these numbers do not cover:
+
+- One sensor unit, 20 MHz receive. The 0x35 rows force IGI by a register
+  write on a 20 MHz receiver; a 40 MHz receiver that reached the floor
+  through its own wide TX is not measured, and the 8812CU is not.
+- **The absolute edges are only absolute above the estimator's own floor,
+  and that floor moves with IGI.** At 0x35 a quiet channel's histogram
+  collapses into the -86…-83 bucket (from -98…-89 at IGI 30): the share
+  above -83 dBm still read 0.4-0.8 %, but with one bucket of margin.
+- **A single-bucket histogram is not evidence of a frozen power estimate.**
+  The analog transmitter's constant envelope put 253-254 of 255 samples in
+  one bucket (-80…-75 dBm, adjacent channel) in 64 of 72 windows. A
+  peak-bucket test (one bucket holding ≥ 236 of 255, the shape of the stuck
+  BB power estimate a Jaguar3 can report after bring-up or a retune) would
+  discard exactly those windows; `nhm_env` read 100 on the same rounds. The
+  busy share is therefore reported without that test.
+- No analog row near -83 dBm (that transmitter was never placed far enough).
+
 ## Detecting a tone
 
 Run `DEVOURER_CW_TONE` on adapter A and `DEVOURER_RX_ENERGY_MS` on adapter B, same

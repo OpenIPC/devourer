@@ -75,6 +75,19 @@ public:
    * sampling faster than a few times a second. */
   virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
 
+  /* Busy-airtime NHM window over ABSOLUTE dBm thresholds, split so no call
+   * ever sleeps: ArmNhmBusy programs the recipe (first call, or after
+   * anything else reprogrammed the CCX engine) and pulses the trigger for a
+   * `period_4us` window; ReadNhmBusy returns the finished window, or
+   * valid=false if it has not finished. Arm again for the next window.
+   * Jaguar3 only; every other generation returns false / valid=false.
+   * Control-plane threading contract as GetRxEnergy. Shares the CCX engine
+   * with CLM: an arm spoils an armed ArmChannelBusy window, so use one busy
+   * facility per card at a time. Caveats: src/jaguar3/CLAUDE.md
+   * "Busy-airtime NHM". */
+  virtual bool ArmNhmBusy(uint16_t period_4us) { (void)period_4us; return false; }
+  virtual NhmBusy ReadNhmBusy() { return {}; }
+
   /* The neutral reading (IRadio::GetChannelBusy), expressed in this family's
    * own facility: CLM busy airtime plus NHM-env, both of which ride
    * GetRxEnergy's armed CCX window.

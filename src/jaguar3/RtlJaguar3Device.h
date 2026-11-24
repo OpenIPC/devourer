@@ -222,6 +222,8 @@ public:
    * 0x1a2c + 0x1eb4[25]. Read-then-reset for a per-call delta; serialized on
    * _reg_mu against the coex runtime thread. The read side of the CW tone. */
   RxEnergy GetRxEnergy(bool with_nhm) override;
+  bool ArmNhmBusy(uint16_t period_4us) override;
+  NhmBusy ReadNhmBusy() override;
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
    * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. On Jaguar3 the
@@ -273,6 +275,9 @@ private:
       return false;
     std::lock_guard<std::mutex> reg(_reg_mu);
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    /* A CLM arm rewrites CCX dwords the busy-NHM recipe cache holds
+     * (period low half, ctrl bit0): recompose it on the next ArmNhmBusy. */
+    _nhm_busy_ready = false;
     const Read32 rd = [this](uint16_t a) {
       return _device.rtw_read<uint32_t>(a);
     };
@@ -423,6 +428,12 @@ private:
   std::atomic<bool> _txpwr_sat_high{false};
   /* Bring-up completion: gates the live apply (+ _reg_mu use) in the setters. */
   bool _brought_up = false;
+  /* Busy-NHM recipe cache (ArmNhmBusy): the composed 0x1e40/0x1e60 dwords
+   * once the recipe is programmed. Cleared by anything else that programs
+   * the CCX engine (GetRxEnergy with_nhm, a CLM arm via with_ccx), by a full
+   * channel set and by Init/InitWrite. */
+  bool _nhm_busy_ready = false;
+  uint32_t _nhm_busy_1e40 = 0, _nhm_busy_1e60 = 0;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   devourer::RxPathActivityAccumulator _rxpaths;

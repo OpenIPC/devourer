@@ -1316,6 +1316,12 @@ target_compile_features(NhmEnvMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
 
+# Headless guard for the busy-NHM register composers (src/jaguar3/NhmBusyMath.h)
+# and the absolute threshold table they program (src/NoiseFloorMath.h).
+add_executable(NhmBusySelftest tests/nhm_busy_selftest.cpp)
+target_link_libraries(NhmBusySelftest PRIVATE devourer)
+add_test(NAME nhm_busy_math COMMAND NhmBusySelftest)
+
 # Headless guard for the vendor-neutral ChannelBusy conversions (src/RxSense.h):
 # the Realtek RxEnergy reduction and the MediaTek channel-timer ratio. Pure
 # arithmetic, header-only. The load-bearing case is the refusal — a counter that

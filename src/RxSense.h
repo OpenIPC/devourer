@@ -95,6 +95,23 @@ struct RxEnergy {
   int8_t abs_noise_floor_dbm = 0;
 };
 
+/* One busy-airtime NHM window (IRtlRadio::ArmNhmBusy / ReadNhmBusy):
+ * 12 buckets over the absolute dBm table nf::kNhmAbsThDbm (NoiseFloorMath.h),
+ * counted with CCA-busy samples INCLUDED and our own TX EXCLUDED. The share
+ * of the buckets from nf::nhm_abs_bucket_from(dbm) up is the airtime above
+ * that level. A single-bucket histogram is not evidence of a frozen power
+ * estimate here: a constant-envelope emitter (analog FM video) fills one
+ * bucket too — src/jaguar3/CLAUDE.md "Busy-airtime NHM". */
+struct NhmBusy {
+  bool valid = false;        /* the window's ready bit was set */
+  uint8_t buckets[12] = {};  /* share of 255 samples; 11 thresholds -> 12 buckets */
+  uint16_t duration = 0;     /* measured window, 4 us units */
+  /* Period of the most recent arm on this device (4 us units) — a caller
+   * that armed a different period knows the result is someone else's
+   * window. */
+  uint16_t period = 0;
+};
+
 namespace devourer {
 
 /* Where a ChannelBusy reading came from. Provenance is part of the reading, not

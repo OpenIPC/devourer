@@ -1648,9 +1648,7 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
 
 /* Busy-airtime NHM (IRtlRadio::ArmNhmBusy). First call: read the three
  * registers the recipe shares bits with, compose full dwords
- * (NhmBusyMath.h — full-dword writes, never phy_set_bb_reg, which on this
- * generation shifts the value by the mask a second time), write thresholds
- * + cfg + period and pulse the trigger. Later calls: period + trigger pulse
+ * (NhmBusyMath.h), write thresholds + cfg + period and pulse the trigger. Later calls: period + trigger pulse
  * only, from the cached dwords. The cache is valid only while this is the
  * sole writer of 0x1e40/0x1e60; every other CCX arm path clears
  * _nhm_busy_ready. */

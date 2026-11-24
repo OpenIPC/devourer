@@ -531,7 +531,8 @@ them chip-specific: plain `fa_ofdm` outperformed both new sensors on every part
 measured against an SDR carrier, so there this buys an airtime unit and a
 non-railing ratio rather than a new detection — but against two FPV video
 transmitters on their own channel `fa_ofdm` and `clm` both stayed at the quiet
-channel's level (Jaguar3 absolute-threshold NHM, below); `nhm_env` is referenced to the live IGI, so it is only dependable
+channel's level (one 8812EU sensor, 20 MHz only; Jaguar3 absolute-threshold
+NHM, below); `nhm_env` is referenced to the live IGI, so it is only dependable
 where DIG is not free to walk the gain out from under it (the per-generation
 windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
 a sample, not a measurement.

@@ -1,10 +1,10 @@
 /* Pure register arithmetic for RtlJaguar3Device::ArmNhmBusy/ReadNhmBusy:
  * the busy-airtime NHM recipe (inc_cca on, inc_tx off, absolute dBm
  * thresholds) composed as FULL dwords from the registers' current values,
- * so the arm path is a batched write group with no masked read-modify-
- * write (JGR3 double-shift gotcha, jaguar3/CLAUDE.md). NhmReader.h's
- * polling readers (masked writes + a sleeping poll) are deliberately not
- * built on this. */
+ * so the arm path is plain 32-bit writes: no per-field read-modify-write and
+ * no value to pass relative to its mask (the trap NhmReader.h's th[8..10]
+ * comment describes). NhmReader.h's polling readers (masked writes + a
+ * sleeping poll) are deliberately not built on this. */
 #ifndef DEVOURER_JAGUAR3_NHM_BUSY_MATH_H
 #define DEVOURER_JAGUAR3_NHM_BUSY_MATH_H
 

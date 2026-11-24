@@ -257,15 +257,11 @@ than generation is the live variable in that older result.
 
 ## Busy-airtime NHM (`ArmNhmBusy` / `ReadNhmBusy`)
 
-Non-blocking NHM window for a caller that wants airtime above a fixed level,
-not a floor: cfg 0x3 (inc_cca ON so 802.11 frames count, inc_tx OFF), the
-levels fixed to `nf::kNhmAbsThDbm` (no caller-chosen thresholds), composed as
-FULL dwords in `NhmBusyMath.h` and written with plain 32-bit writes — never
-`phy_set_bb_reg`, whose masked write shifts the value a second time on this
-map (the NHM th[8..10] double-shift). Arm at the start of a window, read at
-the end; a not-ready read comes back invalid, never blocks. `NhmBusy.period`
-is the LAST arm's period on this device — a caller compares it with its own
-to detect that another caller re-armed in between. On-air numbers and the
+The contract is at `IRtlRadio::ArmNhmBusy` and `NhmBusy` (`src/RxSense.h`).
+This die's recipe: cfg 0x3 (inc_cca ON so 802.11 frames count, inc_tx OFF),
+levels fixed to `nf::kNhmAbsThDbm`, composed as full dwords in
+`NhmBusyMath.h` from one read of `0x1e40`/`0x1e5c`/`0x1e60` and written as
+plain 32-bit writes; result in `0x2d40..0x2d4c`. On-air numbers and the
 comparison with CLM / `fa_ofdm` / `nhm_env`: `docs/rx-spectrum-sensing.md`
 "Busy airtime above a fixed level".
 
@@ -283,15 +279,15 @@ comparison with CLM / `fa_ofdm` / `nhm_env`: `docs/rx-spectrum-sensing.md`
   identical to unpulsed ones (sd 0.5) — where 50 ms windows on the same jam
   spread 0–97 % (sd 39.5), so a window cleared to its last 50 ms could not
   have hidden. One unit, one channel; 2.4 GHz and the 8822C not checked.
-- **It spoils an armed CLM window.** The NHM trigger re-arms the shared
-  engine, so `ArmNhmBusy` notes itself as an NHM read: a CLM window it lands
-  inside reads back spoiled, never as a valid short one. Use one busy
-  facility per card at a time.
-- **One full bucket is ambiguous.** The BB power estimate can be stuck at one
-  value after bring-up, after a retune and on 2.4 GHz (≥ 236 of 255 samples
-  in one bucket), but a constant-envelope emitter (analog FM video) produces
-  the same shape, measured; `ReadNhmBusy` rejects neither, and a caller that
-  filters on the peak bucket loses that emitter.
+- **It spoils an armed CLM window** through the same `busy_window_note_nhm_read`
+  `GetRxEnergy(with_nhm)` uses (see "CCX energy sensing" above for why this
+  map destroys rather than biases the window).
+- **One full bucket is ambiguous.** An absolute-threshold NHM window on two
+  8812EU units sometimes binned a stuck BB power estimate — 241-255 of 255
+  samples in one bucket near -85 dBm, for seconds after bring-up and most of
+  a 2.4 GHz session — and a constant-envelope emitter (analog FM video)
+  produces the same shape, measured on 5 GHz. `ReadNhmBusy` rejects neither;
+  a caller that filters on the peak bucket loses that emitter.
 - **The estimator floor moves with IGI.** At IGI 0x35 (the 40/80 MHz
   `wide_tx_igi_floor`) a quiet channel reads in the -86…-83 dBm bucket instead
   of -98…-89, so edges below about -86 dBm carry no information there.

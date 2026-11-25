@@ -1349,6 +1349,14 @@ target_compile_features(BusyWindowSelftest PRIVATE cxx_std_20)
 
 add_test(NAME busy_window_state COMMAND BusyWindowSelftest)
 
+# The IGI write a changed wide-TX floor implies (src/jaguar3/IgiFloor.h).
+add_executable(IgiFloorSelftest tests/igi_floor_selftest.cpp)
+target_include_directories(IgiFloorSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(IgiFloorSelftest PRIVATE cxx_std_20)
+
+add_test(NAME igi_floor COMMAND IgiFloorSelftest)
+
 # Headless round-trip guard for the 802.11ax HE TX radiotap path
 # (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
 # + src/ieee80211_radiotap.h HE masks): parse an HE spec -> build -> iterate ->

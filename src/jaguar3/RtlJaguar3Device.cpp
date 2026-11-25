@@ -1798,7 +1798,9 @@ void RtlJaguar3Device::apply_igi_floor_locked(uint8_t channel,
                                               bool wide_tx_seen) {
   const bool wide = width == CHANNEL_WIDTH_40 || width == CHANNEL_WIDTH_80;
   _phydm.set_igi_floor(
-      (wide && wide_tx_seen) ? _cfg.tuning.wide_tx_igi_floor : 0, channel);
+      (wide && wide_tx_seen) ? _wide_tx_igi_floor.load(std::memory_order_relaxed)
+                             : 0,
+      channel);
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC
@@ -2362,6 +2364,16 @@ bool RtlJaguar3Device::DumpMacRegisters() {
       _logger->info("{}", line);
     }
   }
+  return true;
+}
+
+bool RtlJaguar3Device::SetWideTxIgiFloor(uint8_t floor) {
+  if (floor > 0x7f)
+    return false;
+  /* _reg_mu only: a sender blocked in bulk-OUT holds no lock. */
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  _wide_tx_igi_floor.store(floor, std::memory_order_relaxed);
+  apply_igi_floor_locked(_channel.Channel, _channel.ChannelWidth);
   return true;
 }
 
@@ -2946,19 +2958,20 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
     pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
   /* Either die, the session's first >= 40 MHz frame: record it
    * (_wide_tx_seen) and apply the IGI floor (DeviceConfig::Tuning::
-   * wide_tx_igi_floor; 0 = off, no arm) for the CURRENT tune before the
-   * frame is queued — on a quiet channel the MAC would otherwise hold it
-   * forever. Whether the floor is on follows the tuned width, which is read
-   * under _reg_mu here and by every retune (apply_igi_floor_locked), so a
-   * retune racing this frame either runs first and is seen here, or runs
-   * after and sees the flag. The flag is published only after the floor is
-   * applied, so a concurrent sender cannot skip ahead of it. One _reg_mu take
-   * per session, whatever the tuned width — the hot path stays lock-free. */
+   * wide_tx_igi_floor / SetWideTxIgiFloor; with a floor of 0 the apply writes
+   * nothing, so a session that never sets one is unchanged) for the CURRENT
+   * tune before the frame is queued — on a quiet channel the MAC would
+   * otherwise hold it forever. Whether the floor is on follows the tuned
+   * width, which is read under _reg_mu here and by every retune
+   * (apply_igi_floor_locked), so a retune racing this frame either runs first
+   * and is seen here, or runs after and sees the flag. The flag is published
+   * only after the floor is applied, so a concurrent sender cannot skip ahead
+   * of it. One _reg_mu take per session, whatever the tuned width — the hot
+   * path stays lock-free. */
   const bool wide_frame =
       bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80;
   const bool c_die = _variant == jaguar3::ChipVariant::C8822C;
-  if (wide_frame && _cfg.tuning.wide_tx_igi_floor != 0 &&
-      !_wide_tx_seen.load(std::memory_order_acquire)) {
+  if (wide_frame && !_wide_tx_seen.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lk(_reg_mu);
     if (!_wide_tx_seen.load(std::memory_order_relaxed)) {
       apply_igi_floor_locked(_channel.Channel, _channel.ChannelWidth,

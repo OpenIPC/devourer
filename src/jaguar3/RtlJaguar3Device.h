@@ -86,6 +86,7 @@ public:
   void DumpChipState() override;
   uint32_t GetTxDmaStatus() override;
   bool HasTxDmaStatus() const override { return true; }
+  bool SetWideTxIgiFloor(uint8_t floor) override;
   /* Serialized on _reg_mu against the coex runtime tick for the whole dump
    * (~1024 register reads, so it holds the tick off that long - a diagnostic
    * cost). */
@@ -373,6 +374,10 @@ private:
                            _wide_tx_seen.load(std::memory_order_relaxed));
   }
   std::atomic<bool> _wide_tx_seen{false};
+  /* The live floor: starts at _cfg.tuning.wide_tx_igi_floor, moved by
+   * SetWideTxIgiFloor under _reg_mu. Read only by apply_igi_floor_locked,
+   * under _reg_mu (or in pre-coex bring-up). */
+  std::atomic<uint8_t> _wide_tx_igi_floor{_cfg.tuning.wide_tx_igi_floor};
   SelectedChannel _channel{};
   /* Mirrors _channel.ChannelWidth as a devourer bw code (0/1/2 = 20/40/80 MHz)
    * so the RX completion handler can read the currently-tuned width without

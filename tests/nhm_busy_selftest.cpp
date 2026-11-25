@@ -43,6 +43,13 @@ int main() {
   CHECK((q.w1e60 & 0xf00u) == 0x100u);
   CHECK((q.w1e60 & 0x2u) == 0);
   CHECK((q.w1e60 & 0xffff0000u) == ((11u << 24) | (10u << 16)));
+  // Period per BB tick: 4/8/16 us at 20/10/5 MHz, clamped to [1, 65535].
+  CHECK(nhm_period_for_us(240000, 0) == 60000);
+  CHECK(nhm_period_for_us(240000, 1) == 30000);   // 10 MHz: 8 us tick
+  CHECK(nhm_period_for_us(240000, 2) == 15000);   // 5 MHz: 16 us tick
+  CHECK(nhm_period_for_us(1, 0) == 1);
+  CHECK(nhm_period_for_us(300000, 0) == 0xffff);
+  CHECK(nhm_period_for_us(300000, 1) == 37500);   // fits at 8 us
   // Result parse.
   const NhmResult r = parse_nhm_result(0x0001002a, 0x04030201, 0x08070605, 0x0c0b0a09);
   CHECK(r.ready && r.duration == 0x2a);

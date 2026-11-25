@@ -354,10 +354,11 @@ static const uint32_t g_rx_busy_ms = []() -> uint32_t {
  * window), then a CLM busy window of N ms (ArmChannelBusy), then one
  * GetRxEnergy(with_nhm) for the IGI-relative nhm_env. Sequential because each
  * re-arms the shared engine and would spoil the others. One `rx.busycmp`
- * event per round. 0 = disabled; capped at 240, CLM's own maximum, so both
- * windows span the same time. The FA/CCA delta is also reset by the Jaguar3
- * coex thread's ~2 s fa_stats tick, so a window that tick lands in reports
- * only the counts since it. */
+ * event per round. 0 = disabled; capped at 240 (logged), CLM's own maximum,
+ * so both windows span the same time. The FA/CCA delta is also reset by the
+ * Jaguar3 coex thread's ~2 s fa_stats tick, so a window that tick lands in
+ * reports only the counts since it. */
+static bool g_rx_nhm_busy_capped = false; /* warned in main */
 static const uint32_t g_rx_nhm_busy_ms = []() -> uint32_t {
   const char *e = std::getenv("DEVOURER_RX_NHM_BUSY_MS");
   if (!e)
@@ -366,6 +367,7 @@ static const uint32_t g_rx_nhm_busy_ms = []() -> uint32_t {
   const unsigned long v = std::strtoul(e, &end, 0);
   if (end == e || *end != '\0' || *e == '-')
     return 0u;
+  g_rx_nhm_busy_capped = v > 240;
   return static_cast<uint32_t>(v > 240 ? 240 : v);
 }();
 
@@ -1483,6 +1485,9 @@ int main(int argc, char **argv) {
     return 2;
   }
 
+  if (g_rx_nhm_busy_capped)
+    logger->warn("DEVOURER_RX_NHM_BUSY_MS: capped at 240 ms (CLM's maximum)");
+
   /* Owns the teardown order (device -> interface -> handle -> context; see
    * DeviceSession.h). Declared before every thread below, so the threads are
    * joined before the adapter is released. Each early return from here on
@@ -1890,9 +1895,11 @@ int main(int argc, char **argv) {
   std::thread busycmp_emitter;
   IRtlRadio *const busycmp_dev =
       g_rx_nhm_busy_ms > 0 ? dynamic_cast<IRtlRadio *>(rtlDevice) : nullptr;
-  if (g_rx_nhm_busy_ms > 0 && !busycmp_dev)
-    logger->error("DEVOURER_RX_NHM_BUSY_MS: not a Realtek radio — ignored");
-  if (busycmp_dev) {
+  if (g_rx_nhm_busy_ms > 0 &&
+      (!busycmp_dev || !rtlDevice->GetAdapterCaps().nhm_busy_ok))
+    logger->error("DEVOURER_RX_NHM_BUSY_MS: this adapter has no busy-NHM "
+                  "window (AdapterCaps::nhm_busy_ok, Jaguar3 only) — ignored");
+  else if (busycmp_dev) {
     IRtlRadio *dev = busycmp_dev;
     logger->info("DEVOURER_RX_NHM_BUSY_MS={} — starting busy comparison",
                  g_rx_nhm_busy_ms);
@@ -1912,8 +1919,6 @@ int main(int argc, char **argv) {
       for (uint32_t s = 0;
            s < 10000 && !busycmp_stop.load() && g_rx_count.load() == 0; s += 50)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      const uint16_t period =
-          static_cast<uint16_t>(g_rx_nhm_busy_ms * 250u); /* 4 us units */
       devourer::PollSkips skips("DEVOURER_RX_NHM_BUSY_MS");
       bool told_refused = false;
       while (!busycmp_stop.load()) {
@@ -1922,10 +1927,11 @@ int main(int argc, char **argv) {
            * Arm first: a refused arm touches nothing, and the counter reset
            * (which leaves an in-flight NHM window intact) and the frame
            * snapshot then start with the window, not before its setup. */
-          if (!dev->ArmNhmBusy(period)) {
+          const uint32_t nhm_win_us = dev->ArmNhmBusy(g_rx_nhm_busy_ms * 1000u);
+          if (nhm_win_us == 0) {
             if (!told_refused)
-              logger->info("DEVOURER_RX_NHM_BUSY_MS: arm refused (not Jaguar3, "
-                           "or not brought up yet) — retrying");
+              logger->info("DEVOURER_RX_NHM_BUSY_MS: arm refused (not brought "
+                           "up yet) — retrying");
             told_refused = true;
             nap(500);
             continue;
@@ -1933,10 +1939,10 @@ int main(int argc, char **argv) {
           dev->GetRxEnergy(false); /* reset the FA/CCA counters (no CCX access) */
           const int f0 = g_rx_count.load();
           const auto t0 = std::chrono::steady_clock::now();
-          nap(g_rx_nhm_busy_ms);
+          nap((nhm_win_us + 999) / 1000);
           NhmBusy nb = dev->ReadNhmBusy();
           for (int i = 0; i < 5 && !nb.valid && !busycmp_stop.load(); ++i) {
-            nap(5); /* host timer ran ahead of the 4 us tick clock */
+            nap(5); /* host timer ran ahead of the CCX tick clock */
             nb = dev->ReadNhmBusy();
           }
           const RxEnergy sc = dev->GetRxEnergy(false);
@@ -1961,6 +1967,7 @@ int main(int argc, char **argv) {
           }
           devourer::Ev ev(*g_ev, "rx.busycmp");
           ev.t().f("nhm_valid", nb.valid).f("nhm_duration", nb.duration);
+          ev.f("nhm_window_us", nhm_win_us);
           {
             char b[64];
             int n = 0;
@@ -1974,6 +1981,8 @@ int main(int argc, char **argv) {
            * (src/jaguar3/CLAUDE.md "Busy-airtime NHM") */
           ev.f("nhm_peak", peak);
           /* busy above -83 dBm */
+          static_assert(devourer::nf::nhm_abs_bucket_from(-83) > 0,
+                        "-83 dBm must be a table edge");
           uint32_t above = 0;
           for (int i = devourer::nf::nhm_abs_bucket_from(-83); i < 12; ++i)
             above += nb.buckets[i];

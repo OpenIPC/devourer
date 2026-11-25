@@ -98,17 +98,23 @@ struct RxEnergy {
 /* One busy-airtime NHM window (IRtlRadio::ArmNhmBusy / ReadNhmBusy):
  * 12 buckets over the absolute dBm table nf::kNhmAbsThDbm (NoiseFloorMath.h),
  * counted with CCA-busy samples INCLUDED and our own TX EXCLUDED. The share
- * of the buckets from nf::nhm_abs_bucket_from(dbm) up is the airtime above
- * that level. A single-bucket histogram is not evidence of a frozen power
- * estimate here: a constant-envelope emitter (analog FM video) fills one
- * bucket too — src/jaguar3/CLAUDE.md "Busy-airtime NHM". */
+ * of the buckets from nf::nhm_abs_bucket_from(dbm) up is the share of
+ * samples whose power estimate lay above that level: an amplitude
+ * distribution, which equals the airtime above `dbm` only when the emitter
+ * sits well clear of that edge. A continuous noise-like emitter spreads over
+ * about two buckets, so one straddling the edge reads a fraction while it is
+ * on all the time; the histogram's shift against a quiet baseline is the
+ * more robust reading. A single-bucket histogram is not evidence of a frozen
+ * power estimate here: a constant-envelope emitter (analog FM video) fills
+ * one bucket too. Both: src/jaguar3/CLAUDE.md "Busy-airtime NHM". */
 struct NhmBusy {
   bool valid = false;        /* the window's ready bit was set */
   uint8_t buckets[12] = {};  /* share of 255 samples; 11 thresholds -> 12 buckets */
-  uint16_t duration = 0;     /* measured window, 4 us units */
-  /* Period of the most recent arm on this device (4 us units) — a caller
-   * that armed a different period knows the result is someone else's
-   * window. */
+  /* Measured window and the period of the most recent arm on this device,
+   * both in engine ticks (4/8/16 us at 20+/10/5 MHz — ArmNhmBusy). A caller
+   * whose own arm returned a different window knows the result is someone
+   * else's. */
+  uint16_t duration = 0;
   uint16_t period = 0;
 };
 

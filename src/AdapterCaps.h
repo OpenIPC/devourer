@@ -444,10 +444,17 @@ struct AdapterCaps {
    *
    * rx_energy_ok: IRtlRadio::GetRxEnergy returns real phydm FA/CCA/IGI
    * counters. Always false on a non-Realtek radio; false on the RTL8733B and
-   * Kestrel, which is exactly the false positive the cast produced. */
+   * Kestrel, which is exactly the false positive the cast produced.
+   *
+   * nhm_busy_ok: IRtlRadio::ArmNhmBusy / ReadNhmBusy are ported — the NHM
+   * half of the CCX engine over the absolute dBm table. Jaguar3 only, on
+   * air on the RTL8812EU (docs/rx-spectrum-sensing.md "Busy airtime above a
+   * fixed level"); false elsewhere means not ported. With it true, a 0 from
+   * ArmNhmBusy is the not-brought-up-yet / failed-write case. */
   bool busy_airtime_ok = false;
   bool busy_airtime_measured = false;
   bool rx_energy_ok = false;
+  bool nhm_busy_ok = false;
   /* Hardware timing. hw_rx_timestamp: every received frame is stamped with the
    * MAC's microsecond TSF at receive (RxPacket.RxAtrib.tsfl) — true on all
    * generations. hw_beacon_txtsf: this adapter, as a transmitter, inserts its

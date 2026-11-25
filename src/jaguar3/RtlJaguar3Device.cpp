@@ -87,7 +87,10 @@ struct WriteBatchScope {
 
 void RtlJaguar3Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
-  nhm_busy_forget();
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    nhm_busy_forget();
+  }
   _rx_stop = false;
 
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
@@ -955,7 +958,10 @@ void RtlJaguar3Device::Stop() {
 }
 
 void RtlJaguar3Device::InitWrite(SelectedChannel channel) {
-  nhm_busy_forget();
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    nhm_busy_forget();
+  }
   /* A new session has sent no wide frame: a re-bring-up must not inherit the
    * previous session's wide-TX IGI floor (_wide_tx_seen). */
   _wide_tx_seen.store(false, std::memory_order_relaxed);
@@ -1650,14 +1656,19 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
 
 /* Busy-airtime NHM (IRtlRadio::ArmNhmBusy). First call: read the three
  * registers the recipe shares bits with, compose full dwords
- * (NhmBusyMath.h), write thresholds + cfg + period and pulse the trigger. Later calls: period + trigger pulse
- * only, from the cached dwords. The cache is valid only while this is the
- * sole writer of 0x1e40/0x1e60; every other CCX arm path clears
- * _nhm_busy_ready. */
-bool RtlJaguar3Device::ArmNhmBusy(uint16_t period_4us) {
+ * (NhmBusyMath.h), write thresholds + cfg + period and pulse the trigger.
+ * Later calls: period + trigger pulse only, from the cached dwords. The cache
+ * is valid only while this is the sole writer of 0x1e40/0x1e60; every other
+ * CCX arm path clears _nhm_busy_ready. */
+uint32_t RtlJaguar3Device::ArmNhmBusy(uint32_t window_us) {
   std::lock_guard<std::mutex> lk(_reg_mu);
-  if (!_brought_up || period_4us == 0)
-    return false;
+  if (!_brought_up || window_us == 0)
+    return 0;
+  /* The CCX tick follows the BB clock: 8 us at 10 MHz, 16 us at 5 MHz. */
+  const unsigned tick_shift = _channel.ChannelWidth == CHANNEL_WIDTH_10  ? 1
+                              : _channel.ChannelWidth == CHANNEL_WIDTH_5 ? 2
+                                                                         : 0;
+  const uint16_t period = devourer::jgr3::nhm_period_for_us(window_us, tick_shift);
   /* The NHM trigger re-arms the shared CCX engine, which destroys an armed
    * CLM busy window on this map: note it under the CCX lock, as GetRxEnergy
    * does, so that window reads back spoiled rather than valid. */
@@ -1670,31 +1681,32 @@ bool RtlJaguar3Device::ArmNhmBusy(uint16_t period_4us) {
     const devourer::jgr3::NhmProgram p = devourer::jgr3::compose_nhm_program(
         _device.rtw_read<uint32_t>(0x1e40), _device.rtw_read<uint32_t>(0x1e5c),
         _device.rtw_read<uint32_t>(0x1e60), th, devourer::jgr3::kNhmBusyCfg,
-        period_4us);
+        period);
     /* A write that fails returns false rather than throwing: recompose
      * from scratch next time instead of caching a half-written recipe. */
     if (!_device.rtw_write<uint32_t>(0x1e44, p.w1e44) ||
         !_device.rtw_write<uint32_t>(0x1e48, p.w1e48) ||
         !_device.rtw_write<uint32_t>(0x1e5c, p.w1e5c))
-      return false;
+      return 0;
     _nhm_busy_1e40 = p.w1e40;
     _nhm_busy_1e60 = p.w1e60;
   }
-  const uint32_t w40 = devourer::jgr3::nhm_with_period(_nhm_busy_1e40, period_4us);
+  const uint32_t w40 = devourer::jgr3::nhm_with_period(_nhm_busy_1e40, period);
   if (!_device.rtw_write<uint32_t>(0x1e40, w40) ||
       !_device.rtw_write<uint32_t>(0x1e60, devourer::jgr3::nhm_trigger_low(_nhm_busy_1e60)) ||
       !_device.rtw_write<uint32_t>(0x1e60, devourer::jgr3::nhm_trigger_high(_nhm_busy_1e60))) {
     nhm_busy_forget();
-    return false;
+    return 0;
   }
   _nhm_busy_1e40 = w40;
   _nhm_busy_ready = true;
   _nhm_busy_armed = true;
-  return true;
+  return static_cast<uint32_t>(period) * (4u << tick_shift);
 }
 
 NhmBusy RtlJaguar3Device::ReadNhmBusy() {
   std::lock_guard<std::mutex> lk(_reg_mu);
+  std::lock_guard<std::mutex> ccx(busy_window_mutex());
   NhmBusy out;
   if (!_brought_up || !_nhm_busy_armed)
     return out;
@@ -1715,9 +1727,9 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
     return; /* no tune, so nothing to spoil — the note goes after this */
   /* A window armed before this retune would integrate across the channel
    * change and report the blend as one channel's occupancy. */
-  _nhm_busy_armed = false;
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    _nhm_busy_armed = false;
     busy_window_note_retune();
   }
 
@@ -1751,12 +1763,13 @@ void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   if (bw == _channel.ChannelWidth)
     return; /* no reconfiguration, so nothing to spoil */
-  nhm_busy_forget();
   /* A bandwidth change reconfigures the front end, so a window armed before
    * it was measuring a different receiver — the same argument as a retune,
-   * and the full path below tunes the RF outright. */
+   * and the full path below tunes the RF outright. It also changes the CCX
+   * tick (ArmNhmBusy), so the recipe's period is stale too. */
   {
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    nhm_busy_forget();
     busy_window_note_retune();
   }
   auto in_set = [](ChannelWidth_t b) {
@@ -2076,6 +2089,7 @@ devourer::AdapterCaps RtlJaguar3Device::GetAdapterCaps() {
   c.per_chain_rssi = true;
   /* CCX CLM via NhmReader's JGR3 map; separated arm-vs-quiet on air (#431). */
   c.busy_airtime_ok = true;
+  c.nhm_busy_ok = true; /* ArmNhmBusy / ReadNhmBusy */
   c.busy_airtime_measured = true;
   c.rx_energy_ok = true;
   /* Hardware ARQ (truth table at the AdapterCaps declarations): both dies

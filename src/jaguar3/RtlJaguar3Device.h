@@ -222,7 +222,7 @@ public:
    * 0x1a2c + 0x1eb4[25]. Read-then-reset for a per-call delta; serialized on
    * _reg_mu against the coex runtime thread. The read side of the CW tone. */
   RxEnergy GetRxEnergy(bool with_nhm) override;
-  bool ArmNhmBusy(uint16_t period_4us) override;
+  uint32_t ArmNhmBusy(uint32_t window_us) override;
   NhmBusy ReadNhmBusy() override;
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
@@ -431,7 +431,8 @@ private:
   /* Busy-NHM recipe cache (ArmNhmBusy): the composed 0x1e40/0x1e60 dwords
    * once the recipe is programmed. Cleared by anything else that programs
    * the CCX engine (GetRxEnergy with_nhm, a CLM arm via with_ccx), by a full
-   * channel set and by Init/InitWrite. */
+   * channel set, FastSetBandwidth, Stop and Init/InitWrite.
+   * The four fields below are guarded by busy_window_mutex(). */
   bool _nhm_busy_ready = false;
   uint32_t _nhm_busy_1e40 = 0, _nhm_busy_1e60 = 0;
   /* A window armed by ArmNhmBusy whose result still describes the current

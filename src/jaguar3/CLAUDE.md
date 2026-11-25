@@ -272,7 +272,14 @@ comparison with CLM / `fa_ofdm` / `nhm_env`: `docs/rx-spectrum-sensing.md`
   It survives `FastRetune` (the hop does not touch `0x1e40`/`0x1e60`), but a
   window armed before the hop reads back invalid rather than as a blend of
   two channels. `Stop` does not clear `_brought_up`, so an arm issued after
-  it still succeeds — the same residual `ArmChannelBusy` carries (#443).
+  it still succeeds — the residual described at `IRadio::ArmChannelBusy`.
+  The cache and the armed flag are guarded by `busy_window_mutex()`.
+- **The tick follows the baseband clock**: 4 us at 20 MHz and wider, 8 us at
+  10 MHz, 16 us at 5 MHz (`phydm_nhm_set` shifts its period the same way).
+  The arm converts the caller's microseconds with the live width
+  (`nhm_period_for_us`) and returns what it armed; a 4 us period at 10/5 MHz
+  ran 2×/4× long and every window read not-ready. `FastSetBandwidth` drops
+  the cache, since the period it holds is in the old tick.
 - **The FA/CCA counter reset does not touch it.** phydm's "reset all
   counter" (`0x1eb4[25]`, pulsed by `GetRxEnergy` and the coex thread's ~2 s
   `fa_stats` tick) leaves an in-flight window intact. Measured on one
@@ -289,7 +296,9 @@ comparison with CLM / `fa_ofdm` / `nhm_env`: `docs/rx-spectrum-sensing.md`
   samples in one bucket near -85 dBm, for seconds after bring-up and most of
   a 2.4 GHz session — and a constant-envelope emitter (analog FM video)
   produces the same shape, measured on 5 GHz. `ReadNhmBusy` rejects neither;
-  a caller that filters on the peak bucket loses that emitter.
+  a caller that filters on the peak bucket loses that emitter. A third
+  8812EU did not reproduce the stuck estimate in one 24 s ch 6 run (0 of 46
+  windows).
 - **The estimator floor moves with IGI.** At IGI 0x35 (the 40/80 MHz
   `wide_tx_igi_floor`) a quiet channel reads in the -86…-83 dBm bucket instead
   of -98…-89, so edges below about -86 dBm carry no information there.

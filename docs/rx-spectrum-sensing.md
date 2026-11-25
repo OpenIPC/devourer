@@ -550,12 +550,16 @@ this sensor.
 
 ## Busy airtime above a fixed level (`ArmNhmBusy`, Jaguar3)
 
-`IRtlRadio::ArmNhmBusy(period_4us)` / `ReadNhmBusy()` arm the NHM half of the
-CCX engine for the caller's own window (up to 65535 ticks, 262 ms) with
+`IRtlRadio::ArmNhmBusy(window_us)` / `ReadNhmBusy()` arm the NHM half of the
+CCX engine for the caller's own window (up to 65535 ticks: ~262 ms at 20 MHz,
+longer at 10/5 MHz, where the tick is 8/16 us and the arm scales for it) with
 **absolute** thresholds, `nf::kNhmAbsThDbm` in `src/NoiseFloorMath.h`
-(-104 … -70 dBm), CCA-busy samples counted and own TX excluded. The share of
-the buckets from `nf::nhm_abs_bucket_from(dbm)` up is the airtime above
-`dbm`. This is not the naive `nhm_busy` that rails on a quiet channel: the
+(-104 … -70 dBm), CCA-busy samples counted and own TX excluded;
+`AdapterCaps::nhm_busy_ok` says whether a backend has it. The share of the
+buckets from `nf::nhm_abs_bucket_from(dbm)` up is the share of samples whose
+power estimate lay above `dbm`. That is the airtime above `dbm` only when the
+emitter sits well clear of the edge (the noise row below is the case where
+it is not). This is not the naive `nhm_busy` that rails on a quiet channel: the
 edges do not follow IGI, so a quiet 5 GHz floor stays in the -98…-89 dBm
 buckets and the share above -83 dBm reads 0-0.4 %. Jaguar3 only; the
 register recipe and its caveats are in `src/jaguar3/CLAUDE.md`
@@ -563,11 +567,12 @@ register recipe and its caveats are in `src/jaguar3/CLAUDE.md`
 
 It exists for the row the CLM section above leaves open: two FPV video
 transmitters on their own channel, which neither `clm` nor `fa_ofdm` saw.
-`rxdemo` `DEVOURER_RX_NHM_BUSY_MS=250` runs the three sensors in turn on one
+`rxdemo` `DEVOURER_RX_NHM_BUSY_MS=N` runs the three sensors in turn on one
 card (an absolute-NHM window with the FA/CCA delta and decoded frames over
 that same window, then an armed CLM window, then one `GetRxEnergy(true)` for
 `nhm_env`, so none spoils another) and emits one `rx.busycmp` event per round.
-One RTL8812EU sensor, 20 MHz, medians over three 20 s runs per row:
+One RTL8812EU sensor, 20 MHz, `N=250` (measured before the knob was capped
+at 240, CLM's maximum), medians over three 20 s runs per row:
 
 | channel / emitter | above -83 dBm | level (top bucket ≥ 5 %) | `nhm_env` | `fa_ofdm` / 250 ms | CLM (250 ms window) |
 |---|---|---|---|---|---|
@@ -619,6 +624,28 @@ What these numbers do not cover:
   discard exactly those windows; `nhm_env` read 100 on the same rounds. The
   busy share is therefore reported without that test.
 - No analog row near -83 dBm (that transmitter was never placed far enough).
+- **Near an edge the share is an amplitude distribution, not airtime.** A
+  second bench (same 8812EU model, IGI 32, ch 140) swept a B210 transmitting
+  continuous (100 % duty) 20 MHz AWGN, 250 ms windows:
+
+  | SDR gain | peak bucket | above -83 dBm | frames / window | CLM | `fa_ofdm` | `nhm_env` |
+  |---|---|---|---|---|---|---|
+  | ≤ 50 | -98…-95 | 0 % | ~112 | 5 | 31-46 | 0 |
+  | 60 | -95…-92 | 0 % | 77 | 6 | 92 | 0 |
+  | 70 | -86…-83 | 22 % (21.7-24.7) | 0 | 0 | 5 | 0 |
+
+  At gain 70 the emitter is on all the time and reception is dead, yet the
+  share above -83 dBm reads 22 %: a noise-like envelope spreads over about
+  two buckets, and this one straddles the edge. The shift of the histogram
+  against a quiet baseline is the more robust reading there. It is also a
+  third emitter type showing the gap: CLM, `fa_ofdm` and `nhm_env` all read
+  quiet, and `nhm_env` reads 0 at natural IGI against a continuous wideband
+  emitter, which the VTX rows above do not show.
+- **Narrowband.** At 10/5 MHz the arm scales the period to the 8/16 us tick,
+  and every window is valid (one 8812EU, ch 140, `N=240`: 22/22 and 21/21
+  windows, 30001 and 15001 ticks). The armed CLM window does not scale yet, so
+  in the same runs it never elapses in time and reads `clm_spoil=3`; the
+  comparison is one-sided there.
 
 ## Detecting a tone
 

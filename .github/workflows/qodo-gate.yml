@@ -1,5 +1,10 @@
 # Merge gate for the Qodo code-review agent.
 #
+# Kept in step with OpenIPC/firmware's qodo-gate.yml: the two repos run the
+# same agent and hit the same failure modes. Port a fix to both. Two things
+# here go beyond that file: the bot is matched by its exact login, and the
+# sweep waits for an older run that is still in flight.
+#
 # Why: branch protection's "require conversation resolution" only blocks
 # unresolved threads that EXIST at merge time. Qodo posts its review a minute
 # or two after the PR opens, so a "merge when CI is green" flow can race past
@@ -42,6 +47,13 @@ on:
     types: [submitted]
   pull_request_review_comment:
     types: [created, deleted]
+  # Qodo's review can arrive as an ISSUE comment with no review object at all,
+  # and without this trigger nothing re-evaluates the gate when it does: the
+  # run fired at `opened` fails (Qodo has not answered yet), the comment lands
+  # a minute or two later, and the check stays red until an unrelated push
+  # happens to re-trigger it.
+  issue_comment:
+    types: [created, edited]
 
 permissions:
   contents: read
@@ -51,16 +63,50 @@ permissions:
 jobs:
   qodo-gate:
     runs-on: ubuntu-latest
+    # Narrow the issue_comment trigger to the single comment that can change
+    # this gate's verdict: Qodo's review. Without all three clauses the job is
+    # an API-heavy workflow holding `actions: write` that any commenter could
+    # run at will, on any PR, as often as they liked — CI noise, and needless
+    # rate-limit exposure on a REQUIRED check.
+    #
+    #   issue.pull_request  — issue_comment fires for plain issues too, and
+    #                         those have no PR to gate.
+    #   comment author      — only the bot's own comment is evidence of review.
+    #                         A human typing /review still works: Qodo answers,
+    #                         and that answer is what triggers this. Matched
+    #                         EXACTLY, `[bot]` suffix and account type both: a
+    #                         prefix match would accept any account someone
+    #                         registers with a longer name, and one comment
+    #                         from it would clear the gate.
+    #   comment body        — the bot also posts "Qodo is busy working" and
+    #                         "PR Summary by Qodo", neither of which means the
+    #                         diff was reviewed. Matching the review header
+    #                         keeps this to one run per review.
+    #
+    # Every other trigger here is PR-only and needs no guard.
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'qodo-free-for-open-source-projects[bot]' &&
+       github.event.comment.user.type == 'Bot' &&
+       contains(github.event.comment.body, 'Code Review by Qodo'))
     steps:
       - name: Require a Qodo review with all its threads resolved
         env:
           GH_TOKEN: ${{ github.token }}
-          PR: ${{ github.event.pull_request.number }}
+          # issue_comment carries `issue`, not `pull_request` — for a PR
+          # comment the issue number IS the PR number.
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -euo pipefail
           BOT='qodo-free-for-open-source-projects'
+          # REST spells an app's login with a [bot] suffix, GraphQL without.
+          # Both are compared for equality, never by prefix: `[` cannot occur
+          # in a user-chosen login, so the suffixed form cannot be imitated,
+          # and the bare form is a login only the app can hold.
+          BOT_REST="${BOT}[bot]"
 
           json=$(gh api graphql \
             -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR" \
@@ -80,26 +126,68 @@ jobs:
             exit 0
           fi
 
-          # Any review by the bot counts — the first pass reviews the whole
-          # diff, and its later in-place updates edit the same review object,
-          # so one review object existing == the PR has been Qodo-reviewed.
+          # Qodo signals a finished review in one of two ways:
+          #
+          #   1. a review OBJECT — created when it hangs inline comments on
+          #      the diff. Its later in-place updates edit the same object,
+          #      so one existing == the PR has been reviewed.
+          #   2. an issue COMMENT headed "Code Review by Qodo" — all a
+          #      zero-finding PR gets, and on this repo what a PR WITH
+          #      findings gets too: they are listed in that one comment, each
+          #      struck through as "Resolved" when a later commit addresses
+          #      it, and no review object or thread is created.
+          #
+          # Counting only (1) therefore blocks every such PR forever, and the
+          # skip-qodo-gate label becomes the routine way to merge.
+          #
+          # What (2) costs: findings listed in a comment are not threads, so
+          # the unresolved-thread check below cannot see them. This gate then
+          # proves the review HAPPENED, not that its findings were handled —
+          # that is on whoever merges, as with any reviewer's comment.
+          #
           # Paginated: a busy PR accumulates well over 100 review objects
           # (every inline reply wraps itself in one), and the bot's first
           # review is the OLDEST — exactly what a last-100 window loses
           # first. --paginate applies --jq per page, so emit ids and count
-          # lines. REST spells the bot login with a [bot] suffix, unlike
-          # GraphQL, so match on the prefix.
+          # lines.
           reviewed=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR/reviews" \
             --paginate --jq ".[]
-              | select(.user.login | startswith(\"$BOT\"))
+              | select(.user.login == \"$BOT_REST\" and .user.type == \"Bot\")
               | .id" | wc -l)
-          if [ "$reviewed" -eq 0 ]; then
-            echo "FAIL: no Qodo review on this PR yet — it reviews new PRs"
-            echo "automatically within a couple of minutes; comment /review to"
-            echo "summon one, then re-run this check once it answers. (Outage?"
-            echo "Apply the skip-qodo-gate label.)"
+
+          # Match the review header specifically, NOT merely "a comment by the
+          # bot". Qodo also posts "Qodo is busy working" (a placeholder before
+          # it has read anything), "PR Summary by Qodo" (/describe output, not
+          # a review), and "failed to apply 'local' repo settings" (an error).
+          # Treating any of those as a review would let the gate pass on a PR
+          # the agent never actually reviewed.
+          commented=$(gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR/comments" \
+            --paginate --jq ".[]
+              | select(.user.login == \"$BOT_REST\" and .user.type == \"Bot\")
+              | select(.body | test(\"Code Review by Qodo\"; \"i\"))
+              | .id" | wc -l)
+
+          # Every PR hits this branch once: this run fires at `opened`, before
+          # Qodo has answered. That is not an error state, and the wording
+          # must not read like one — when Qodo's review lands, its comment
+          # re-triggers this gate and the passing run re-runs this failed one,
+          # so the check turns green with no action from anyone. Only a much
+          # longer red deserves a human's attention.
+          if [ "$reviewed" -eq 0 ] && [ "$commented" -eq 0 ]; then
+            echo "EXPECTED RED: Qodo has not posted its review yet."
+            echo ""
+            echo "This is the normal state right after a PR is opened or updated."
+            echo "No action is needed: when Qodo's review lands (usually within"
+            echo "2-10 minutes), this check re-evaluates and turns green by"
+            echo "itself. You do not need to re-run it."
+            echo ""
+            echo "Still red after ~20 minutes? Then intervene:"
+            echo "  - comment '/review' on the PR to summon Qodo again"
+            echo "  - if Qodo is down, a maintainer can apply the"
+            echo "    'skip-qodo-gate' label, which passes this check"
             exit 1
           fi
+          echo "review found: $reviewed review object(s), $commented review comment(s)"
 
           # Unresolved Qodo threads, paginated (a long-lived PR can exceed one
           # 100-thread page; a truncated read must never produce a false pass).
@@ -157,10 +245,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          # Empty on issue_comment, which carries no head sha — resolved from
+          # the PR below. This is the trigger that matters most for the sweep:
+          # it is the one that turns the earlier red run green.
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
           THIS_RUN: ${{ github.run_id }}
         run: |
           set -u
+          if [ -z "$HEAD_SHA" ]; then
+            if ! HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid \
+                --jq .headRefOid); then
+              echo "sweep skipped: could not resolve head sha for PR $PR"
+              exit 0
+            fi
+          fi
+          # An OLDER run of this gate may still be in flight on the commit: it
+          # read "no review yet" a moment before the review landed and has not
+          # failed yet, so the listing below would not see it, and nothing
+          # would ever re-run it once it does. Give such runs a bounded while
+          # to finish first. Only older ones (run ids are monotonic): a newer
+          # run does its own sweep, and two runs waiting on each other would
+          # both just burn the timeout.
+          for _ in 1 2 3 4 5 6 7 8 9; do
+            pending=$(gh run list --repo "$REPO" --workflow qodo-gate \
+                --commit "$HEAD_SHA" --json databaseId,status \
+                --jq "[.[] | select(.status != \"completed\")
+                          | select(.databaseId < $THIS_RUN)] | length") || break
+            [ "$pending" -gt 0 ] || break
+            echo "waiting for $pending older qodo-gate run(s) to finish"
+            sleep 10
+          done
           # The listing is guarded too, not just the reruns: with an unguarded
           # pipeline a transient list failure would be the step's exit code —
           # exactly the PASS-into-FAIL this step promises not to produce.

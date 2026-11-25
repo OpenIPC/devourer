@@ -1492,7 +1492,8 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);
       },
-      e, devourer::nhm_sample_period(ccx_tick_shift_now()));
+      e, devourer::nhm_sample_period(ccx_tick_shift_now()),
+      ccx_tick_shift_now());
   }
 
   /* Reset: CCK FA 0x1a2c[15:14] 0->2, CCK CCA 0x1a2c[13:12] 0->2, then OFDM

@@ -391,7 +391,8 @@ RxEnergy RtlJaguarDevice::GetRxEnergy(bool with_nhm) {
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);
       },
-      e, devourer::nhm_sample_period(ccx_tick_shift_now()));
+      e, devourer::nhm_sample_period(ccx_tick_shift_now()),
+      ccx_tick_shift_now());
   }
 
   /* Active absolute floor: the debug-port measurement wedges live RX, so

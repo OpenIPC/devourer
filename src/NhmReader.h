@@ -91,6 +91,8 @@ inline constexpr uint16_t nhm_sample_period(unsigned tick_shift) {
  *   igi7                  — current 7-bit IGI (0xC50/0x1d70), the histogram reference
  *   period                — measurement window in CCX ticks (default 500 = ~2 ms
  *                           at 20 MHz; pass nhm_sample_period(shift) in narrowband)
+ *   tick_shift            — ccx_tick_shift() of the tuned width; recorded on the
+ *                           reading (e.ccx_tick_us) so its tick counts convert to time
  * The thresholds follow phydm's NHM_BACKGROUND recipe (IGI-relative), so the
  * buckets are referenced to the receiver's own noise floor, not absolute dBm.
  * CLM needs no such reference: it counts busy ticks, so its ratio is comparable
@@ -98,7 +100,9 @@ inline constexpr uint16_t nhm_sample_period(unsigned tick_shift) {
 inline void read_nhm(const NhmRegs& r, uint8_t igi7,
                      const std::function<uint32_t(uint16_t)>& read32,
                      const std::function<void(uint16_t, uint32_t, uint32_t)>& set_bb,
-                     RxEnergy& e, uint16_t period = 500) {
+                     RxEnergy& e, uint16_t period = 500,
+                     unsigned tick_shift = 0) {
+  e.ccx_tick_us = static_cast<uint8_t>(ccx_tick_us(tick_shift));
   /* Thresholds (phydm_nhm_th_update_chk, NHM_BACKGROUND): unit PWdB U(8,1).
    * th[0] = (igi - CCA_CAP) * 2, th[i] = th[0] + 4*i for i=1..10. */
   constexpr int kCcaCap = 14;

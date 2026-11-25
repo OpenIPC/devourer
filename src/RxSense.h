@@ -82,8 +82,12 @@ struct RxEnergy {
    * when the caller asked for NHM (GetRxEnergy(with_nhm=true)). */
   bool valid_clm = false;
   uint8_t clm_ratio_pct = 0;  /* 0..100 busy airtime */
-  uint16_t clm_result = 0;    /* raw busy ticks, 4 us each */
-  uint16_t clm_period = 0;    /* window length in the same 4 us ticks */
+  uint16_t clm_result = 0;    /* raw busy ticks, ccx_tick_us each */
+  uint16_t clm_period = 0;    /* window length in the same ticks */
+  /* One CCX tick in microseconds for this read's clm_/nhm_duration counts:
+   * 4 at 20 MHz and wider, 8 at 10 MHz, 16 at 5 MHz (the engine counts in
+   * baseband-clock ticks — devourer::ccx_tick_shift, NhmReader.h). */
+  uint8_t ccx_tick_us = 4;
 
   /* Active/frame-free ABSOLUTE noise floor (dBm) — the vendor idle-noise
    * monitor, distinct from the passive rssi-snr floor in RxQuality. Heavy
@@ -178,7 +182,7 @@ struct ChannelBusy {
   BusySource source = BusySource::None;
 
   /* The window the reading spans, in microseconds. Realtek: the CLM period
-   * (clm_period * 4 us, a HARDWARE window, ~2 ms at the default). MediaTek:
+   * (clm_period * ccx_tick_us, a HARDWARE window, ~2 ms at the default). MediaTek:
    * the HOST-measured interval since the previous call, i.e. as long as the
    * caller's own cadence. A consumer rejecting a too-short dwell reads this
    * rather than its own clock. 0 = unknown (the first call on the MediaTek
@@ -250,7 +254,7 @@ inline ChannelBusy busy_from_rx_energy(const RxEnergy &e) {
   b.source = BusySource::Clm;
   b.valid_busy = true;
   b.busy_pct = e.clm_ratio_pct > 100 ? 100 : e.clm_ratio_pct;
-  b.window_us = static_cast<uint32_t>(e.clm_period) * 4u; /* ticks are 4 us */
+  b.window_us = static_cast<uint32_t>(e.clm_period) * e.ccx_tick_us;
   if (e.valid_nhm) {
     b.valid_energy = true;
     b.energy_pct =

@@ -56,6 +56,21 @@ int main() {
     check("clm energy zeroed", b.energy_pct, 0);
   }
   {
+    /* Narrowband: the sampled read programs fewer, longer ticks (250 x 8 us
+     * at 10 MHz, 125 x 16 us at 5 MHz), and the window it reports must still
+     * be the ~2 ms it spans. With a fixed 4 us it read 1000 / 500 us, and a
+     * consumer with a minimum-window rule rejected a valid sample. */
+    RxEnergy e;
+    e.valid_clm = true;
+    e.clm_ratio_pct = 10;
+    e.clm_period = 250;
+    e.ccx_tick_us = 8;
+    check("clm window_us at 10 MHz", busy_from_rx_energy(e).window_us, 2000);
+    e.clm_period = 125;
+    e.ccx_tick_us = 16;
+    check("clm window_us at 5 MHz", busy_from_rx_energy(e).window_us, 2000);
+  }
+  {
     /* CLM + NHM: both halves present. */
     RxEnergy e;
     e.valid_clm = true;

@@ -1,7 +1,9 @@
 # Merge gate for the Qodo code-review agent.
 #
 # Kept in step with OpenIPC/firmware's qodo-gate.yml: the two repos run the
-# same agent and hit the same failure modes. Port a fix to both.
+# same agent and hit the same failure modes. Port a fix to both. Two things
+# here go beyond that file: the bot is matched by its exact login, and the
+# sweep waits for an older run that is still in flight.
 #
 # Why: branch protection's "require conversation resolution" only blocks
 # unresolved threads that EXIST at merge time. Qodo posts its review a minute
@@ -71,7 +73,11 @@ jobs:
     #                         those have no PR to gate.
     #   comment author      — only the bot's own comment is evidence of review.
     #                         A human typing /review still works: Qodo answers,
-    #                         and that answer is what triggers this.
+    #                         and that answer is what triggers this. Matched
+    #                         EXACTLY, `[bot]` suffix and account type both: a
+    #                         prefix match would accept any account someone
+    #                         registers with a longer name, and one comment
+    #                         from it would clear the gate.
     #   comment body        — the bot also posts "Qodo is busy working" and
     #                         "PR Summary by Qodo", neither of which means the
     #                         diff was reviewed. Matching the review header
@@ -81,7 +87,8 @@ jobs:
     if: >-
       github.event_name != 'issue_comment' ||
       (github.event.issue.pull_request &&
-       startsWith(github.event.comment.user.login, 'qodo-free-for-open-source-projects') &&
+       github.event.comment.user.login == 'qodo-free-for-open-source-projects[bot]' &&
+       github.event.comment.user.type == 'Bot' &&
        contains(github.event.comment.body, 'Code Review by Qodo'))
     steps:
       - name: Require a Qodo review with all its threads resolved
@@ -95,6 +102,11 @@ jobs:
         run: |
           set -euo pipefail
           BOT='qodo-free-for-open-source-projects'
+          # REST spells an app's login with a [bot] suffix, GraphQL without.
+          # Both are compared for equality, never by prefix: `[` cannot occur
+          # in a user-chosen login, so the suffixed form cannot be imitated,
+          # and the bare form is a login only the app can hold.
+          BOT_REST="${BOT}[bot]"
 
           json=$(gh api graphql \
             -F owner="$REPO_OWNER" -F name="$REPO_NAME" -F pr="$PR" \
@@ -137,11 +149,10 @@ jobs:
           # (every inline reply wraps itself in one), and the bot's first
           # review is the OLDEST — exactly what a last-100 window loses
           # first. --paginate applies --jq per page, so emit ids and count
-          # lines. REST spells the bot login with a [bot] suffix, unlike
-          # GraphQL, so match on the prefix.
+          # lines.
           reviewed=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR/reviews" \
             --paginate --jq ".[]
-              | select(.user.login | startswith(\"$BOT\"))
+              | select(.user.login == \"$BOT_REST\" and .user.type == \"Bot\")
               | .id" | wc -l)
 
           # Match the review header specifically, NOT merely "a comment by the
@@ -152,7 +163,7 @@ jobs:
           # the agent never actually reviewed.
           commented=$(gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR/comments" \
             --paginate --jq ".[]
-              | select(.user.login | startswith(\"$BOT\"))
+              | select(.user.login == \"$BOT_REST\" and .user.type == \"Bot\")
               | select(.body | test(\"Code Review by Qodo\"; \"i\"))
               | .id" | wc -l)
 
@@ -249,6 +260,22 @@ jobs:
               exit 0
             fi
           fi
+          # An OLDER run of this gate may still be in flight on the commit: it
+          # read "no review yet" a moment before the review landed and has not
+          # failed yet, so the listing below would not see it, and nothing
+          # would ever re-run it once it does. Give such runs a bounded while
+          # to finish first. Only older ones (run ids are monotonic): a newer
+          # run does its own sweep, and two runs waiting on each other would
+          # both just burn the timeout.
+          for _ in 1 2 3 4 5 6 7 8 9; do
+            pending=$(gh run list --repo "$REPO" --workflow qodo-gate \
+                --commit "$HEAD_SHA" --json databaseId,status \
+                --jq "[.[] | select(.status != \"completed\")
+                          | select(.databaseId < $THIS_RUN)] | length") || break
+            [ "$pending" -gt 0 ] || break
+            echo "waiting for $pending older qodo-gate run(s) to finish"
+            sleep 10
+          done
           # The listing is guarded too, not just the reruns: with an unguarded
           # pipeline a transient list failure would be the step's exit code —
           # exactly the PASS-into-FAIL this step promises not to produce.

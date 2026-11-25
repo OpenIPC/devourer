@@ -2161,3 +2161,9 @@ foreach(_dvr_t IN LISTS _dvr_targets)
         add_dependencies(selftests ${_dvr_t})
     endif()
 endforeach()
+# Not a selftest itself but the device side of one: the mt76x0u_wire test runs
+# tests/mt76x0u_wire_model.py against this binary, so the aggregate must build
+# it or that registered test fails on a selftests-only build (the mingw job).
+if(TARGET mt76x0u_wire_harness)
+    add_dependencies(selftests mt76x0u_wire_harness)
+endif()

@@ -391,7 +391,7 @@ RxEnergy RtlJaguarDevice::GetRxEnergy(bool with_nhm) {
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);
       },
-      e);
+      e, devourer::nhm_sample_period(ccx_tick_shift_now()));
   }
 
   /* Active absolute floor: the debug-port measurement wedges live RX, so
@@ -463,6 +463,16 @@ void RtlJaguarDevice::measure_idle_noise_floor() {
 }
 
 SelectedChannel RtlJaguarDevice::GetSelectedChannel() { return _channel; }
+
+/* IRtlRadio::ccx_tick_shift_now. Only the dies that actually re-clock the
+ * baseband for 5/10 MHz stretch the CCX tick; the 8821A is excluded from
+ * narrowband and runs 20 MHz whatever width was asked for (GetAdapterCaps). */
+unsigned RtlJaguarDevice::ccx_tick_shift_now() {
+  const auto ic = _eepromManager->version_id.ICType;
+  if (ic != CHIP_8812 && ic != CHIP_8814A)
+    return 0;
+  return devourer::ccx_tick_shift(_channel.ChannelWidth);
+}
 
 bool RtlJaguarDevice::GetPermanentMacAddress(uint8_t out[6]) {
   /* The read, the per-chip offsets and the unprogrammed-value rejection all

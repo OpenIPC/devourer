@@ -127,6 +127,12 @@ lands here with no Jaguar1-specific code. **Measured on an RTL8812AU**
 a flooder a MediaTek adapter independently measured, 0.1-1.0% on a quiet
 channel, so `busy_airtime_measured` is true.
 
+In 5/10 MHz narrowband the CCX tick follows the baseband clock, so the 8812A
+and 8814A scale their CLM/NHM periods by it (`ccx_tick_shift_now`); the 8821A
+never re-clocks and stays unscaled. **Not measured on Jaguar1** — the rule is
+the vendor's and the measurement is the Jaguar2/Jaguar3/RTL8733B one in
+`docs/rx-spectrum-sensing.md` "The armed busy window".
+
 Window behaviour matches the Jaguar2 and NOT the Jaguar3: an NHM read inside an
 armed window leaves it readable but 4 points HIGH (74.8 vs 70.9), where the
 JGR3 map truncates it to the 2 ms re-arm. Both are spoiled — `ClmWindow`

@@ -479,6 +479,7 @@ private:
     fn(devourer::nhm_regs_11ac(), rd, wr);
     return true;
   }
+  unsigned ccx_tick_shift_now() override;
 
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
 

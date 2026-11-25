@@ -264,6 +264,11 @@ private:
     fn(devourer::nhm_regs_11ac(), rd, wr);
     return true;
   }
+  /* Both Jaguar2 dies re-clock the baseband for 5/10 MHz. Caller holds
+   * _reg_mu (with_ccx, GetRxEnergy). */
+  unsigned ccx_tick_shift_now() override {
+    return devourer::ccx_tick_shift(_channel.ChannelWidth);
+  }
 
   /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
    * Init and InitWrite (see the definition for semantics). */

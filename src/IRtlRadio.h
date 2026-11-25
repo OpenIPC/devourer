@@ -149,7 +149,7 @@ public:
     const bool have_ccx =
         with_ccx([&](const devourer::NhmRegs &regs, const Read32 &,
                      const SetBb &wr) {
-          armed = _busy_window.arm(regs, window_us, tx, wr);
+          armed = _busy_window.arm(regs, window_us, tx, wr, ccx_tick_shift_now());
         });
     return have_ccx ? armed : 0;
   }
@@ -341,6 +341,14 @@ protected:
    * is a family lending the base class its register access, not a
    * register-poke API on the contract. */
   virtual bool with_ccx(const CcxFn & /*fn*/) { return false; }
+
+  /* The CCX tick for the width this generation is tuned to, as a shift on the
+   * 4 us base tick (devourer::ccx_tick_shift, NhmReader.h). Called only from
+   * inside a with_ccx callback, so under whatever lock that generation holds
+   * across its channel state. A generation with narrowband widths MUST
+   * override it: the default is right only where the baseband is never
+   * re-clocked. */
+  virtual unsigned ccx_tick_shift_now() { return 0; }
 
   /* A generation calls these from the two paths measured to spoil an armed
    * window: its NHM read (which re-arms the shared engine) and its retune.

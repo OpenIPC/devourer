@@ -287,6 +287,11 @@ private:
     fn(devourer::nhm_regs_jgr3(), rd, wr);
     return true;
   }
+  /* Both Jaguar3 dies re-clock the baseband for 5/10 MHz. Caller holds
+   * _reg_mu (with_ccx, GetRxEnergy, ArmNhmBusy). */
+  unsigned ccx_tick_shift_now() override {
+    return devourer::ccx_tick_shift(_channel.ChannelWidth);
+  }
 
   /* Maps ChannelWidth_t to the devourer RX bw code (0/1/2 = 20/40/80 MHz),
    * for _rx_bw_code below. Explicit switch rather than a cast: the enum's

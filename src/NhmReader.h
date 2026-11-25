@@ -8,6 +8,7 @@
 
 #include "NhmEnvMath.h"
 #include "RxSense.h"
+#include "SelectedChannel.h"
 
 /* NHM (Noise Histogram Measurement) — a frame-free, hardware in-band
  * power-distribution readout, ported from Realtek's phydm CCX
@@ -57,13 +58,39 @@ inline NhmRegs nhm_regs_jgr3() {
                  0x2d4c, 0x2d40, 0x2d44, 0x2d48, 0x2d88};
 }
 
+/* The CCX engine counts in BASEBAND-CLOCK ticks, not in a fixed unit: 4 us at
+ * 20 MHz and wider, 8 us at 10 MHz, 16 us at 5 MHz, because the narrowband
+ * modes re-clock the baseband. A period programmed as if the tick were 4 us
+ * therefore runs 2x / 4x long in narrowband. Measured on the Jaguar3
+ * (RTL8812EU), Jaguar2 (RTL8812BU) and RTL8733B (10 MHz): a 200 ms CLM window
+ * read at 205 ms was not elapsed in every round at 10 MHz. The vendor
+ * compensates the same way for every IC (phydm_nhm_set / phydm_clm_setting:
+ * period >>= 1 at CHANNEL_WIDTH_10, >>= 2 at CHANNEL_WIDTH_5).
+ * ccx_tick_shift() is that shift; the tick is kCcxBaseTickUs << shift. */
+inline constexpr uint32_t kCcxBaseTickUs = 4;
+
+inline constexpr unsigned ccx_tick_shift(ChannelWidth_t width) {
+  return width == CHANNEL_WIDTH_10 ? 1u : width == CHANNEL_WIDTH_5 ? 2u : 0u;
+}
+
+inline constexpr uint32_t ccx_tick_us(unsigned tick_shift) {
+  return kCcxBaseTickUs << tick_shift;
+}
+
+/* The sampled read's period for a given tick: the same ~2 ms slice at every
+ * width, rather than 500 ticks of whatever the tick happens to be. */
+inline constexpr uint16_t nhm_sample_period(unsigned tick_shift) {
+  return static_cast<uint16_t>(500u >> tick_shift);
+}
+
 /* Run one CCX measurement window, filling e.nhm[]/nhm_duration/nhm_th[]/
  * nhm_ratio_pct/nhm_env_ratio_pct/valid_nhm, and the e.clm_ fields with
  * valid_clm.
  *   read32(addr)          — read a 32-bit BB register
  *   set_bb(addr,mask,val) — masked BB-register write (phy_set_bb_reg)
  *   igi7                  — current 7-bit IGI (0xC50/0x1d70), the histogram reference
- *   period                — measurement window in 4us units (default 500 = ~2ms)
+ *   period                — measurement window in CCX ticks (default 500 = ~2 ms
+ *                           at 20 MHz; pass nhm_sample_period(shift) in narrowband)
  * The thresholds follow phydm's NHM_BACKGROUND recipe (IGI-relative), so the
  * buckets are referenced to the receiver's own noise floor, not absolute dBm.
  * CLM needs no such reference: it counts busy ticks, so its ratio is comparable

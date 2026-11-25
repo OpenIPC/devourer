@@ -508,6 +508,62 @@ int main() {
     check("failed read: the retry reads the window", b.busy_pct, 50);
   }
 
+  /* Narrowband: the CCX tick follows the baseband clock (8 us at 10 MHz,
+   * 16 us at 5 MHz). The period must shrink by the same factor, or the
+   * window runs 2x / 4x the caller's dwell and reads back not-elapsed — the
+   * on-air failure this guards. The window REPORTED is in real microseconds
+   * at every width. */
+  {
+    using devourer::ccx_tick_shift;
+    using devourer::clm_period_for_us;
+    check("tick shift: 20 MHz", ccx_tick_shift(CHANNEL_WIDTH_20), 0);
+    check("tick shift: 40 MHz", ccx_tick_shift(CHANNEL_WIDTH_40), 0);
+    check("tick shift: 80 MHz", ccx_tick_shift(CHANNEL_WIDTH_80), 0);
+    check("tick shift: 10 MHz", ccx_tick_shift(CHANNEL_WIDTH_10), 1);
+    check("tick shift: 5 MHz", ccx_tick_shift(CHANNEL_WIDTH_5), 2);
+    check("sample period: 20 MHz", devourer::nhm_sample_period(0), 500);
+    check("sample period: 10 MHz", devourer::nhm_sample_period(1), 250);
+    check("sample period: 5 MHz", devourer::nhm_sample_period(2), 125);
+    check("period: 200 ms at 4 us", clm_period_for_us(200000, 0), 50000);
+    check("period: 200 ms at 8 us", clm_period_for_us(200000, 1), 25000);
+    check("period: 200 ms at 16 us", clm_period_for_us(200000, 2), 12500);
+    check("period: default shift is 20 MHz", clm_period_for_us(200000), 50000);
+
+    for (unsigned shift = 0; shift <= 2; ++shift) {
+      MockBb bb;
+      ClmWindow w;
+      const uint32_t armed = w.arm(regs, 200000, 0, bb.wr(), shift);
+      check("narrowband arm: reports the asked window", armed, 200000);
+      check("narrowband arm: period field in ticks",
+            bb.regs[regs.period] & 0xffffu, 50000u >> shift);
+      /* Half the ticks busy is half the airtime at any tick. */
+      bb.clm_ticks = static_cast<uint16_t>(25000u >> shift);
+      bb.clm_ready = true;
+      const ChannelBusy b = w.read(regs, 0, bb.rd());
+      check("narrowband read: valid", b.valid_busy, 1);
+      check("narrowband read: busy share", b.busy_pct, 50);
+      check("narrowband read: window in real us", b.window_us, 200000);
+    }
+    /* The 16-bit clamp is in ticks, so the longest window doubles per shift
+     * and the arm says so instead of claiming the 20 MHz maximum. */
+    {
+      MockBb bb;
+      ClmWindow w;
+      check("narrowband clamp: 10 MHz reaches 480 ms",
+            w.arm(regs, 1000000, 0, bb.wr(), 1), 480000);
+      check("narrowband clamp: period field",
+            bb.regs[regs.period] & 0xffffu, kClmMaxPeriodTicks);
+    }
+    {
+      MockBb bb;
+      ClmWindow w;
+      check("narrowband floor: 5 MHz floor is 250 ticks = 4 ms",
+            w.arm(regs, 100, 0, bb.wr(), 2), 4000);
+      check("narrowband floor: period field",
+            bb.regs[regs.period] & 0xffffu, kClmMinPeriodTicks);
+    }
+  }
+
   if (g_fail == 0)
     std::printf("busy_window_selftest: all checks passed\n");
   return g_fail ? 1 : 0;

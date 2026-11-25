@@ -1289,6 +1289,9 @@ add_test(NAME receipt_roundtrip COMMAND ReceiptSelftest)
 add_executable(NoiseFloorMathSelftest tests/noise_floor_math_selftest.cpp)
 target_include_directories(NoiseFloorMathSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Standalone like NhmEnvMathSelftest below: the header's absolute NHM table is
+# an inline constexpr variable, which MSVC rejects below /std:c++17.
+target_compile_features(NoiseFloorMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
 

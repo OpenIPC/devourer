@@ -1,4 +1,5 @@
 #include "PhydmRuntimeJaguar3.h"
+#include "IgiFloor.h"
 
 namespace jaguar3 {
 
@@ -35,16 +36,14 @@ void PhydmRuntimeJaguar3::set_igi(uint8_t igi) {
 void PhydmRuntimeJaguar3::set_igi_floor(uint8_t floor, uint8_t channel) {
   const uint8_t prev = _igi_floor;
   _igi_floor = floor;
-  if (floor != 0) {
-    if (get_igi() < floor)
-      set_igi(floor);
-  } else if (prev != 0) {
-    /* The top of the window dig() would clamp to on its next tick. */
-    const uint8_t hi =
-        is_dfs_channel(channel) ? DIG_MIN_DFS : DIG_MAX_OF_MIN_COVERAGE;
-    if (get_igi() > hi)
-      set_igi(hi);
-  }
+  if (floor == 0 && prev == 0)
+    return; /* no floor before or after: touch no register */
+  /* The top of the window dig() would clamp to on its next tick. */
+  const uint8_t hi =
+      is_dfs_channel(channel) ? DIG_MIN_DFS : DIG_MAX_OF_MIN_COVERAGE;
+  const int w = igi_on_floor_change(prev, floor, get_igi(), hi);
+  if (w >= 0)
+    set_igi(static_cast<uint8_t>(w));
 }
 
 /* phydm_fa_cnt_statistics_jgr3 + phydm_false_alarm_counter_reg_reset: read

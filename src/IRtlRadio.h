@@ -231,6 +231,18 @@ public:
    * nothing - where not ported (the default; only Jaguar3 implements it). A
    * failed register read throws, like every register read, mid-dump. */
   virtual bool DumpMacRegisters() { return false; }
+  /* The chip's PUB TX queue: pages free right now and pages configured
+   * (REG_FIFOPAGE_INFO_5: bits 27:16 free, 11:0 configured). One control
+   * read. A stalled TX path shows as free_pages stuck well below total_pages
+   * while bulk-OUT sends still return. Callable from any thread at the
+   * caller's own cadence (never per frame), including while a sender is
+   * blocked in bulk-OUT (EP0 is separate from the bulk pipe). Returns false
+   * where unsupported (the outputs are untouched).
+   *
+   * THROWS on a failed USB transfer - catch it. */
+  virtual bool GetTxQueuePages(uint16_t& free_pages, uint16_t& total_pages) {
+    (void)free_pages; (void)total_pages; return false;
+  }
   /* Read the chip's internal packet memory through the debug window
    * (REG_PKTBUF_DBG_CTRL + 0x8000..0x8FFF), a port of halmac read_buf_88xx.
    * `sel` 0 = TX FIFO, 1 = the LLT (the linked list that chains TX pages).

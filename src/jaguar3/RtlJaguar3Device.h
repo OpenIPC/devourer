@@ -84,6 +84,7 @@ public:
    * Serialized on _reg_mu against the coex runtime tick, so the dump is one
    * chip state. */
   void DumpChipState() override;
+  bool GetTxQueuePages(uint16_t& free_pages, uint16_t& total_pages) override;
   uint32_t GetTxDmaStatus() override;
   bool HasTxDmaStatus() const override { return true; }
   /* Serialized on _reg_mu against the coex runtime tick for the whole dump

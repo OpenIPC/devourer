@@ -75,6 +75,28 @@ public:
    * sampling faster than a few times a second. */
   virtual RxEnergy GetRxEnergy(bool with_nhm) { (void)with_nhm; return {}; }
 
+  /* Busy-airtime NHM window over ABSOLUTE dBm thresholds, split so no call
+   * ever sleeps: ArmNhmBusy programs the recipe (first call, or after
+   * anything else reprogrammed the CCX engine) and pulses the trigger for a
+   * window of `window_us`; ReadNhmBusy returns the finished window, or
+   * valid=false if it has not finished. Arm again for the next window.
+   *
+   * Returns the window actually armed in microseconds, like ArmChannelBusy:
+   * the engine counts in baseband-clock ticks (4 us at 20 MHz and wider,
+   * 8 us at 10 MHz, 16 us at 5 MHz) into a 16-bit period, so the request is
+   * rounded down to a whole tick and capped at 65535 ticks (~262 ms at
+   * 20 MHz). 0 = nothing armed: a zero window, not brought up yet, a failed
+   * register write, or a generation that has not ported it. Whether the
+   * generation has it is AdapterCaps::nhm_busy_ok, so a caller decides up
+   * front instead of reading that from a 0 here.
+   *
+   * Control-plane threading contract as GetRxEnergy. Shares the CCX engine
+   * with CLM: an arm spoils an armed ArmChannelBusy window, so use one busy
+   * facility per card at a time. Caveats: src/jaguar3/CLAUDE.md
+   * "Busy-airtime NHM". */
+  virtual uint32_t ArmNhmBusy(uint32_t window_us) { (void)window_us; return 0; }
+  virtual NhmBusy ReadNhmBusy() { return {}; }
+
   /* The neutral reading (IRadio::GetChannelBusy), expressed in this family's
    * own facility: CLM busy airtime plus NHM-env, both of which ride
    * GetRxEnergy's armed CCX window.

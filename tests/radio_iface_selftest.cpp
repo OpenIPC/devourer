@@ -91,6 +91,7 @@ int main() {
   check(!r->GetAdapterCaps().busy_airtime_measured,
         "busy_airtime_measured defaults false");
   check(!r->GetAdapterCaps().rx_energy_ok, "rx_energy_ok defaults false");
+  check(!r->GetAdapterCaps().nhm_busy_ok, "nhm_busy_ok defaults false");
   check(!r->GetFwBootStatus().supported, "GetFwBootStatus default is unsupported");
   check(!r->GetTxPowerCaps().supported, "GetTxPowerCaps default is unsupported");
   check(!r->SetAckResponder(devourer::MacAddr{}), "SetAckResponder default refuses");

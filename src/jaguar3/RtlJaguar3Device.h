@@ -222,6 +222,8 @@ public:
    * 0x1a2c + 0x1eb4[25]. Read-then-reset for a per-call delta; serialized on
    * _reg_mu against the coex runtime thread. The read side of the CW tone. */
   RxEnergy GetRxEnergy(bool with_nhm) override;
+  uint32_t ArmNhmBusy(uint32_t window_us) override;
+  NhmBusy ReadNhmBusy() override;
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
    * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. On Jaguar3 the
@@ -273,6 +275,9 @@ private:
       return false;
     std::lock_guard<std::mutex> reg(_reg_mu);
     std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    /* A CLM arm rewrites CCX dwords the busy-NHM recipe cache holds
+     * (period low half, ctrl bit0): recompose it on the next ArmNhmBusy. */
+    nhm_busy_forget();
     const Read32 rd = [this](uint16_t a) {
       return _device.rtw_read<uint32_t>(a);
     };
@@ -423,6 +428,21 @@ private:
   std::atomic<bool> _txpwr_sat_high{false};
   /* Bring-up completion: gates the live apply (+ _reg_mu use) in the setters. */
   bool _brought_up = false;
+  /* Busy-NHM recipe cache (ArmNhmBusy): the composed 0x1e40/0x1e60 dwords
+   * once the recipe is programmed. Cleared by anything else that programs
+   * the CCX engine (GetRxEnergy with_nhm, a CLM arm via with_ccx), by a full
+   * channel set, FastSetBandwidth, Stop and Init/InitWrite.
+   * The four fields below are guarded by busy_window_mutex(). */
+  bool _nhm_busy_ready = false;
+  uint32_t _nhm_busy_1e40 = 0, _nhm_busy_1e60 = 0;
+  /* A window armed by ArmNhmBusy whose result still describes the current
+   * channel: ReadNhmBusy answers only while it is set. A hop clears it but
+   * keeps the recipe (the hop does not touch 0x1e40/0x1e60). */
+  bool _nhm_busy_armed = false;
+  void nhm_busy_forget() {
+    _nhm_busy_ready = false;
+    _nhm_busy_armed = false;
+  }
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   devourer::RxPathActivityAccumulator _rxpaths;

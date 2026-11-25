@@ -1289,6 +1289,9 @@ add_test(NAME receipt_roundtrip COMMAND ReceiptSelftest)
 add_executable(NoiseFloorMathSelftest tests/noise_floor_math_selftest.cpp)
 target_include_directories(NoiseFloorMathSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Standalone like NhmEnvMathSelftest below: the header's absolute NHM table is
+# an inline constexpr variable, which MSVC rejects below /std:c++17.
+target_compile_features(NoiseFloorMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
 
@@ -1315,6 +1318,12 @@ target_include_directories(NhmEnvMathSelftest PRIVATE
 target_compile_features(NhmEnvMathSelftest PRIVATE cxx_std_20)
 
 add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
+
+# Headless guard for the busy-NHM register composers (src/jaguar3/NhmBusyMath.h)
+# and the absolute threshold table they program (src/NoiseFloorMath.h).
+add_executable(NhmBusySelftest tests/nhm_busy_selftest.cpp)
+target_link_libraries(NhmBusySelftest PRIVATE devourer)
+add_test(NAME nhm_busy_math COMMAND NhmBusySelftest)
 
 # Headless guard for the vendor-neutral ChannelBusy conversions (src/RxSense.h):
 # the Realtek RxEnergy reduction and the MediaTek channel-timer ratio. Pure

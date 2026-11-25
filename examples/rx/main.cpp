@@ -27,6 +27,7 @@
 #include "LaCapture.h"
 #include "RadiotapBuilder.h"
 #include "LinkHealth.h"
+#include "NoiseFloorMath.h"
 #include "RxPacket.h"
 #include "StreamTelemetry.h"
 #include "SweepSpec.h"
@@ -344,6 +345,30 @@ static const uint32_t g_rx_busy_ms = []() -> uint32_t {
     return 0u;
   const unsigned long long cap = UINT32_MAX / 1000u;
   return static_cast<uint32_t>(v > cap ? cap : v);
+}();
+
+/* DEVOURER_RX_NHM_BUSY_MS=N: three busy sensors side by side, for comparing
+ * them against one emitter (Jaguar3 only). One control thread owns the CCX
+ * engine and runs, per round: an absolute-dBm NHM busy window of N ms
+ * (ArmNhmBusy, with the FA/CCA delta and decoded frames over that same
+ * window), then a CLM busy window of N ms (ArmChannelBusy), then one
+ * GetRxEnergy(with_nhm) for the IGI-relative nhm_env. Sequential because each
+ * re-arms the shared engine and would spoil the others. One `rx.busycmp`
+ * event per round. 0 = disabled; capped at 240 (logged), CLM's own maximum,
+ * so both windows span the same time. The FA/CCA delta is also reset by the
+ * Jaguar3 coex thread's ~2 s fa_stats tick, so a window that tick lands in
+ * reports only the counts since it. */
+static bool g_rx_nhm_busy_capped = false; /* warned in main */
+static const uint32_t g_rx_nhm_busy_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_RX_NHM_BUSY_MS");
+  if (!e)
+    return 0u;
+  char *end = nullptr;
+  const unsigned long v = std::strtoul(e, &end, 0);
+  if (end == e || *end != '\0' || *e == '-')
+    return 0u;
+  g_rx_nhm_busy_capped = v > 240;
+  return static_cast<uint32_t>(v > 240 ? 240 : v);
 }();
 
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
@@ -1451,6 +1476,17 @@ int main(int argc, char **argv) {
                   "and the busy window is a single-control-thread contract");
     return 2;
   }
+  if (g_rx_nhm_busy_ms > 0 &&
+      (g_rx_busy_ms > 0 || g_rx_energy_ms > 0 || !g_rx_sweep.empty() ||
+       std::getenv("DEVOURER_HOP_CHANNELS"))) {
+    logger->error("DEVOURER_RX_NHM_BUSY_MS: refused with DEVOURER_RX_BUSY_MS / "
+                  "DEVOURER_RX_ENERGY_MS / DEVOURER_RX_SWEEP / "
+                  "DEVOURER_HOP_CHANNELS — it must be the only CCX user");
+    return 2;
+  }
+
+  if (g_rx_nhm_busy_capped)
+    logger->warn("DEVOURER_RX_NHM_BUSY_MS: capped at 240 ms (CLM's maximum)");
 
   /* Owns the teardown order (device -> interface -> handle -> context; see
    * DeviceSession.h). Declared before every thread below, so the threads are
@@ -1854,6 +1890,129 @@ int main(int argc, char **argv) {
     });
   }
 
+  /* DEVOURER_RX_NHM_BUSY_MS — see the knob. */
+  std::atomic<bool> busycmp_stop{false};
+  std::thread busycmp_emitter;
+  IRtlRadio *const busycmp_dev =
+      g_rx_nhm_busy_ms > 0 ? dynamic_cast<IRtlRadio *>(rtlDevice) : nullptr;
+  if (g_rx_nhm_busy_ms > 0 &&
+      (!busycmp_dev || !rtlDevice->GetAdapterCaps().nhm_busy_ok))
+    logger->error("DEVOURER_RX_NHM_BUSY_MS: this adapter has no busy-NHM "
+                  "window (AdapterCaps::nhm_busy_ok, Jaguar3 only) — ignored");
+  else if (busycmp_dev) {
+    IRtlRadio *dev = busycmp_dev;
+    logger->info("DEVOURER_RX_NHM_BUSY_MS={} — starting busy comparison",
+                 g_rx_nhm_busy_ms);
+    busycmp_emitter = std::thread([&busycmp_stop, dev, logger]() {
+      auto nap = [&busycmp_stop](uint32_t ms) {
+        const auto until = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(ms);
+        while (!busycmp_stop.load()) {
+          const auto left = until - std::chrono::steady_clock::now();
+          if (left <= std::chrono::steady_clock::duration::zero())
+            return;
+          const auto step = std::chrono::milliseconds(20);
+          std::this_thread::sleep_for(left < step ? left : step);
+        }
+      };
+      /* first frame = bring-up done (as the busy poller); quiet channel: 10 s */
+      for (uint32_t s = 0;
+           s < 10000 && !busycmp_stop.load() && g_rx_count.load() == 0; s += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      devourer::PollSkips skips("DEVOURER_RX_NHM_BUSY_MS");
+      bool told_refused = false;
+      while (!busycmp_stop.load()) {
+        try {
+          /* 1. absolute NHM window + FA/CCA + frames over the same N ms.
+           * Arm first: a refused arm touches nothing, and the counter reset
+           * (which leaves an in-flight NHM window intact) and the frame
+           * snapshot then start with the window, not before its setup. */
+          const uint32_t nhm_win_us = dev->ArmNhmBusy(g_rx_nhm_busy_ms * 1000u);
+          if (nhm_win_us == 0) {
+            if (!told_refused)
+              logger->info("DEVOURER_RX_NHM_BUSY_MS: arm refused (not brought "
+                           "up yet) — retrying");
+            told_refused = true;
+            nap(500);
+            continue;
+          }
+          dev->GetRxEnergy(false); /* reset the FA/CCA counters (no CCX access) */
+          const int f0 = g_rx_count.load();
+          const auto t0 = std::chrono::steady_clock::now();
+          nap((nhm_win_us + 999) / 1000);
+          NhmBusy nb = dev->ReadNhmBusy();
+          for (int i = 0; i < 5 && !nb.valid && !busycmp_stop.load(); ++i) {
+            nap(5); /* host timer ran ahead of the CCX tick clock */
+            nb = dev->ReadNhmBusy();
+          }
+          const RxEnergy sc = dev->GetRxEnergy(false);
+          const int frames = g_rx_count.load() - f0;
+          const auto win_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - t0).count();
+          /* 2. CLM busy over its own N ms */
+          devourer::ChannelBusy cb;
+          if (dev->ArmChannelBusy(g_rx_nhm_busy_ms * 1000u) != 0) {
+            nap(g_rx_nhm_busy_ms + 5);
+            cb = dev->GetChannelBusy();
+          }
+          /* 3. IGI-relative 2 ms nhm_env sample + IGI */
+          const RxEnergy en = dev->GetRxEnergy(true);
+          if (busycmp_stop.load())
+            break;
+
+          uint32_t all = 0, peak = 0;
+          for (int i = 0; i < 12; ++i) {
+            all += nb.buckets[i];
+            peak = nb.buckets[i] > peak ? nb.buckets[i] : peak;
+          }
+          devourer::Ev ev(*g_ev, "rx.busycmp");
+          ev.t().f("nhm_valid", nb.valid).f("nhm_duration", nb.duration);
+          ev.f("nhm_window_us", nhm_win_us);
+          {
+            char b[64];
+            int n = 0;
+            for (int i = 0; i < 12; ++i)
+              n += std::snprintf(b + n, sizeof b - n, i ? ",%u" : "%u",
+                                 nb.buckets[i]);
+            ev.f("nhm_buckets", b);
+          }
+          /* >= 236 of 255 in one bucket: a constant-envelope emitter or a
+           * frozen power estimate — reported, not filtered
+           * (src/jaguar3/CLAUDE.md "Busy-airtime NHM") */
+          ev.f("nhm_peak", peak);
+          /* busy above -83 dBm */
+          static_assert(devourer::nf::nhm_abs_bucket_from(-83) > 0,
+                        "-83 dBm must be a table edge");
+          uint32_t above = 0;
+          for (int i = devourer::nf::nhm_abs_bucket_from(-83); i < 12; ++i)
+            above += nb.buckets[i];
+          if (nb.valid && all)
+            ev.f("nhm_busy83", 100.0 * above / all);
+          else
+            ev.f("nhm_busy83", nullptr);
+          if (sc.valid_fa)
+            ev.f("fa_ofdm", sc.fa_ofdm).f("cca_ofdm", sc.cca_ofdm);
+          else
+            ev.f("fa_ofdm", nullptr).f("cca_ofdm", nullptr);
+          ev.f("frames", frames).f("win_ms", static_cast<int64_t>(win_ms));
+          if (cb.valid_busy)
+            ev.f("clm_busy", cb.busy_pct);
+          else
+            ev.f("clm_busy", nullptr);
+          ev.f("clm_spoil", static_cast<int>(cb.spoil));
+          emit_ccx(ev, en); /* 2 ms clm + nhm_env */
+          if (en.valid_igi)
+            ev.f("igi", en.igi);
+          else
+            ev.f("igi", nullptr);
+        } catch (const std::exception &e) {
+          skips.note(*logger, e);
+          nap(200);
+        }
+      }
+    });
+  }
+
   /* Cross-generation thermal telemetry. GetThermalStatus is part of IRadio
    * (Jaguar1/2/3, Kestrel, and RTL8733B); using the base pointer is what makes
    * DEVOURER_THERMAL_POLL_MS work on RTL8812EU and newer backends instead of
@@ -2141,7 +2300,10 @@ int main(int argc, char **argv) {
 #endif
     energy_emitter_stop = true;
     busy_emitter_stop = true;
+    busycmp_stop = true;
     sta_stop = true;
+    if (busycmp_emitter.joinable())
+      busycmp_emitter.join();
     if (sta_thread.joinable())
       sta_thread.join();
     if (busy_emitter.joinable())

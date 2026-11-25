@@ -254,3 +254,51 @@ In a **TX session** with a 300 ms quiet window the counters are alive (clean
 0/0/0, carrier `clm` 5 / `fa` 1118 / `cca` 1122) — on the same 8812CU and code
 path that previously read *inert* with 4–20 ms windows, so window length rather
 than generation is the live variable in that older result.
+
+## Busy-airtime NHM (`ArmNhmBusy` / `ReadNhmBusy`)
+
+The contract is at `IRtlRadio::ArmNhmBusy` and `NhmBusy` (`src/RxSense.h`).
+This die's recipe: cfg 0x3 (inc_cca ON so 802.11 frames count, inc_tx OFF),
+levels fixed to `nf::kNhmAbsThDbm`, composed as full dwords in
+`NhmBusyMath.h` from one read of `0x1e40`/`0x1e5c`/`0x1e60` and written as
+plain 32-bit writes; result in `0x2d40..0x2d4c`. On-air numbers and the
+comparison with CLM / `fa_ofdm` / `nhm_env`: `docs/rx-spectrum-sensing.md`
+"Busy airtime above a fixed level".
+
+- **Recipe cache.** Holds the composed `0x1e40`/`0x1e60` dwords, which the
+  CLM busy window shares; cleared by `with_ccx` (a CLM arm), by
+  `GetRxEnergy(with_nhm)` — including via `GetRxQuality()` —, by
+  `SetMonitorChannel`, `FastSetBandwidth`, `Stop`, `Init` and `InitWrite`.
+  It survives `FastRetune` (the hop does not touch `0x1e40`/`0x1e60`), but a
+  window armed before the hop reads back invalid rather than as a blend of
+  two channels. `Stop` does not clear `_brought_up`, so an arm issued after
+  it still succeeds — the residual described at `IRadio::ArmChannelBusy`.
+  The cache and the armed flag are guarded by `busy_window_mutex()`.
+- **The tick follows the baseband clock**: 4 us at 20 MHz and wider, 8 us at
+  10 MHz, 16 us at 5 MHz (`phydm_nhm_set` shifts its period the same way).
+  The arm converts the caller's microseconds with the live width
+  (`nhm_period_for_us`) and returns what it armed; a 4 us period at 10/5 MHz
+  ran 2×/4× long and every window read not-ready. `FastSetBandwidth` drops
+  the cache, since the period it holds is in the old tick.
+- **The FA/CCA counter reset does not touch it.** phydm's "reset all
+  counter" (`0x1eb4[25]`, pulsed by `GetRxEnergy` and the coex thread's ~2 s
+  `fa_stats` tick) leaves an in-flight window intact. Measured on one
+  8812EU, 5 GHz ch 144, against a 100/100 ms square-wave jam with 200 ms
+  windows: windows pulsed 150 ms in read 48.3 % busy, sd 0.4 over 200 —
+  identical to unpulsed ones (sd 0.5) — where 50 ms windows on the same jam
+  spread 0–97 % (sd 39.5), so a window cleared to its last 50 ms could not
+  have hidden. One unit, one channel; 2.4 GHz and the 8822C not checked.
+- **It spoils an armed CLM window** through the same `busy_window_note_nhm_read`
+  `GetRxEnergy(with_nhm)` uses (see "CCX energy sensing" above for why this
+  map destroys rather than biases the window).
+- **One full bucket is ambiguous.** An absolute-threshold NHM window on two
+  8812EU units sometimes binned a stuck BB power estimate — 241-255 of 255
+  samples in one bucket near -85 dBm, for seconds after bring-up and most of
+  a 2.4 GHz session — and a constant-envelope emitter (analog FM video)
+  produces the same shape, measured on 5 GHz. `ReadNhmBusy` rejects neither;
+  a caller that filters on the peak bucket loses that emitter. A third
+  8812EU did not reproduce the stuck estimate in one 24 s ch 6 run (0 of 46
+  windows).
+- **The estimator floor moves with IGI.** At IGI 0x35 (the 40/80 MHz
+  `wide_tx_igi_floor`) a quiet channel reads in the -86…-83 dBm bucket instead
+  of -98…-89, so edges below about -86 dBm carry no information there.

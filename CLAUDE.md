@@ -339,6 +339,13 @@ those are the ones listed below.
   `DEVOURER_RX_ENERGY_MS` cannot). It is the survey executor's dwell shape,
   which makes it the harness for "does polling at dwell cadence cost the
   receiver anything".
+- `DEVOURER_RX_NHM_BUSY_MS=N` (rxdemo, Jaguar3) — three busy sensors in turn
+  on one card, one `rx.busycmp` event per round: an absolute-threshold NHM
+  window of N ms (`IRtlRadio::ArmNhmBusy`, max 240) with the FA/CCA delta and
+  decoded frames over that same window, an armed CLM window of N ms, then one
+  `GetRxEnergy(true)` for `nhm_env`. Sequential because each re-arms the
+  shared CCX engine; refused with the other CCX pollers. Results:
+  `docs/rx-spectrum-sensing.md` "Busy airtime above a fixed level".
 - `DEVOURER_LINKHEALTH=1` (rxdemo, needs `DEVOURER_RX_ENERGY_MS=N`) — classify
   the RX sensor tuple via `src/LinkHealth.h`. **EVM, not SNR, is the
   saturation tell**: strong RSSI + poor EVM means back power OFF, which is the
@@ -521,8 +528,13 @@ rails ~100 on a quiet channel). Their disagreement is the signal: an 802.11
 transmitter lifts both, a non-802.11 emitter lifts only `nhm_env`, which is the
 case a frame sniffer calls a free channel. Three cross-cutting caveats, none of
 them chip-specific: plain `fa_ofdm` outperformed both new sensors on every part
-measured, so this buys an airtime unit and a non-railing ratio rather than a new
-detection; `nhm_env` is referenced to the live IGI, so it is only dependable
+measured against an SDR carrier, so there this buys an airtime unit and a
+non-railing ratio rather than a new detection — but against two FPV video
+transmitters on their own channel `fa_ofdm` and `clm` both stayed at the quiet
+channel's level, while on the HDZero's adjacent channel both woke (one 8812EU
+sensor, 20 MHz only; table in `docs/rx-spectrum-sensing.md` "Busy airtime
+above a fixed level");
+`nhm_env` is referenced to the live IGI, so it is only dependable
 where DIG is not free to walk the gain out from under it (the per-generation
 windows are in each `src/<gen>/CLAUDE.md`); and the ~2 ms window makes one dwell
 a sample, not a measurement.

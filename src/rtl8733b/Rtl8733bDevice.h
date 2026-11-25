@@ -162,6 +162,11 @@ private:
     fn(devourer::nhm_regs_jgr3(), rd, wr);
     return true;
   }
+  /* 10 MHz re-clocks the baseband here; 5 MHz is refused, so it never runs.
+   * Caller holds _reg_mu (with_ccx). */
+  unsigned ccx_tick_shift_now() override {
+    return _channel.ChannelWidth == CHANNEL_WIDTH_10 ? 1u : 0u;
+  }
 
   void start_rx_loop(Action_ParsedRadioPacket packetProcessor, bool clear_stale);
   void bring_up_to_phy();

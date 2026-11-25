@@ -52,8 +52,9 @@
 
 namespace devourer {
 
-/* 4 us per tick, and the period field is 16 bits. */
-inline constexpr uint32_t kClmTickUs = 4;
+/* The period field is 16 bits of CCX ticks; the tick is 4 us at 20 MHz and
+ * wider and follows the baseband clock in narrowband (ccx_tick_shift,
+ * NhmReader.h). */
 /* The vendor reports rpt == period as 100% busy, so the top of the range
  * cannot be told from a saturated window that wrapped. Cap below it: 60000
  * ticks = 240 ms, which still spans a survey dwell. */
@@ -61,11 +62,13 @@ inline constexpr uint16_t kClmMaxPeriodTicks = 60000;
 /* A floor rather than a refusal: below ~1 ms the caller is asking for what
  * the sampled path already gives, and silently arming something shorter than
  * the hardware can time would be worse than rounding up to it. The arm
- * returns the window it actually programmed, so the caller can see it. */
+ * returns the window it actually programmed, so the caller can see it.
+ * Both limits are in ticks, so in narrowband they span 2x / 4x the time
+ * (up to 480 / 960 ms). */
 inline constexpr uint16_t kClmMinPeriodTicks = 250;
 
-inline uint16_t clm_period_for_us(uint32_t window_us) {
-  const uint32_t ticks = window_us / kClmTickUs;
+inline uint16_t clm_period_for_us(uint32_t window_us, unsigned tick_shift = 0) {
+  const uint32_t ticks = window_us / ccx_tick_us(tick_shift);
   if (ticks < kClmMinPeriodTicks)
     return kClmMinPeriodTicks;
   if (ticks > kClmMaxPeriodTicks)
@@ -82,9 +85,12 @@ public:
    * microseconds, which is the clamped period and NOT what the caller asked
    * for. 0 means nothing was armed. `tx_submitted` is the device's running
    * TX-submit counter, sampled so the read can tell whether this window was
-   * measured while the sensor itself was transmitting. */
+   * measured while the sensor itself was transmitting. `tick_shift` is the
+   * generation's ccx_tick_shift() for the width it is tuned to: without it a
+   * narrowband window runs 2x / 4x longer than the caller's dwell and reads
+   * back not-elapsed. */
   uint32_t arm(const NhmRegs &regs, uint32_t window_us, uint64_t tx_submitted,
-               const SetBb &set_bb) {
+               const SetBb &set_bb, unsigned tick_shift = 0) {
     /* A zero window is a caller bug, not a request for the minimum: flooring
      * it would arm hardware for a measurement nobody asked for and hand back
      * a period they never chose. Nothing is armed and nothing is disturbed. */
@@ -95,12 +101,13 @@ public:
      * earlier must not survive that with this call's period: read() then
      * returns no reading. */
     armed_ = false;
-    period_ = clm_period_for_us(window_us);
+    tick_us_ = ccx_tick_us(tick_shift);
+    period_ = clm_period_for_us(window_us, tick_shift);
     arm_clm_only(regs, period_, set_bb);
     armed_ = true;
     spoil_ = BusySpoil::None;
     tx_at_arm_ = tx_submitted;
-    return static_cast<uint32_t>(period_) * kClmTickUs;
+    return static_cast<uint32_t>(period_) * tick_us_;
   }
 
   /* Read an armed window. An unarmed, spoiled or not-yet-elapsed window
@@ -144,7 +151,7 @@ public:
     b.valid = true;
     b.source = BusySource::Clm;
     b.valid_busy = true;
-    b.window_us = static_cast<uint32_t>(period_) * kClmTickUs;
+    b.window_us = static_cast<uint32_t>(period_) * tick_us_;
     const uint32_t ticks = c.ticks > period_ ? period_ : c.ticks;
     b.busy_pct =
         static_cast<uint8_t>((static_cast<uint32_t>(ticks) * 100u + period_ / 2u) /
@@ -181,6 +188,7 @@ public:
 private:
   bool armed_ = false;
   uint16_t period_ = 0;
+  uint32_t tick_us_ = kCcxBaseTickUs; /* of the armed window */
   uint64_t tx_at_arm_ = 0;
   BusySpoil spoil_ = BusySpoil::None;
   BusySpoil last_spoil_ = BusySpoil::None;

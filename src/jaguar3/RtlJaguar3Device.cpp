@@ -1492,7 +1492,8 @@ RxEnergy RtlJaguar3Device::GetRxEnergy(bool with_nhm) {
       [this](uint16_t a, uint32_t m, uint32_t v) {
         _device.phy_set_bb_reg(a, m, v);
       },
-      e);
+      e, devourer::nhm_sample_period(ccx_tick_shift_now()),
+      ccx_tick_shift_now());
   }
 
   /* Reset: CCK FA 0x1a2c[15:14] 0->2, CCK CCA 0x1a2c[13:12] 0->2, then OFDM
@@ -1665,9 +1666,7 @@ uint32_t RtlJaguar3Device::ArmNhmBusy(uint32_t window_us) {
   if (!_brought_up || window_us == 0)
     return 0;
   /* The CCX tick follows the BB clock: 8 us at 10 MHz, 16 us at 5 MHz. */
-  const unsigned tick_shift = _channel.ChannelWidth == CHANNEL_WIDTH_10  ? 1
-                              : _channel.ChannelWidth == CHANNEL_WIDTH_5 ? 2
-                                                                         : 0;
+  const unsigned tick_shift = ccx_tick_shift_now();
   const uint16_t period = devourer::jgr3::nhm_period_for_us(window_us, tick_shift);
   /* The NHM trigger re-arms the shared CCX engine, which destroys an armed
    * CLM busy window on this map: note it under the CCX lock, as GetRxEnergy

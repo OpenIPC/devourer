@@ -396,7 +396,8 @@ ch149 0.8%, all 191 dwells stamped with CLM provenance.
 
 `IRadio::ArmChannelBusy(window_us)` fixes the estimator rather than the
 aggregation: CLM's period is its own field (the low half of the period dword)
-and reaches 65535 ticks of 4 us, so the hardware can integrate the whole dwell.
+and reaches 65535 ticks of 4 us (at 20 MHz and wider; see the narrowband
+paragraph below), so the hardware can integrate the whole dwell.
 Arm where the counters are reset, read at the end of the dwell. The MediaTek
 timers already integrate between reads, so there "arming" is resetting them and
 the mark; both families then answer the same question about the same slice of
@@ -404,6 +405,35 @@ time. `ArmChannelBusy` returns the window it actually armed — the period is
 clamped to 240 ms, below the point where a saturated window cannot be told from
 a wrapped one — and `ChannelBusy::window_us` reports the window each reading
 spans.
+
+**The CCX tick follows the baseband clock.** At 10 MHz it is 8 us and at 5 MHz
+16 us, so the arm divides the period by the same factor (as the vendor's
+`phydm_clm_setting` does) and the window it reports stays in real microseconds;
+the 60000-tick clamp then reaches 480 / 960 ms. A period programmed as if the
+tick were 4 us runs 2× / 4× the dwell and reads back not-elapsed. 200 ms
+windows read 5 ms after they should end, `DEVOURER_RX_BUSY_MS=200`, valid
+windows of those armed:
+
+| sensor | 20 MHz | 10 MHz, unscaled | 10 MHz | 5 MHz, unscaled | 5 MHz |
+|---|---|---|---|---|---|
+| RTL8812EU (Jaguar3), ch 140 | 63/63 | 0/63 | 63/63 | 0/63 | 62/62 |
+| RTL8812BU (Jaguar2), ch 140 | 14/14 | 7/14 | 14/14 | 3/14 | 15/15 |
+| RTL8733BU, ch 6 | 56/56 | 0/56 | 56/56 | refused | refused |
+
+The Jaguar2's partial unscaled counts are the worse failure, not the better
+one: its slower poll read some still-running windows late enough to find them
+finished, and reported each as a 200 ms window when it had run 400 or 800 ms.
+With an RTL8812BU flooding at the sensor's own width the scaled window reads
+72 % at 20 MHz (quiet 7 %) and 82 % at 10 MHz (quiet 0 %) on the 8812EU. At
+5 MHz that pair barely decodes each other (11 frames in 10 s), so the 5 MHz
+window is confirmed to elapse on time but not against a known load. One unit
+per generation. The Jaguar1 dies that re-clock for narrowband (8812A, 8814A)
+take the same scaling from the vendor rule and are **not measured**; the
+8821A is excluded from narrowband and is left unscaled.
+
+The sampled ~2 ms window scales the same way (500 / 250 / 125 ticks), so it
+stays ~2 ms at every width instead of stretching to 4 / 8 ms: `rx.nhm` `dur`
+reads 501 / 251 / 126 on the 8812EU and the 8812BU.
 
 Same bench, 8812AU sensor, `REPS=6 DUTY_ON=50 DUTY_OFF=450
 tests/busy_window_probe.sh`:
@@ -643,9 +673,8 @@ What these numbers do not cover:
   emitter, which the VTX rows above do not show.
 - **Narrowband.** At 10/5 MHz the arm scales the period to the 8/16 us tick,
   and every window is valid (one 8812EU, ch 140, `N=240`: 22/22 and 21/21
-  windows, 30001 and 15001 ticks). The armed CLM window does not scale yet, so
-  in the same runs it never elapses in time and reads `clm_spoil=3`; the
-  comparison is one-sided there.
+  windows, 30001 and 15001 ticks). The armed CLM window scales the same way
+  ("The armed busy window" above).
 
 ## Detecting a tone
 

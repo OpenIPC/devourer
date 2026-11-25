@@ -227,6 +227,19 @@ devourer::DeviceConfig devourer_config_from_env() {
   if (const char *e = env_str("DEVOURER_MT7612U_PHY_TICK"))
     cfg.mt7612u.phy_tick = std::strcmp(e, "0") != 0;
 
+  /* ---- MediaTek MT76x0U ---- */
+  if (const char *e = env_str("DEVOURER_MT76X0U_FW_DIR"))
+    cfg.mt76x0u.firmware_dir = std::string(e);
+  if (const char *e = env_str("DEVOURER_MT76X0U_CAL_TICK"))
+    cfg.mt76x0u.cal_tick = std::strcmp(e, "0") != 0;
+  /* Only an explicit "1"; the backend refuses it on running firmware. */
+  if (const char *e = env_str("DEVOURER_MT76X0U_FORCE_FW"))
+    cfg.mt76x0u.force_fw_upload = std::strcmp(e, "1") == 0;
+  if (const char *e = env_str("DEVOURER_MT76X0U_MONITOR_CONTROL"))
+    cfg.mt76x0u.monitor_control = std::strcmp(e, "0") != 0;
+  if (const char *e = env_str("DEVOURER_MT76X0U_TUNE_TWICE"))
+    cfg.mt76x0u.tune_twice = std::strcmp(e, "0") != 0;
+
   /* ---- tuning ---- */
   /* Defaults ON, so this reads the negation: only an explicit 0 disables it. */
   if (const char *e = env_str("DEVOURER_TEARDOWN_POWER_DOWN"))

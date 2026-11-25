@@ -67,6 +67,13 @@ int main() {
   expect("gen name mt7612u",
          std::string_view(generation_name(ChipGeneration::Mt7612u)) ==
              "mt7612u");
+  expect("gen name mt76x0u",
+         std::string_view(generation_name(ChipGeneration::Mt76x0u)) ==
+             "mt76x0u");
+  /* MT76x0U: 20/40 as ported; 80 is refused by the backend, and nothing
+   * narrower exists (same MT_RATE_BW encoding as MT7612U). */
+  expect("MT76x0U bw = 20/40",
+         bw_mask_for_generation(ChipGeneration::Mt76x0u) == (kBw20 | kBw40));
   expect("gen name unknown",
          std::string_view(generation_name(ChipGeneration::Unknown)) ==
              "unknown");

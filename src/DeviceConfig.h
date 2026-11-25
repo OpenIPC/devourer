@@ -716,6 +716,36 @@ struct DeviceConfig {
      * consumer that opens the device itself; MT7612U_DEV drives the bring-up
      * tool, not devourer. */
   } mt7612u;
+
+  /* ---- MediaTek MT76x0U (DEVOURER_MT76X0U builds) ---------------------- */
+  struct Mt76x0u {
+    /* env: DEVOURER_MT76X0U_FW_DIR — directory holding mt7610e.bin and/or
+     * mt7610u.bin. Unset = search /lib/firmware/mediatek then ./firmware.
+     * The kernel (mt76x0/usb_mcu.c) tries mt7610e.bin first and falls back to
+     * mt7610u.bin; the backend keeps that order. A path for the same reasons
+     * as mt7612u.firmware_dir: linux-firmware licence, zstd on most
+     * distributions. */
+    std::optional<std::string> firmware_dir;
+    /* env: DEVOURER_MT76X0U_CAL_TICK — 0 disables the backend's 1 Hz
+     * calibration tick (the port of mt76x0_phy_calibration_work: RX gain
+     * update and temperature-triggered recalibration). Measurement control
+     * only, as mt7612u.phy_tick is. Default on. */
+    bool cal_tick = true;
+    /* env: DEVOURER_MT76X0U_FORCE_FW — was: 1 re-uploads the firmware even
+     * when it is already running (wifit3's warm path). Now REFUSED with a
+     * warning: on the bench it jammed the chip's RX DMA (src/mt76x0u/fw.cpp).
+     * Kept so existing configs still parse; the running firmware is kept. */
+    bool force_fw_upload = false;
+    /* env: DEVOURER_MT76X0U_MONITOR_CONTROL — 0 drops control frames (ACK,
+     * CTS, block-ack, PS-Poll) at the MAC. Default keeps them, which is what
+     * a mac80211 monitor interface created without flags gets (control +
+     * otherbss) - the usual `iw ... add mon0 type monitor` setup. */
+    bool monitor_control = true;
+    /* env: DEVOURER_MT76X0U_TUNE_TWICE — 0 runs each channel set once. The
+     * default runs it twice, matching the kernel on the wire; wifit3 found a
+     * single pass wedges the next tune on hardware (src/mt76x0u/chan.cpp). */
+    bool tune_twice = true;
+  } mt76x0u;
 };
 
 } // namespace devourer

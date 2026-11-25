@@ -35,6 +35,11 @@
 #if defined(DEVOURER_HAVE_MT7612U)
 #include "mt7612u/Mt7612uRadio.h"
 #endif
+#include "MediatekProbe.h"         /* header-only chip-family router */
+#include "mt76x0u/Mt76x0uUsbIds.h" /* header-only VID:PID table, always compiled */
+#if defined(DEVOURER_HAVE_MT76X0U)
+#include "mt76x0u/Mt76x0uRadio.h"
+#endif
 
 namespace {
 
@@ -206,6 +211,51 @@ WiFiDriver::CreateRadio(libusb_device_handle *dev_handle,
    * this must stay a vid:pid test and must never be widened to "not a Realtek
    * vendor id". Mt7612uUsbIds.h carries the table and the evidence;
    * Mt7612uUsbIdsSelftest.cpp fails if a later id addition breaks it. */
+  /* MediaTek MT76x0U (MT7610U / MT7630U / MT7650U): the same vid:pid gate, for
+   * the same reasons, ahead of the MT7612U one. One id, 7392:b711, is in both
+   * MediaTek tables - the kernel lists it under mt76x0u and mt76x2u and lets
+   * probe() pick on MT_ASIC_VERSION - so for that id (and any later shared one)
+   * the register is read here and the chip family decides. Every other id
+   * routes on the pair alone (Mt76x0uUsbIdsSelftest pins which is which). */
+  bool route_mt76x0u = mt76x0u::is_exclusive_usb_id(vid, pid);
+  if (!route_mt76x0u && mt76x0u::is_usb_id(vid, pid)) {
+    const std::optional<uint32_t> rev =
+        devourer::mediatek::read_asic_version(dev_handle);
+    if (!rev) {
+      _logger->error("MediaTek {:04x}:{:04x}: MT_ASIC_VERSION read failed; "
+                     "cannot tell MT76x0U from MT7612U - refusing",
+                     vid, pid);
+      return nullptr;
+    }
+    const auto fam = devourer::mediatek::family_of(*rev);
+    _logger->info("MediaTek {:04x}:{:04x} is listed for two families; "
+                  "MT_ASIC_VERSION 0x{:08x} says {}",
+                  vid, pid, *rev, devourer::mediatek::family_name(fam));
+    if (fam == devourer::mediatek::Family::Mt76x0) {
+      route_mt76x0u = true;
+    } else if (fam != devourer::mediatek::Family::Mt76x2) {
+      _logger->error("MediaTek {:04x}:{:04x}: MT_ASIC_VERSION 0x{:08x} is "
+                     "neither mt76x0 nor mt76x2 - refusing",
+                     vid, pid, *rev);
+      return nullptr;
+    }
+    /* Mt76x2: fall through to the MT7612U gate below. */
+  }
+  if (route_mt76x0u) {
+#if defined(DEVOURER_HAVE_MT76X0U)
+    _logger->info("Creating Mt76x0uRadio ({:04x}:{:04x})", vid, pid);
+    return std::make_unique<Mt76x0uRadio>(dev_handle, ctx, std::move(usb_lock),
+                                          _logger, cfg,
+                                          mt76x0u::usb_id_has_no_2ghz(vid, pid));
+#else
+    _logger->error("MediaTek MT76x0U ({:04x}:{:04x}) detected but MT76x0U "
+                   "support is not compiled in (DEVOURER_MT76X0U=OFF) — "
+                   "refusing rather than misdetecting it as Realtek",
+                   vid, pid);
+    return nullptr;
+#endif
+  }
+
   if (mt7612u::is_usb_id(vid, pid)) {
 #if defined(DEVOURER_HAVE_MT7612U)
     _logger->info("Creating Mt7612uRadio ({:04x}:{:04x})", vid, pid);

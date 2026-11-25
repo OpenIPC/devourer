@@ -2,6 +2,7 @@
 
 #include "UsbDeviceLock.h"
 #include "kestrel/KestrelUsbIds.h"
+#include "mt76x0u/Mt76x0uUsbIds.h" /* header-only: compiled in every build */
 
 #if defined(__ANDROID__) || defined(_MSC_VER) || defined(__APPLE__)
 #include <libusb.h>
@@ -138,6 +139,26 @@ int claim_interface_then_reset(libusb_device_handle *handle, int iface,
         kestrel::variant_for_usb_id(dd.idVendor, dd.idProduct).has_value()) {
       logger->info("Kestrel adapter: skipping USB reset (power-on owns state "
                    "cleanup; a reset drops running firmware into ROM/ZeroCD)");
+      do_reset = false;
+    }
+  }
+
+  /* MT7610U / MT7630U / MT7650U (ids no other chip shares) never want it
+   * either. The reset rewinds the chip's in-band command ring (EP 8 -> FCE ->
+   * MCU, two slots) to slot 0 while the running firmware's read index stays
+   * where the last session left it; on every other open the first MCU
+   * command, Q_SELECT, lands in the slot the MCU skips, and bring-up then
+   * times out. Bench, 2026-11-19: with the reset, warm bring-ups alternate
+   * fail/ok in lockstep with MT_TX_CPU_FROM_FCE_CPU_DESC_IDX (0x09a8);
+   * without it, every one succeeds. The kernel does not reset at probe. The
+   * ids shared with MT7612U keep the reset (that driver was bench-validated
+   * with it); their first bring-up may need the caller's retry. */
+  if (do_reset) {
+    libusb_device_descriptor dd{};
+    if (libusb_get_device_descriptor(dev, &dd) == 0 &&
+        mt76x0u::is_exclusive_usb_id(dd.idVendor, dd.idProduct)) {
+      logger->info("MT76x0U adapter: skipping USB reset (it desyncs the "
+                   "running firmware's command ring)");
       do_reset = false;
     }
   }

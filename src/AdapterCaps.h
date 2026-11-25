@@ -45,7 +45,11 @@ enum class ChipGeneration : uint8_t {
    * non-Realtek generation. Register width, the vendor-request opcodes and the
    * in-band MCU plane all differ; nothing that switches on this value may
    * assume a Realtek register map. */
-  Mt7612u
+  Mt7612u,
+  /* MediaTek mt76x0 MAC (MT7610U / MT7630U / MT7650U, 1T1R 11ac USB). Same
+   * vendor-request and in-band MCU plane as Mt7612u, different PHY, RF and
+   * firmware; a separate backend (src/mt76x0u). */
+  Mt76x0u
 };
 
 inline const char *generation_name(ChipGeneration g) {
@@ -62,6 +66,8 @@ inline const char *generation_name(ChipGeneration g) {
     return "kestrel";
   case ChipGeneration::Mt7612u:
     return "mt7612u";
+  case ChipGeneration::Mt76x0u:
+    return "mt76x0u";
   default:
     return "unknown";
   }
@@ -97,9 +103,13 @@ inline uint8_t bw_mask_for_generation(ChipGeneration g) {
    * because that trailing arm is the permissive one: without this case a
    * MediaTek adapter would inherit kBw5|kBw10 and advertise two bandwidths the
    * part cannot represent. 160 MHz is likewise absent (docs/mt7612u.md). */
+  /* MT76x0U: 20/40 only. The silicon does 80 MHz too (mt76x0/phy.c handles
+   * NL80211_CHAN_WIDTH_80), but the backend ports 20/40 and refuses 80; like
+   * the RTL8733B arm, the mask is what devourer serves, not the datasheet. */
   return g == ChipGeneration::Rtl8733b ? (kBw10 | kBw20 | kBw40)
          : g == ChipGeneration::Jaguar1  ? ac
          : g == ChipGeneration::Mt7612u  ? ac
+         : g == ChipGeneration::Mt76x0u  ? (kBw20 | kBw40)
          : g == ChipGeneration::Unknown ? 0
                                         : (ac | kBw5 | kBw10);
 }

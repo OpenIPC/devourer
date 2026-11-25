@@ -60,6 +60,15 @@ option(DEVOURER_PCIE          "PCIe transport via vfio-pci (Linux; RTL8821CE, RT
 # gate, which is unconditional: with it OFF, such an adapter is refused rather
 # than misdetected as Realtek.
 option(DEVOURER_MT7612U       "MediaTek MT7612U / MT7662U (2T2R 11ac USB)"      OFF)
+# MediaTek MT7610U / MT7630U / MT7650U (the mt76x0 MAC, 1T1R 11ac USB). Compiles
+# the src/mt76x0u subtree into libdevourer along with Mt76x0uRadio. RECEIVE-ONLY
+# by design (monitor capture): bring-up (cold and warm), 20/40 MHz channel set
+# with calibration, and the RX ring, measured against the kernel's mt76x0u on
+# the same adapter (docs/mt76x0u.md). OFF by default; like DEVOURER_MT7612U it
+# counts as chip support in the "No chip support selected" check below, and the
+# factory's MediaTek id gate stays unconditional: with this OFF an MT76x0U
+# adapter is refused by name.
+option(DEVOURER_MT76X0U       "MediaTek MT7610U / MT7630U / MT7650U (1T1R 11ac USB, receive-only)" OFF)
 
 # Compile-time diagnostics floor (src/logger.h). Calls below the floor —
 # including their argument expressions at DVR_TRACE/DVR_DEBUG sites — compile
@@ -104,12 +113,13 @@ endif()
 if(NOT DEVOURER_JAGUAR1 AND NOT DEVOURER_JAGUAR2 AND NOT DEVOURER_JAGUAR3
    AND NOT DEVOURER_8733B
    AND NOT DEVOURER_KESTREL
-   AND NOT DEVOURER_MT7612U)
+   AND NOT DEVOURER_MT7612U
+   AND NOT DEVOURER_MT76X0U)
     message(FATAL_ERROR
         "No chip support selected. Enable at least one of DEVOURER_JAGUAR1 / "
         "DEVOURER_JAGUAR2_8822B / DEVOURER_JAGUAR2_8821C / DEVOURER_JAGUAR3_8822C "
         "/ DEVOURER_JAGUAR3_8822E / DEVOURER_8733B / DEVOURER_KESTREL_8852B "
-        "/ DEVOURER_KESTREL_8852C.")
+        "/ DEVOURER_KESTREL_8852C / DEVOURER_MT7612U / DEVOURER_MT76X0U.")
 endif()
 if(DEVOURER_PCIE)
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -415,6 +425,38 @@ if(DEVOURER_MT7612U)
     target_include_directories(devourer PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
     target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_MT7612U=1)
+endif()
+
+# --- MediaTek MT76x0U (mt76x0 MAC: MT7610U / MT7630U / MT7650U) ---
+# Same shape as the MT7612U subtree above: self-contained, libusb directly, C
+# ABI in include/mt76x0u/mt76x0u.h. Its internal symbols carry an mt0_ prefix
+# (mt7612u's are mt_) so both subtrees link into one libdevourer.
+# Mt76x0uUsbIds.h and ../MediatekProbe.h are header-only and compiled
+# unconditionally by WiFiDriver.cpp.
+if(DEVOURER_MT76X0U)
+    target_sources(devourer PRIVATE
+        src/mt76x0u/async.cpp
+        src/mt76x0u/chan.cpp
+        src/mt76x0u/eeprom.cpp
+        src/mt76x0u/fw.cpp
+        src/mt76x0u/init.cpp
+        src/mt76x0u/mac.cpp
+        src/mt76x0u/mcu.cpp
+        src/mt76x0u/phy.cpp
+        src/mt76x0u/rx.cpp
+        src/mt76x0u/usb.cpp
+        src/mt76x0u/Mt76x0uRadio.cpp src/mt76x0u/Mt76x0uRadio.h
+        src/mt76x0u/Mt76x0uMapping.h
+        src/mt76x0u/internal.h
+        src/mt76x0u/initvals.h
+        src/mt76x0u/phy.h
+        src/mt76x0u/regs.h
+        src/mt76x0u/Mt76x0uUsbIds.h)  # listed for IDEs; compiled unconditionally
+    target_include_directories(devourer PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u)
+    target_include_directories(devourer PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
+    target_compile_definitions(devourer PUBLIC DEVOURER_HAVE_MT76X0U=1)
 endif()
 
 # --- PCIe transport (vfio-pci; see src/PcieTransport.h) ---
@@ -1002,6 +1044,25 @@ target_link_libraries(Mt7612uUsbIdsSelftest PRIVATE devourer)
 
 add_test(NAME mt7612u_usb_ids COMMAND Mt7612uUsbIdsSelftest)
 
+# The MT76x0U id gate and the MediaTek chip-family router (MediatekProbe.h):
+# no Realtek id claimed, the MT7612U overlap is exactly the flagged id, and
+# family routing matches mt76x02.h. Header-only, runs with the option OFF.
+add_executable(Mt76x0uUsbIdsSelftest
+    tests/mt76x0u_usb_ids_selftest.cpp
+)
+target_link_libraries(Mt76x0uUsbIdsSelftest PRIVATE devourer)
+add_test(NAME mt76x0u_usb_ids COMMAND Mt76x0uUsbIdsSelftest)
+
+# MT76x0U RX descriptor -> devourer translations (Mt76x0uMapping.h).
+# Header-only, so it runs with the option OFF too, like mt7612u_mapping.
+add_executable(Mt76x0uMappingSelftest
+    tests/mt76x0u_mapping_selftest.cpp
+)
+target_link_libraries(Mt76x0uMappingSelftest PRIVATE devourer)
+target_include_directories(Mt76x0uMappingSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
+add_test(NAME mt76x0u_mapping COMMAND Mt76x0uMappingSelftest)
+
 # Headless guard for the MT7612U <-> devourer descriptor translations. Pure
 # lookups, so no hardware and no subtree compile — this cell runs whether or
 # not DEVOURER_MT7612U is on, which is the point: the header it covers is the
@@ -1073,6 +1134,61 @@ if(DEVOURER_MT7612U)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
     add_test(NAME mt7612u_rx_ring COMMAND Mt7612uRxRingSelftest)
     set_tests_properties(mt7612u_rx_ring PROPERTIES TIMEOUT 10)
+endif()
+
+# The MT76x0U RX ring's completion bookkeeping, through the same kind of test
+# hook: raw delivery outside the ring lock, empty/error/cancelled accounting,
+# and a stranded slot that must touch nothing.
+if(DEVOURER_MT76X0U)
+    add_executable(Mt76x0uRxRingSelftest tests/mt76x0u_rx_ring_selftest.cpp)
+    target_link_libraries(Mt76x0uRxRingSelftest PRIVATE devourer
+                          PkgConfig::libusb Threads::Threads)
+    target_include_directories(Mt76x0uRxRingSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
+    add_test(NAME mt76x0u_rx_ring COMMAND Mt76x0uRxRingSelftest)
+    set_tests_properties(mt76x0u_rx_ring PROPERTIES TIMEOUT 10)
+
+    # Firmware image parsing, upload-chunk framing and the MCU register-pair
+    # encoding, pinned to mt76x0/usb_mcu.c and mt76x02_usb_mcu.c. Given a
+    # directory with mt7610e.bin / mt7610u.bin it also checks the real images;
+    # CI has none, so that part reports itself skipped.
+    set(DEVOURER_MT76X0U_TEST_FW_DIR "" CACHE PATH
+        "Directory with mt7610e.bin / mt7610u.bin for mt76x0u_fw (optional)")
+    add_executable(Mt76x0uFwSelftest tests/mt76x0u_fw_selftest.cpp)
+    target_link_libraries(Mt76x0uFwSelftest PRIVATE devourer PkgConfig::libusb)
+    target_include_directories(Mt76x0uFwSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
+    add_test(NAME mt76x0u_fw
+             COMMAND Mt76x0uFwSelftest "${DEVOURER_MT76X0U_TEST_FW_DIR}")
+
+    # EFUSE decode (sign-and-magnitude offsets, band masks, wifit3's LNA-gain
+    # vectors), the RF patch overrides and generated-table spot values.
+    add_executable(Mt76x0uEepromSelftest tests/mt76x0u_eeprom_selftest.cpp)
+    target_link_libraries(Mt76x0uEepromSelftest PRIVATE devourer PkgConfig::libusb)
+    target_include_directories(Mt76x0uEepromSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
+    add_test(NAME mt76x0u_eeprom COMMAND Mt76x0uEepromSelftest)
+
+    # Channel math: every entry of a real hop list, HT40 groups and centers,
+    # refusals, radar flag, monitor filter value.
+    add_executable(Mt76x0uChanSelftest tests/mt76x0u_chan_selftest.cpp)
+    target_link_libraries(Mt76x0uChanSelftest PRIVATE devourer PkgConfig::libusb)
+    target_include_directories(Mt76x0uChanSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
+    add_test(NAME mt76x0u_chan COMMAND Mt76x0uChanSelftest)
+
+    # Transfer-log harness: the library driven against a chip model over a
+    # pipe (tests/mt76x0u_wire_model.py). Not a test itself; the model's
+    # cases below are.
+    add_executable(mt76x0u_wire_harness tests/mt76x0u_wire_harness.cpp)
+    target_link_libraries(mt76x0u_wire_harness PRIVATE devourer PkgConfig::libusb)
+    target_include_directories(mt76x0u_wire_harness PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt76x0u/include)
 endif()
 
 # --- src/sta/: the device-free 802.11 station core -------------------------
@@ -2000,6 +2116,34 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_mt7612u_tables.py --check
     )
     set_tests_properties(mt7612u_initvals_generated PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME mt76x0u_usb_ids_vs_mt76
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/mt76x0u_usb_ids_vs_mt76.py
+    )
+    set_tests_properties(mt76x0u_usb_ids_vs_mt76 PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME mt76x0u_initvals_generated
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/extract_mt76x0u_tables.py --check
+    )
+    set_tests_properties(mt76x0u_initvals_generated PROPERTIES SKIP_RETURN_CODE 77)
+
+    # The library's USB transfer sequence against a scripted MT7610U: cold
+    # boot (upload, Q_SELECT first, chunk placement, per-band calibration),
+    # warm (running firmware kept) and forced (reset + re-upload). Uses a
+    # synthetic firmware image, so it needs nothing from linux-firmware.
+    if(DEVOURER_MT76X0U)
+        add_test(
+            NAME mt76x0u_wire
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/mt76x0u_wire_model.py
+                    $<TARGET_FILE:mt76x0u_wire_harness>
+        )
+        set_tests_properties(mt76x0u_wire PROPERTIES TIMEOUT 120)
+    endif()
 endif()
 
 # --- selftest aggregate ----------------------------------------------------
@@ -2017,3 +2161,9 @@ foreach(_dvr_t IN LISTS _dvr_targets)
         add_dependencies(selftests ${_dvr_t})
     endif()
 endforeach()
+# Not a selftest itself but the device side of one: the mt76x0u_wire test runs
+# tests/mt76x0u_wire_model.py against this binary, so the aggregate must build
+# it or that registered test fails on a selftests-only build (the mingw job).
+if(TARGET mt76x0u_wire_harness)
+    add_dependencies(selftests mt76x0u_wire_harness)
+endif()

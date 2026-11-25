@@ -114,7 +114,8 @@ Bandwidth cells are devourer's measured on-air TX throughput (Mbps, HT MCS7,
 | **RTL8852BE** (11ax, PCIe)    | 2T2R + BT         | —             | —             | —                | —          | LB-LINK BL-M8852BP4 M.2 module (`10ec:b852`); not benchmarked |
 | **RTL8852CE** (11ax, PCIe)    | 2T2R + BT         | —             | —             | —                | —          | M.2 2230 module (`10ec:c852`); rides the 8852C code path over vfio-pci. Monitor RX + TX injection on-air validated on 5 and 6 GHz against a USB 8852C witness ([cells](tests/pcie_8852ce_onair.sh)); not benchmarked |
 | **RTL8852CU** (11ax)          | 2T2R + BT         | —             | —             | —                | —          | "8852" branding of the same 8852C die; rides the 8832CU code path. Not benchmarked. 5/10 and 160 MHz capable; HE ER SU + DCM extended range |
-| **MT7612U** (MediaTek)        | 2T2R              | ‖             | ‖             | —                | —          | Alfa AWUS036ACM / Aukey USBAC1200 (`0e8d:7612`) and 15 OEM ids; the one non-Realtek backend, opt-in with `-DDEVOURER_MT7612U=ON`. 20/40/80 MHz; no 5/10 MHz, no fast retune. [Measured record](docs/mt7612u.md) |
+| **MT7612U** (MediaTek)        | 2T2R              | ‖             | ‖             | —                | —          | Alfa AWUS036ACM / Aukey USBAC1200 (`0e8d:7612`) and 15 OEM ids; MediaTek, opt-in with `-DDEVOURER_MT7612U=ON`. 20/40/80 MHz; no 5/10 MHz, no fast retune. [Measured record](docs/mt7612u.md) |
+| **MT7610U** (MediaTek)        | 1T1R              | RX only       | RX only       | RX only          | —                | `0e8d:7610` (MT7630U/MT7650U ids routed, untested); receive-only monitor backend, opt-in with `-DDEVOURER_MT76X0U=ON`. 20/40 MHz; no 80 MHz, no 5/10 MHz, no fast retune; VHT RX not yet demonstrated. [Measured record](docs/mt76x0u.md) |
 
 `†` = works on-air but the reading varies run-to-run (bracketed = best clean
 reading).
@@ -152,7 +153,7 @@ reports and the MAC carrier-sense gates. It intentionally does not advertise
 VHT, STBC, RX-LDPC (measured absent) or 5 MHz; see
 [the validation record](docs/rtl8733b.md) for the tested and deferred matrix.
 
-The **MT7612U** backend (`src/mt7612u/`) is the one non-Realtek family, behind
+The **MT7612U** backend (`src/mt7612u/`) is a non-Realtek family, behind
 the same `IRadio` contract and sharing none of the Realtek HAL — this is 32-bit
 registers over EP0 plus an in-band MCU on EP8/EP5, with firmware uploaded at
 bring-up. It is OFF by default; build it with `-DDEVOURER_MT7612U=ON`, and note
@@ -166,6 +167,18 @@ MHz tuning all work; there is no fast retune (≈50 ms fast / ≈530 ms full), n
 `SetTxMode` is refused — the C library has no session-default rate, so the rate
 goes in each frame's radiotap header instead, where it always wins. [Every
 number and its counterpart](docs/mt7612u.md).
+
+The **MT7610U** backend (`src/mt76x0u/`, `-DDEVOURER_MT76X0U=ON`) is the second
+MediaTek family — the mt76x0 MAC, 1T1R — and is **receive-only by design**: a
+monitor-capture backend with no TX path. Like the MT7612U its firmware
+(`mt7610e.bin`/`mt7610u.bin`) is found at runtime
+(`DeviceConfig.mt76x0u.firmware_dir`). Monitor RX at 20/40 MHz on 2.4/5 GHz is
+measured against the kernel `mt76x0u` on the same adapter (beacon ratio,
+RSSI within a dB, a 24 h soak, unplug/replug), natively and over WSL2 +
+usbipd; a full channel set costs ~105 ms (two passes, the default) and there
+is no fast retune. It cannot decode 2-stream or 802.11ax frames with any
+driver, and VHT reception is not yet demonstrated. [The measured
+record](docs/mt76x0u.md).
 
 > Heads up — some Realtek sticks ship in "ZeroCD" mode and first enumerate as
 > a USB flash drive holding a Windows installer (`0bda:1a2b` is the canonical
